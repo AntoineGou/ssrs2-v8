@@ -70,7 +70,8 @@ if [[ "$os" == linux ]]; then
 fi
 echo "Building V8 ($cpu)"
 gn gen "out/$cpu/Release" --args="fatal_linker_warnings=false is_cfi=false is_component_build=false is_debug=false target_cpu=\"$cpu\" use_clang_modules=false use_custom_libcxx=false use_thin_lto=false v8_embedder_string=\"-ClearScript\" v8_enable_fuzztest=false v8_enable_pointer_compression=false v8_enable_31bit_smis_on_64bit_arch=false v8_enable_temporal_support=false v8_monolithic=true v8_use_external_startup_data=false v8_target_cpu=\"$cpu\" v8_disallow_js_in_api_interrupts_is_checked=false" > gn.log 2>&1 || { cat gn.log; exit 1; }
-ninja -C "out/$cpu/Release" obj/libv8_monolith.a > build.log 2>&1 || { tail -60 build.log; exit 1; }
+# (-k 0: every file that fails, not the first few, while V8 15.6 is ported to Linux's C++ library)
+ninja -k 0 -C "out/$cpu/Release" obj/libv8_monolith.a > build.log 2>&1 || { grep -B2 -A6 "error:" build.log | tail -150; exit 1; }
 # (the library builds V8's ICU data into itself from here)
 cp "out/$cpu/Release/icudtl.dat" "$root/V8/icudtl.dat"
 

@@ -44,10 +44,10 @@ index 3fb7d2964ab..4def4f704cf 100644
    cppgc_enable_young_generation = false
 diff --git a/include/ClearScript/polyfill.h b/include/ClearScript/polyfill.h
 new file mode 100644
-index 00000000000..27e0e4a81e9
+index 00000000000..318e2894903
 --- /dev/null
 +++ b/include/ClearScript/polyfill.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,63 @@
 +#ifndef INCLUDE_CLEARSCRIPT_POLYFILL_H_
 +#define INCLUDE_CLEARSCRIPT_POLYFILL_H_
 +
@@ -73,6 +73,13 @@ index 00000000000..27e0e4a81e9
 +  constexpr unique_ptr<T> make_unique_for_overwrite(const size_t _Size) {
 +    return unique_ptr<T>(new remove_extent_t<T>[_Size]);
 +  }
++#endif
++
++#ifndef __cpp_lib_hardware_interference_size
++  // hardware_destructive_interference_size (libstdc++ defines it only for GCC, from its __GCC_DESTRUCTIVE_SIZE; 64 is
++  // libc++'s value where the compiler gives none)
++  inline constexpr size_t hardware_destructive_interference_size = 64;
++  inline constexpr size_t hardware_constructive_interference_size = 64;
 +#endif
 +
 +#ifndef __cpp_lib_format
@@ -163,10 +170,10 @@ index 5c20dc45827..8cef0510d85 100644
  
  class Array;
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index a352b5f0164..84346da4818 100644
+index a352b5f0164..8b1a2c0ea0b 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1642,6 +1644,8 @@ class V8_EXPORT Isolate {
+@@ -1642,6 +1642,8 @@ class V8_EXPORT Isolate {
     */
    void SetStackLimit(uintptr_t stack_limit);
  
@@ -397,7 +404,7 @@ index 80d6a5cfec1..04b8fbfc75f 100644
  namespace bigint {
  
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 200a57e7574..dae40424e2a 100644
+index 200a57e7574..42a8808e698 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
 @@ -2604,6 +2604,10 @@ TNode<Uint32T> CodeStubAssembler::LoadMapBitField3(TNode<Map> map) {
@@ -411,7 +418,7 @@ index 200a57e7574..dae40424e2a 100644
  TNode<Uint16T> CodeStubAssembler::LoadMapInstanceType(TNode<Map> map) {
    return LoadObjectField<Uint16T>(map, offsetof(Map, instance_type_));
  }
-@@ -18541,6 +18639,11 @@ TNode<String> CodeStubAssembler::Typeof(
+@@ -18541,6 +18545,11 @@ TNode<String> CodeStubAssembler::Typeof(
  
    GotoIf(InstanceTypeEqual(instance_type, ODDBALL_TYPE), &if_oddball);
  
@@ -424,7 +431,7 @@ index 200a57e7574..dae40424e2a 100644
        Word32And(LoadMapBitField(map),
                  Int32Constant(Map::Bits1::IsCallableBit::kMask |
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index 004d38e895c..a27bdcb38be 100644
+index 004d38e895c..6ea86cca8e1 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
 @@ -1431,6 +1431,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
@@ -617,7 +624,7 @@ index 7a4e5c3e0bf..93328e3191a 100644
    set_typed_array_species_protector(*factory->NewProtector());
  
 diff --git a/src/init/icu_util.cc b/src/init/icu_util.cc
-index f210b157032..1440e5e7f59 100644
+index f210b157032..b4327d37057 100644
 --- a/src/init/icu_util.cc
 +++ b/src/init/icu_util.cc
 @@ -11,6 +11,7 @@
@@ -724,7 +731,7 @@ index 0e6e9611c36..3fc86e14eb1 100644
      IdleTaskSupport idle_task_support,
      InProcessStackDumping in_process_stack_dumping,
 diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
-index 69e7d3101a5..a78b1e523f8 100644
+index 69e7d3101a5..4a6965846d2 100644
 --- a/src/objects/js-objects.cc
 +++ b/src/objects/js-objects.cc
 @@ -5524,6 +5524,14 @@ void JSObject::SetImmutableProto(Isolate* isolate,
@@ -743,7 +750,7 @@ index 69e7d3101a5..a78b1e523f8 100644
                                          DirectHandle<JSObject> object,
                                          JavaScriptArguments* args,
 diff --git a/src/objects/js-objects.h b/src/objects/js-objects.h
-index 558c0723146..3af5792523e 100644
+index 558c0723146..c663dc5be1e 100644
 --- a/src/objects/js-objects.h
 +++ b/src/objects/js-objects.h
 @@ -869,6 +869,9 @@ V8_OBJECT class JSObject : public JSReceiver {
