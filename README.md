@@ -25,11 +25,10 @@ V8, in order (`patches/v8`): `0001-clearscript-7.5.1.1-port.patch`, ClearScript 
 - Plain decimals (`"-123.45"`) are made numbers without the runtime.
 - TurboFan folds `Date.UTC` of constants.
 
-The library, `patches/clearscript-7.5.1.1.patch`:
-
-- ClearScript 7.5.1.1's native side ported to V8 15.6's API.
-- V8 starts with no full collection below 768 MB of old space, and inline caches polymorphic up to 16 maps.
-- V8 15.6's ICU data is built into the library (ClearScript's ICU data package holds V8 14.7's).
+The library, in order (`patches/clearscript`): `0001-v8-15.6-port.patch`, ClearScript 7.5.1.1's native side ported to
+V8 15.6's API, with V8 15.6's ICU data built in (ClearScript's ICU data package holds V8 14.7's); then
+`0002-ssrs2.patch`: V8 starts with no full collection below 768 MB of old space and inline caches polymorphic up to 16
+maps, and `SSRS2_V8_FLAGS` adds flags for experiments.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 tasks from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
@@ -41,7 +40,8 @@ byte for byte.
 The patches apply to a pristine V8 tag, ClearScript's first and SSRS2's on top, each with a three-way merge: a V8 patch
 release (15.6.75.x) usually takes them as they are. For another V8 version, apply the series to the old tag as commits,
 rebase them onto the new tag (conflicts come one patch at a time), and export each commit back to its file. When
-ClearScript publishes its own changes for that V8, its patch replaces `0001` and only `0002` is ported. `build.sh` and
+ClearScript publishes its own changes for that V8, they replace both `0001` patches and only the `0002` ones are
+ported. `build.sh` and
 `build.ps1` take the revision from `v8_revision`.
 
 ## Platforms

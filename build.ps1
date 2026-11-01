@@ -1,5 +1,5 @@
 # SSRS2's V8 for ClearScript on Windows: ClearScript's native library (ClearScriptV8.win-<cpu>.dll) built from
-# ClearScript 7.5.1.1's sources with patches/clearscript-7.5.1.1.patch, around V8 15.6.75.33 with
+# ClearScript 7.5.1.1's sources with patches\clearscript\*.patch, around V8 15.6.75.33 with
 # patches/v8\*.patch (README.md says what they change).
 #
 #   ./build.ps1 <work folder> [cpu]     cpu: x64 (the default), x86 or arm64, all built on an x64 host
@@ -46,10 +46,14 @@ if (-not (Test-Path ClearScript)) { Invoke-Native 'Cloning ClearScript' { git cl
 Set-Location ClearScript
 $root = (Get-Location).Path
 Invoke-Native 'Checking ClearScript out' { git checkout -q $clearScriptTag }
-# (the patch once: a work folder built before has it already)
-$patch = Join-Path $here "patches\clearscript-$clearScriptTag.patch"
-git apply --reverse --check $patch 2>$null
-if ($LASTEXITCODE -ne 0) { Invoke-Native 'Patching ClearScript' { git apply $patch } }
+# (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed)
+$csPatches = Get-ChildItem (Join-Path $here 'patches\clearscript') -Filter *.patch | Sort-Object Name
+$csPatched = "$clearScriptTag $((Get-Content -Raw $csPatches.FullName) -join '' | git hash-object --stdin)"
+if (-not (Test-Path .ssrs2-patched) -or (Get-Content .ssrs2-patched) -ne $csPatched) {
+    Invoke-Native 'Resetting ClearScript' { git checkout -q HEAD -- ClearScriptV8 }
+    foreach ($p in $csPatches) { Invoke-Native "Applying $($p.Name)" { git apply --3way $p.FullName } }
+    Set-Content .ssrs2-patched $csPatched
+}
 
 # V8: ClearScript's V8Update.cmd steps for another revision, with our patch and arguments
 New-Item -ItemType Directory -Force V8\build | Out-Null

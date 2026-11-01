@@ -1,0 +1,45 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index 0f44deb9..7da8ce62 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under the MIT license.
+ 
+ #include "ClearScriptV8Native.h"
++#include <cstdlib>
+ 
+ //-----------------------------------------------------------------------------
+ // V8Platform
+@@ -65,6 +66,16 @@ void V8Platform::EnsureInitialized()
+         auto defaultStackSize = V8_SPLIT_PROXY_MANAGED_INVOKE_NOTHROW(uint32_t, GetDefaultStackSize);
+ 
+         std::vector<std::string> flagStrings;
++        // SSRS2 (tools/V8 in SSRS2's repository): first, so that a flag V8 does not know later in the list cannot drop it
++        // (V8 ignores the flags after one it does not know). No full collection below 768 MB of old space (the most V8
++        // takes: half of the engine's 1,536 MB), so that a report's scripts building their data (a 300-chart portfolio's
++        // points, 570 MB) are not stopped each time the heap grows; only the flag does it (a constraint's initial size is
++        // recomputed after the first collection). The engine collects a runtime past 64 MB after its document.
++        flagStrings.push_back("--initial-old-space-size=768");
++        // Inline caches polymorphic up to 16 maps before they go megamorphic (V8's default 4): a library's base class
++        // defining its fields on every subclass's objects (Chart.js's Element: points, lines, scales, the legend) went
++        // through the megamorphic stub cache for every point; its optimized code now checks the maps it has seen.
++        flagStrings.push_back("--max-valid-polymorphic-map-count=16");
+         flagStrings.push_back("--no_memory_pool_share_memory_on_teardown");
+ 
+     #ifdef CLEARSCRIPT_TOP_LEVEL_AWAIT_CONTROL
+@@ -102,6 +113,15 @@ void V8Platform::EnsureInitialized()
+             flagStrings.push_back("--stack_size=" + std::to_string(defaultStackSize));
+         }
+ 
++        // SSRS2: the engine's own V8 flags for experiments, after the others (a flag given twice: the last wins).
++        if (const char* pSsrs2Flags = std::getenv("SSRS2_V8_FLAGS"))
++        {
++            if (*pSsrs2Flags != '\0')
++            {
++                flagStrings.push_back(pSsrs2Flags);
++            }
++        }
++
+         if (!flagStrings.empty())
+         {
+             std::string flagsString(flagStrings[0]);

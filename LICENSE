@@ -20,5 +20,5 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-The patches are under the licences of what they change: patches/v8-15.6.75.33.patch
-under V8's (BSD-3-Clause), patches/clearscript-7.5.1.1.patch under ClearScript's (MIT).
+The patches are under the licences of what they change: patches/v8 under V8's
+(BSD-3-Clause), patches/clearscript under ClearScript's (MIT).

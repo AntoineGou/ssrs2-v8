@@ -1,6 +1,6 @@
 #!/bin/bash
 # SSRS2's V8 for ClearScript on macOS and Linux: ClearScript's native library (ClearScriptV8.<rid>) built from
-# ClearScript 7.5.1.1's sources with patches/clearscript-7.5.1.1.patch, around V8 15.6.75.33 with
+# ClearScript 7.5.1.1's sources with patches/clearscript/*.patch, around V8 15.6.75.33 with
 # patches/v8/*.patch (README.md says what they change).
 #
 #   ./build.sh <work folder> [cpu]     cpu: arm64, x64, or arm (Linux only); the host's by default
@@ -30,9 +30,13 @@ if [[ ! -d ClearScript ]]; then git clone -q https://github.com/microsoft/ClearS
 cd ClearScript
 root="$PWD"
 git checkout -q "$clearscript_tag"
-# (the patch once: a work folder built before has it already)
-git apply --reverse --check "$here/patches/clearscript-$clearscript_tag.patch" 2>/dev/null \
-    || git apply "$here/patches/clearscript-$clearscript_tag.patch"
+# (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed)
+cs_patched="$clearscript_tag $(cat "$here"/patches/clearscript/*.patch | git hash-object --stdin)"
+if [[ "$(cat .ssrs2-patched 2>/dev/null || true)" != "$cs_patched" ]]; then
+    git checkout -q HEAD -- ClearScriptV8
+    for p in "$here"/patches/clearscript/*.patch; do git apply --3way "$p" || exit 1; done
+    echo "$cs_patched" > .ssrs2-patched
+fi
 
 # V8: ClearScript's V8Update.sh steps for another revision, with our patch and arguments
 mkdir -p V8/build
