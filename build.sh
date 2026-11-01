@@ -1,7 +1,7 @@
 #!/bin/bash
 # SSRS2's V8 for ClearScript on macOS and Linux: ClearScript's native library (ClearScriptV8.<rid>) built from
 # ClearScript 7.5.1.1's sources with patches/clearscript-7.5.1.1.patch, around V8 15.6.75.33 with
-# patches/v8-15.6.75.33.patch (README.md says what they change).
+# patches/v8/*.patch (README.md says what they change).
 #
 #   ./build.sh <work folder> [cpu]     cpu: arm64, x64, or arm (Linux only); the host's by default
 #
@@ -40,12 +40,13 @@ cd V8/build
 if [[ ! -d depot_tools ]]; then git clone -q https://chromium.googlesource.com/chromium/tools/depot_tools.git; fi
 export PATH="$PWD/depot_tools:$PATH"
 if [[ ! -f .gclient ]]; then gclient config https://chromium.googlesource.com/v8/v8 > config.log 2>&1; fi
-patched="$v8_revision $(git hash-object "$here/patches/v8-$v8_revision.patch")"
+patched="$v8_revision $(cat "$here"/patches/v8/*.patch | git hash-object --stdin)"
 if [[ "$(cat v8/.ssrs2-patched 2>/dev/null || true)" != "$patched" ]]; then
     echo "Downloading V8 $v8_revision and its dependencies"
     gclient sync -r "$v8_revision" -D --force --reset --no-history > sync.log 2>&1 || { tail -40 sync.log; exit 1; }
+    # (the series in order: ClearScript's changes ported to this V8, then SSRS2's)
     (cd v8 && git config user.name ClearScript && git config user.email clearscript@clearfoundry.net \
-        && git apply --3way --index "$here/patches/v8-$v8_revision.patch")
+        && for p in "$here"/patches/v8/*.patch; do echo "Applying $(basename "$p")"; git apply --3way --index "$p" || exit 1; done)
     # (not ClearScript's BuildPatch.txt, which drops V8's sysroot on Linux for the build machine's own headers: we keep
     # Debian 11's, for the libraries' glibc and the C++ library ClearScript's Linux polyfills are written for)
     (cd v8/third_party/icu && git apply --index --ignore-whitespace "$root/V8/ICUPatch.txt")

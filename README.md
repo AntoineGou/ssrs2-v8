@@ -11,7 +11,8 @@ same output byte for byte.
 
 ## What it changes
 
-V8, `patches/v8-15.6.75.33.patch`:
+V8, in order (`patches/v8`): `0001-clearscript-7.5.1.1-port.patch`, ClearScript 7.5.1.1's own V8 changes ported to
+15.6 (its host objects, interrupts, ICU data from memory...), then `0002-ssrs2.patch`, SSRS2's:
 
 - Local time is UTC once the embedder gives V8 its ICU data (a server prints in UTC), and a date's fields are worked out
   without a time zone.
@@ -34,6 +35,14 @@ V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is
 tasks from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
 checks a set of them against Node's on every platform, and SSRS2's output matched the one with ClearScript's own library
 byte for byte.
+
+## Updating V8
+
+The patches apply to a pristine V8 tag, ClearScript's first and SSRS2's on top, each with a three-way merge: a V8 patch
+release (15.6.75.x) usually takes them as they are. For another V8 version, apply the series to the old tag as commits,
+rebase them onto the new tag (conflicts come one patch at a time), and export each commit back to its file. When
+ClearScript publishes its own changes for that V8, its patch replaces `0001` and only `0002` is ported. `build.sh` and
+`build.ps1` take the revision from `v8_revision`.
 
 ## Platforms
 

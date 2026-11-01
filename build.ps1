@@ -1,6 +1,6 @@
 # SSRS2's V8 for ClearScript on Windows: ClearScript's native library (ClearScriptV8.win-<cpu>.dll) built from
 # ClearScript 7.5.1.1's sources with patches/clearscript-7.5.1.1.patch, around V8 15.6.75.33 with
-# patches/v8-15.6.75.33.patch (README.md says what they change).
+# patches/v8\*.patch (README.md says what they change).
 #
 #   ./build.ps1 <work folder> [cpu]     cpu: x64 (the default), x86 or arm64, all built on an x64 host
 #
@@ -60,8 +60,8 @@ if (-not (Test-Path depot_tools)) {
 }
 $env:PATH = "$((Get-Location).Path)\depot_tools;$env:PATH"
 if (-not (Test-Path .gclient)) { Invoke-Native 'gclient config' { gclient config https://chromium.googlesource.com/v8/v8 } 'config.log' }
-$v8Patch = Join-Path $here "patches\v8-$v8Revision.patch"
-$patched = "$v8Revision $(git hash-object $v8Patch)"
+$v8Patches = Get-ChildItem (Join-Path $here 'patches\v8') -Filter *.patch | Sort-Object Name
+$patched = "$v8Revision $((Get-Content -Raw $v8Patches.FullName) -join '' | git hash-object --stdin)"
 if (-not (Test-Path v8\.ssrs2-patched) -or (Get-Content v8\.ssrs2-patched) -ne $patched) {
     Write-Host "Downloading V8 $v8Revision and its dependencies"
     # (three tries: V8's download hooks run at once, and on Windows depot_tools' lock on gsutil's folder is a file opened
@@ -75,7 +75,8 @@ if (-not (Test-Path v8\.ssrs2-patched) -or (Get-Content v8\.ssrs2-patched) -ne $
     Push-Location v8
     git config user.name ClearScript
     git config user.email clearscript@clearfoundry.net
-    Invoke-Native 'Patching V8' { git apply --3way --index $v8Patch }
+    # (the series in order: ClearScript's changes ported to this V8, then SSRS2's)
+    foreach ($p in $v8Patches) { Write-Host "Applying $($p.Name)"; Invoke-Native "Applying $($p.Name)" { git apply --3way --index $p.FullName } }
     # (not ClearScript's BuildPatch.txt: it only changes Linux builds)
     Set-Location third_party\icu
     Invoke-Native 'Patching ICU' { git apply --index --ignore-whitespace "$root\V8\ICUPatch.txt" }
