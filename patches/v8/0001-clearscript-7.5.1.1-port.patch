@@ -404,45 +404,29 @@ index 80d6a5cfec1..04b8fbfc75f 100644
  namespace bigint {
  
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 200a57e7574..42a8808e698 100644
+index 200a57e7574..1aabfb459aa 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
-@@ -2604,6 +2604,10 @@ TNode<Uint32T> CodeStubAssembler::LoadMapBitField3(TNode<Map> map) {
+@@ -2604,6 +2604,7 @@ TNode<Uint32T> CodeStubAssembler::LoadMapBitField3(TNode<Map> map) {
    return LoadObjectField<Uint32T>(map, offsetof(Map, bit_field3_));
  }
  
-+TNode<Uint32T> CodeStubAssembler::LoadMapHostBitField(TNode<Map> map) {
-+  return LoadObjectField<Uint32T>(map, offsetof(Map, host_bit_field_));
-+}
 +
  TNode<Uint16T> CodeStubAssembler::LoadMapInstanceType(TNode<Map> map) {
    return LoadObjectField<Uint16T>(map, offsetof(Map, instance_type_));
  }
-@@ -18541,6 +18545,11 @@ TNode<String> CodeStubAssembler::Typeof(
+@@ -18541,6 +18542,11 @@ TNode<String> CodeStubAssembler::Typeof(
  
    GotoIf(InstanceTypeEqual(instance_type, ODDBALL_TYPE), &if_oddball);
  
 +  Label resume_default(this);
 +  GotoIfNot(Word32And(LoadMapBitField(map), Int32Constant(Map::Bits1::HasNamedInterceptorBit::kMask)), &resume_default);
-+  Branch(Word32And(LoadMapHostBitField(map), Int32Constant(Map::HostBits::IsHostDelegateBit::kMask)), &return_function, &return_object);
++  Branch(IsSetWord32<Map::Bits1::IsHostDelegateBit>(LoadMapBitField(map)), &return_function, &return_object);
 +  BIND(&resume_default);
 +
    TNode<Int32T> callable_or_undetectable_mask =
        Word32And(LoadMapBitField(map),
                  Int32Constant(Map::Bits1::IsCallableBit::kMask |
-diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index 004d38e895c..6ea86cca8e1 100644
---- a/src/codegen/code-stub-assembler.h
-+++ b/src/codegen/code-stub-assembler.h
-@@ -1431,6 +1431,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
-   TNode<Int32T> LoadMapBitField2(TNode<Map> map);
-   // Load bit field 3 of a map.
-   TNode<Uint32T> LoadMapBitField3(TNode<Map> map);
-+  // Load host bit field of a map.
-+  TNode<Uint32T> LoadMapHostBitField(TNode<Map> map);
-   // Load the instance type of a map.
-   TNode<Uint16T> LoadMapInstanceType(TNode<Map> map);
-   // Load the ElementsKind of a map.
 diff --git a/src/diagnostics/unwinding-info-win64.cc b/src/diagnostics/unwinding-info-win64.cc
 index daf312db7e5..d80914b5c72 100644
 --- a/src/diagnostics/unwinding-info-win64.cc
@@ -591,31 +575,11 @@ index 33e26d1ef8f..90fedbf953a 100644
  }
  
  template <AccessMode mode, HeapObjectHeader::EncodedHalf part,
-diff --git a/src/heap/factory.cc b/src/heap/factory.cc
-index d2a5f284e01..4de7231aa9d 100644
---- a/src/heap/factory.cc
-+++ b/src/heap/factory.cc
-@@ -2771,6 +2771,7 @@ Tagged<Map> Factory::InitializeMap(Tagged<Map> map, InstanceType type,
-       Map::Bits3::ConstructionCounterBits::encode(Map::kNoSlackTracking) |
-       Map::Bits3::IsExtensibleBit::encode(true);
-   map->set_bit_field3(bit_field3);
-+  map->set_host_bit_field(0);
-   map->set_instance_type(type);
-   if (during_bootstrap) {
-     map->init_prototype_and_constructor_or_back_pointer_during_bootstrap(roots);
 diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
-index 7a4e5c3e0bf..93328e3191a 100644
+index 7a4e5c3e0bf..b946e2e1719 100644
 --- a/src/heap/setup-heap-internal.cc
 +++ b/src/heap/setup-heap-internal.cc
-@@ -296,6 +296,7 @@ void InitializePartialMap(Isolate* isolate, Tagged<Map> map,
-       Map::Bits3::OwnsDescriptorsBit::encode(true) |
-       Map::Bits3::ConstructionCounterBits::encode(Map::kNoSlackTracking);
-   map->set_bit_field3(bit_field3);
-+  map->set_host_bit_field(0);
-   DCHECK(!map->is_in_retained_map_list());
-   map->clear_padding();
-   map->set_elements_kind(TERMINAL_FAST_ELEMENTS_KIND);
-@@ -1547,6 +1548,7 @@ void Heap::CreateInitialMutableObjects() {
+@@ -1547,6 +1547,7 @@ void Heap::CreateInitialMutableObjects() {
    set_string_iterator_protector(*factory->NewProtector());
    set_string_length_protector(*factory->NewProtector());
    set_string_wrapper_to_primitive_protector(*factory->NewProtector());
@@ -764,54 +728,32 @@ index 558c0723146..c663dc5be1e 100644
    // the caller to initialize object header. Fill the pre-allocated fields with
    // undefined_value and the rest with filler_map.
 diff --git a/src/objects/map-inl.h b/src/objects/map-inl.h
-index 63cfe9edd10..a8ec6c80f10 100644
+index 63cfe9edd10..50c44702baf 100644
 --- a/src/objects/map-inl.h
 +++ b/src/objects/map-inl.h
 @@ -229,6 +229,9 @@ BIT_FIELD_ACCESSORS(Map, bit_field3, may_have_interesting_properties,
  BIT_FIELD_ACCESSORS(Map, relaxed_bit_field3, construction_counter,
                      Map::Bits3::ConstructionCounterBits)
  
-+// |host_bit_field| fields (ClearScript).
-+BIT_FIELD_ACCESSORS(Map, host_bit_field, is_host_delegate, Map::HostBits::IsHostDelegateBit)
++// is_host_delegate, in |bit_field| (ClearScript).
++BIT_FIELD_ACCESSORS(Map, relaxed_bit_field, is_host_delegate, Map::Bits1::IsHostDelegateBit)
 +
  bool IsMetaMap(Tagged<Map> map) {
    return InstanceTypeChecker::IsMap(map->instance_type());
  }
-@@ -677,6 +680,9 @@ uint8_t Map::bit_field2() const { return bit_field2_; }
+@@ -677,6 +680,7 @@ uint8_t Map::bit_field2() const { return bit_field2_; }
  
  void Map::set_bit_field2(uint8_t value) { bit_field2_ = value; }
  
-+uint32_t Map::host_bit_field() const { return host_bit_field_; }
-+void Map::set_host_bit_field(uint32_t value) { host_bit_field_ = value; }
 +
  uint32_t Map::bit_field3() const {
    // TODO(solanes, v8:7790, v8:11353): Make this and the setter non-atomic
    // when TSAN sees the map's store synchronization.
-@@ -953,9 +959,8 @@ void Map::InitializeDescriptors(Tagged<DescriptorArray> descriptors) {
- }
- 
- void Map::clear_padding() {
--#if TAGGED_SIZE_8_BYTES
--  optional_padding_ = 0;
--#endif
-+  // ClearScript: what was padding is host_bit_field_, set where a map is made or
-+  // copied (Factory::InitializeMap, InitializePartialMap, Map::RawCopy), never cleared.
- }
- 
- void Map::AppendDescriptor(Isolate* isolate, Descriptor* desc) {
 diff --git a/src/objects/map.cc b/src/objects/map.cc
-index cdc41455019..07fb3dc6e55 100644
+index cdc41455019..d74c9613422 100644
 --- a/src/objects/map.cc
 +++ b/src/objects/map.cc
-@@ -1332,6 +1332,7 @@ Handle<Map> Map::RawCopy(Isolate* isolate, DirectHandle<Map> src_handle,
-     }
-     // Same as bit_field comment above.
-     raw->set_bit_field3(new_bit_field3);
-+    raw->set_host_bit_field(src->host_bit_field());
-     if (v8_flags.proto_assign_seq_lazy_func_opt) {
-       if (Tagged<PrototypeSharedClosureInfo> infos;
-           src_handle->TryGetPrototypeSharedClosureInfo(&infos)) {
-@@ -1506,6 +1507,13 @@ DirectHandle<Map> Map::TransitionToImmutableProto(Isolate* isolate,
+@@ -1506,6 +1506,13 @@ DirectHandle<Map> Map::TransitionToImmutableProto(Isolate* isolate,
    return new_map;
  }
  
@@ -826,30 +768,19 @@ index cdc41455019..07fb3dc6e55 100644
  void EnsureInitialMap(Isolate* isolate, DirectHandle<Map> map) {
  #ifdef DEBUG
 diff --git a/src/objects/map.h b/src/objects/map.h
-index a33c7f01ac1..802eec3720d 100644
+index a33c7f01ac1..601e160e58e 100644
 --- a/src/objects/map.h
 +++ b/src/objects/map.h
-@@ -367,6 +367,7 @@ V8_OBJECT class Map : public HeapObject {
-   // performs the read/write non-atomically if it's off. This is done to have
-   // wider TSAN coverage on the cases where it's possible.
-   DECL_PRIMITIVE_ACCESSORS(bit_field3, uint32_t)
-+  DECL_PRIMITIVE_ACCESSORS(host_bit_field, uint32_t)
+@@ -346,6 +346,8 @@ V8_OBJECT class Map : public HeapObject {
+     using IsAccessCheckNeededBit = IsUndetectableBit::Next<bool, 1>;
+     using IsConstructorBit = IsAccessCheckNeededBit::Next<bool, 1>;
+     using IsExtendedMapBit = IsConstructorBit::Next<bool, 1>;
++    // ClearScript: host delegates, in the byte's spare bit (map.tq's MapBitFields1).
++    using IsHostDelegateBit = IsExtendedMapBit::Next<bool, 1>;
+   };
  
-   DECL_PRIMITIVE_ACCESSORS(relaxed_bit_field3, uint32_t)
-   DECL_PRIMITIVE_ACCESSORS(release_acquire_bit_field3, uint32_t)
-@@ -406,6 +407,11 @@ V8_OBJECT class Map : public HeapObject {
-   static_assert(kSlackTrackingCounterStart <=
-                 Bits3::ConstructionCounterBits::kMax);
- 
-+  // Bit positions for |host_bits|.
-+  struct HostBits {
-+    using IsHostDelegateBit = base::BitField<bool, 0, 1, uint32_t>;
-+  };
-+
-   // Inobject slack tracking is the way to reclaim unused inobject space.
    //
-   // The instance size is initially determined by adding some slack to
-@@ -832,6 +838,8 @@ V8_OBJECT class Map : public HeapObject {
+@@ -832,6 +834,8 @@ V8_OBJECT class Map : public HeapObject {
  
    DECL_BOOLEAN_ACCESSORS(is_immutable_proto)
  
@@ -858,7 +789,7 @@ index a33c7f01ac1..802eec3720d 100644
    // This counter is used for in-object slack tracking.
    // The in-object slack tracking is considered enabled when the counter is
    // non zero. The counter only has a valid count for initial maps. For
-@@ -1025,6 +1033,9 @@ V8_OBJECT class Map : public HeapObject {
+@@ -1025,6 +1029,9 @@ V8_OBJECT class Map : public HeapObject {
    static DirectHandle<Map> TransitionToImmutableProto(Isolate* isolate,
                                                        DirectHandle<Map> map);
  
@@ -868,42 +799,20 @@ index a33c7f01ac1..802eec3720d 100644
    class BodyDescriptor;
  
    // Compares this map to another to see if they describe equivalent objects,
-@@ -1189,9 +1200,8 @@ V8_OBJECT class Map : public HeapObject {
-   std::atomic<uint8_t> bit_field_;
-   uint8_t bit_field2_;
-   std::atomic<uint32_t> bit_field3_;
--#if TAGGED_SIZE_8_BYTES
--  uint32_t optional_padding_;
--#endif
-+  // ClearScript: the host bits (is_host_delegate), where 64-bit targets had padding.
-+  uint32_t host_bit_field_;
-   TaggedMember<JSPrototype> prototype_;
-   TaggedMember<Object> constructor_or_back_pointer_or_native_context_;
- #if V8_ENABLE_WEBASSEMBLY
 diff --git a/src/objects/map.tq b/src/objects/map.tq
-index cb85e7788e6..cfda5886891 100644
+index cb85e7788e6..2d0eaeb4aa4 100644
 --- a/src/objects/map.tq
 +++ b/src/objects/map.tq
-@@ -36,6 +36,10 @@ bitfield struct MapBitFields3 extends uint32 {
-   construction_counter: int32: 3 bit;
+@@ -11,6 +11,9 @@ bitfield struct MapBitFields1 extends uint8 {
+   is_access_check_needed: bool: 1 bit;
+   is_constructor: bool: 1 bit;
+   is_extended_map: bool: 1 bit;
++  // ClearScript (host delegates), in the byte's spare bit: Map's layout stays V8's (a field of its own made 32-bit
++  // builds' maps 4 bytes longer, and WasmCustomMap's header no longer a multiple of 8).
++  is_host_delegate: bool: 1 bit;
  }
  
-+bitfield struct MapHostBitFields extends uint32 {
-+  is_host_delegate: bool: 1 bit;
-+}
-+
- @cppObjectLayoutDefinition
- extern class Map extends HeapObject {
-   macro PrototypeInfo(): PrototypeInfo labels HasNoPrototypeInfo {
-@@ -80,7 +84,7 @@ extern class Map extends HeapObject {
-   bit_field2: MapBitFields2;
-   bit_field3: MapBitFields3;
- 
--  @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
-+  host_bit_field: MapHostBitFields;
- 
-   prototype: JSReceiver|Null;
-   constructor_or_back_pointer_or_native_context: Object;
+ @cppScope('Map::Bits2')
 diff --git a/src/objects/objects.cc b/src/objects/objects.cc
 index 3ff2dd2f8d5..f030e27ea47 100644
 --- a/src/objects/objects.cc

@@ -433,10 +433,10 @@ index 28d3a2f3784..c2d610abc36 100644
        otherwise return OrdinaryToPrimitive_Number_Inline(input);
    return CallExoticToPrimitive(
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index 42a8808e698..dae40424e2a 100644
+index 1aabfb459aa..ee43550957b 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
-@@ -8450,6 +8450,22 @@ TNode<BoolT> CodeStubAssembler::IsMapIteratorProtectorCellInvalid() {
+@@ -8447,6 +8447,22 @@ TNode<BoolT> CodeStubAssembler::IsMapIteratorProtectorCellInvalid() {
    return TaggedEqual(cell_value, invalid);
  }
  
@@ -459,7 +459,7 @@ index 42a8808e698..dae40424e2a 100644
  TNode<BoolT>
  CodeStubAssembler::IsStringWrapperToPrimitiveProtectorCellInvalid() {
    TNode<Smi> invalid = SmiConstant(Protectors::kProtectorInvalid);
-@@ -9902,12 +9918,90 @@ TNode<Number> CodeStubAssembler::StringToNumber(TNode<String> input) {
+@@ -9899,12 +9915,90 @@ TNode<Number> CodeStubAssembler::StringToNumber(TNode<String> input) {
  
    // Check if string has a cached array index.
    TNode<Uint32T> raw_hash_field = LoadNameRawHashField(input);
@@ -552,10 +552,10 @@ index 42a8808e698..dae40424e2a 100644
    {
      var_result =
 diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
-index 6ea86cca8e1..a27bdcb38be 100644
+index 004d38e895c..ddf37359c77 100644
 --- a/src/codegen/code-stub-assembler.h
 +++ b/src/codegen/code-stub-assembler.h
-@@ -3073,6 +3073,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+@@ -3071,6 +3071,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
    TNode<BoolT> IsSetIteratorProtectorCellInvalid();
    TNode<BoolT> IsMapIteratorProtectorCellInvalid();
    TNode<BoolT> IsStringWrapperToPrimitiveProtectorCellInvalid();

@@ -15,7 +15,7 @@ index 906102e7df6..87244091f22 100644
  
  // Synchronization primitives only store raw data past JSObject; no tagged
 diff --git a/src/objects/map.h b/src/objects/map.h
-index 802eec3720d..f4534234c95 100644
+index 601e160e58e..b59ad9ee1d2 100644
 --- a/src/objects/map.h
 +++ b/src/objects/map.h
 @@ -252,6 +252,29 @@ using MapHandlesSpan = std::span<DirectHandle<Map>>;
@@ -48,7 +48,7 @@ index 802eec3720d..f4534234c95 100644
  V8_OBJECT class Map : public HeapObject {
    V8_IT_OWN_TYPE;
  
-@@ -1196,10 +1219,10 @@ V8_OBJECT class Map : public HeapObject {
+@@ -1192,10 +1215,10 @@ V8_OBJECT class Map : public HeapObject {
    std::atomic<uint8_t> inobject_properties_start_or_constructor_function_index_;
    std::atomic<uint8_t> used_or_unused_instance_size_in_words_;
    std::atomic<uint8_t> visitor_id_;
@@ -58,6 +58,6 @@ index 802eec3720d..f4534234c95 100644
    uint8_t bit_field2_;
 -  std::atomic<uint32_t> bit_field3_;
 +  MapAtomic<uint32_t> bit_field3_;
-   // ClearScript: the host bits (is_host_delegate), where 64-bit targets had padding.
-   uint32_t host_bit_field_;
-   TaggedMember<JSPrototype> prototype_;
+ #if TAGGED_SIZE_8_BYTES
+   uint32_t optional_padding_;
+ #endif
