@@ -147,6 +147,9 @@ Copy-Item "$out\icudtl.dat" "$root\V8\icudtl.dat"
 Write-Host "Linking ClearScriptV8.win-$Cpu.dll"
 Set-Location $root
 $project = "ClearScriptV8\win-$Cpu\ClearScriptV8.win-$Cpu.vcxproj"
+# (as the Unix makefile: V8 15.6 deprecates APIs ClearScript 7.5.1.1 still calls, and the projects treat warnings as
+# errors; clang-cl adds _CL_'s options to every compile)
+$env:_CL_ = '-Wno-deprecated-declarations'
 Invoke-Native 'MSBuild' { msbuild $project -p:Configuration=Release -p:Platform=$platform "-p:SolutionDir=$root\" -m -v:minimal -nologo }
 $dll = "$root\bin\Release\ClearScriptV8.win-$Cpu.dll"
 New-Item -ItemType Directory -Force "$Work\out" | Out-Null
