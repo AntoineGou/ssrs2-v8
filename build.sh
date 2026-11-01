@@ -46,7 +46,8 @@ if [[ "$(cat v8/.ssrs2-patched 2>/dev/null || true)" != "$patched" ]]; then
     gclient sync -r "$v8_revision" -D --force --reset --no-history > sync.log 2>&1 || { tail -40 sync.log; exit 1; }
     (cd v8 && git config user.name ClearScript && git config user.email clearscript@clearfoundry.net \
         && git apply --3way --index "$here/patches/v8-$v8_revision.patch")
-    (cd v8/build && git apply --index --ignore-whitespace "$root/V8/BuildPatch.txt")
+    # (not ClearScript's BuildPatch.txt, which drops V8's sysroot on Linux for the build machine's own headers: we keep
+    # Debian 11's, for the libraries' glibc and the C++ library ClearScript's Linux polyfills are written for)
     (cd v8/third_party/icu && git apply --index --ignore-whitespace "$root/V8/ICUPatch.txt")
     echo "$patched" > v8/.ssrs2-patched
 fi

@@ -76,9 +76,8 @@ if (-not (Test-Path v8\.ssrs2-patched) -or (Get-Content v8\.ssrs2-patched) -ne $
     git config user.name ClearScript
     git config user.email clearscript@clearfoundry.net
     Invoke-Native 'Patching V8' { git apply --3way --index $v8Patch }
-    Set-Location build
-    Invoke-Native "Patching V8's build" { git apply --index --ignore-whitespace "$root\V8\BuildPatch.txt" }
-    Set-Location ..\third_party\icu
+    # (not ClearScript's BuildPatch.txt: it only changes Linux builds)
+    Set-Location third_party\icu
     Invoke-Native 'Patching ICU' { git apply --index --ignore-whitespace "$root\V8\ICUPatch.txt" }
     Pop-Location
     Set-Content v8\.ssrs2-patched $patched
@@ -96,8 +95,15 @@ cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" $vcvarsArch >nul && set" | ForE
 Set-Location v8
 Write-Host "Building V8 ($Cpu)"
 $out = "out\$platform\Release"
-$gnArgs = "fatal_linker_warnings=false is_cfi=false is_component_build=false is_debug=false target_cpu=`"$Cpu`" use_clang_modules=false use_custom_libcxx=false use_thin_lto=false v8_embedder_string=`"-ClearScript`" v8_enable_fuzztest=false v8_enable_pointer_compression=false v8_enable_31bit_smis_on_64bit_arch=false v8_enable_temporal_support=false v8_monolithic=true v8_use_external_startup_data=false v8_target_cpu=`"$Cpu`" v8_disallow_js_in_api_interrupts_is_checked=false"
-Invoke-Native 'gn gen' { gn gen $out "--args=$gnArgs" } 'gn.log'
+# (in args.gn: PowerShell drops the quotes inside an argument given to a batch file, as gn is)
+$gnArgs = 'fatal_linker_warnings=false', 'is_cfi=false', 'is_component_build=false', 'is_debug=false', "target_cpu=`"$Cpu`"",
+    'use_clang_modules=false', 'use_custom_libcxx=false', 'use_thin_lto=false', 'v8_embedder_string="-ClearScript"',
+    'v8_enable_fuzztest=false', 'v8_enable_pointer_compression=false', 'v8_enable_31bit_smis_on_64bit_arch=false',
+    'v8_enable_temporal_support=false', 'v8_monolithic=true', 'v8_use_external_startup_data=false', "v8_target_cpu=`"$Cpu`"",
+    'v8_disallow_js_in_api_interrupts_is_checked=false'
+New-Item -ItemType Directory -Force $out | Out-Null
+Set-Content "$out\args.gn" ($gnArgs -join "`n")
+Invoke-Native 'gn gen' { gn gen $out } 'gn.log'
 Invoke-Native 'Building V8' { ninja -C $out obj\v8_monolith.lib } 'build.log'
 # (the library builds V8's ICU data into itself from here)
 Copy-Item "$out\icudtl.dat" "$root\V8\icudtl.dat"
