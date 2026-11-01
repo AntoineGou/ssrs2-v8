@@ -169,10 +169,10 @@ index cdf10357995..7c133131705 100644
    CPP(NumberPrototypeToPrecision, kDontAdaptArgumentsSentinel)                 \
    CPP(MathSumPrecise, JSParameterCount(1))                                     \
 diff --git a/src/builtins/builtins-number-gen.cc b/src/builtins/builtins-number-gen.cc
-index 8613da3f613..716b33c81f7 100644
+index 8613da3f613..c8fea3abc85 100644
 --- a/src/builtins/builtins-number-gen.cc
 +++ b/src/builtins/builtins-number-gen.cc
-@@ -13,6 +13,252 @@ namespace internal {
+@@ -13,6 +13,260 @@ namespace internal {
  
  #include "src/codegen/define-code-stub-assembler-macros.inc"
  
@@ -272,6 +272,14 @@ index 8613da3f613..716b33c81f7 100644
 +  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
 +  auto context = Parameter<Context>(Descriptor::kContext);
 +  auto target = Parameter<JSFunction>(Descriptor::kJSTarget);
++  // (the digits come from 64-bit integer divisions, which a 32-bit target's
++  // instruction selector lacks: the C++ builtin there)
++  if (!Is64()) {
++    TailCallJSBuiltin(Builtin::kNumberPrototypeToFixed, context, target,
++                      UndefinedConstant(), argc,
++                      InvalidDispatchHandleConstant());
++    return;
++  }
 +  CodeStubArguments args(this, argc);
 +  TNode<JSAny> receiver = args.GetReceiver();
 +  TNode<JSAny> digits = args.GetOptionalArgumentValue(0);
