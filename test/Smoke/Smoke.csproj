@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Loads a ClearScriptV8 library built here through ClearScript's managed side (no native package) and runs smoke.js. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ClearScript.V8" Version="7.5.1.1" />
+    <None Include="smoke.js;expected.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

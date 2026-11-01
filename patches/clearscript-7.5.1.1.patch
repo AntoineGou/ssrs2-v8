@@ -1,0 +1,268 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 1fa8f4b7..890d25c0 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -2217,7 +2217,7 @@ v8::MaybeLocal<v8::Module> V8ContextImpl::ResolveModule(v8::Local<v8::String> hS
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::MaybeLocal<v8::Value> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8::Context> hContext, v8::Local<v8::Module> hModule)
++v8::MaybeLocal<v8::Promise> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8::Context> hContext, v8::Local<v8::Module> hModule)
+ {
+     if (hContext->GetNumberOfEmbedderDataFields() > 1)
+     {
+@@ -2228,12 +2228,12 @@ v8::MaybeLocal<v8::Value> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8::C
+         }
+     }
+ 
+-    return v8::MaybeLocal<v8::Value>();
++    return v8::MaybeLocal<v8::Promise>();
+ }
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::MaybeLocal<v8::Value> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8::Module> hModule)
++v8::MaybeLocal<v8::Promise> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8::Module> hModule)
+ {
+     FROM_MAYBE_TRY
+ 
+@@ -2261,7 +2261,7 @@ v8::MaybeLocal<v8::Value> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8::M
+ 
+     FROM_MAYBE_CATCH
+ 
+-        return v8::MaybeLocal<v8::Value>();
++        return v8::MaybeLocal<v8::Promise>();
+ 
+     FROM_MAYBE_END
+ }
+@@ -2594,7 +2594,7 @@ v8::Intercepted V8ContextImpl::GetGlobalProperty(v8::Local<v8::Name> hKey, const
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::Intercepted V8ContextImpl::SetGlobalProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info)
++v8::Intercepted V8ContextImpl::SetGlobalProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+ {
+     CALLBACK_ENTER
+ 
+@@ -2801,7 +2801,7 @@ v8::Intercepted V8ContextImpl::GetGlobalProperty(uint32_t index, const v8::Prope
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::Intercepted V8ContextImpl::SetGlobalProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info)
++v8::Intercepted V8ContextImpl::SetGlobalProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+ {
+     CALLBACK_ENTER
+ 
+@@ -3364,7 +3364,7 @@ v8::Intercepted V8ContextImpl::GetHostObjectProperty(v8::Local<v8::Name> hKey, c
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::Intercepted V8ContextImpl::SetHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info)
++v8::Intercepted V8ContextImpl::SetHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+ {
+     CALLBACK_ENTER
+ 
+@@ -3533,7 +3533,7 @@ v8::Intercepted V8ContextImpl::GetHostObjectProperty(uint32_t index, const v8::P
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::Intercepted V8ContextImpl::SetHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info)
++v8::Intercepted V8ContextImpl::SetHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+ {
+     CALLBACK_ENTER
+ 
+@@ -3718,7 +3718,7 @@ v8::Intercepted V8ContextImpl::GetFastHostObjectProperty(v8::Local<v8::Name> hKe
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::Intercepted V8ContextImpl::SetFastHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info)
++v8::Intercepted V8ContextImpl::SetFastHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+ {
+     CALLBACK_ENTER
+ 
+@@ -3898,7 +3898,7 @@ v8::Intercepted V8ContextImpl::GetFastHostObjectProperty(uint32_t index, const v
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::Intercepted V8ContextImpl::SetFastHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info)
++v8::Intercepted V8ContextImpl::SetFastHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+ {
+     CALLBACK_ENTER
+ 
+diff --git a/ClearScriptV8/V8ContextImpl.h b/ClearScriptV8/V8ContextImpl.h
+index e9bdc18f..04716022 100644
+--- a/ClearScriptV8/V8ContextImpl.h
++++ b/ClearScriptV8/V8ContextImpl.h
+@@ -442,13 +442,13 @@ private:
+     void GetV8ObjectPropertyIndices(v8::Local<v8::Object> hObject, std::vector<int>& indices, v8::PropertyFilter filter);
+ 
+     static v8::Intercepted GetGlobalProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Value>& info);
+-    static v8::Intercepted SetGlobalProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info);
++    static v8::Intercepted SetGlobalProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static v8::Intercepted QueryGlobalProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Integer>& info);
+     static v8::Intercepted DeleteGlobalProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static void GetGlobalPropertyNames(const v8::PropertyCallbackInfo<v8::Array>& info);
+ 
+     static v8::Intercepted GetGlobalProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info);
+-    static v8::Intercepted SetGlobalProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info);
++    static v8::Intercepted SetGlobalProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static v8::Intercepted QueryGlobalProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Integer>& info);
+     static v8::Intercepted DeleteGlobalProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static void GetGlobalPropertyIndices(const v8::PropertyCallbackInfo<v8::Array>& info);
+@@ -471,25 +471,25 @@ private:
+     static void InvokeHostDelegate(const v8::FunctionCallbackInfo<v8::Value>& info);
+ 
+     static v8::Intercepted GetHostObjectProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Value>& info);
+-    static v8::Intercepted SetHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info);
++    static v8::Intercepted SetHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static v8::Intercepted QueryHostObjectProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Integer>& info);
+     static v8::Intercepted DeleteHostObjectProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static void GetHostObjectPropertyNames(const v8::PropertyCallbackInfo<v8::Array>& info);
+ 
+     static v8::Intercepted GetHostObjectProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info);
+-    static v8::Intercepted SetHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info);
++    static v8::Intercepted SetHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static v8::Intercepted QueryHostObjectProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Integer>& info);
+     static v8::Intercepted DeleteHostObjectProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static void GetHostObjectPropertyIndices(const v8::PropertyCallbackInfo<v8::Array>& info);
+ 
+     static v8::Intercepted GetFastHostObjectProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Value>& info);
+-    static v8::Intercepted SetFastHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info);
++    static v8::Intercepted SetFastHostObjectProperty(v8::Local<v8::Name> hKey, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static v8::Intercepted QueryFastHostObjectProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Integer>& info);
+     static v8::Intercepted DeleteFastHostObjectProperty(v8::Local<v8::Name> hKey, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static void GetFastHostObjectPropertyNames(const v8::PropertyCallbackInfo<v8::Array>& info);
+ 
+     static v8::Intercepted GetFastHostObjectProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info);
+-    static v8::Intercepted SetFastHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<void>& info);
++    static v8::Intercepted SetFastHostObjectProperty(uint32_t index, v8::Local<v8::Value> hValue, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static v8::Intercepted QueryFastHostObjectProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Integer>& info);
+     static v8::Intercepted DeleteFastHostObjectProperty(uint32_t index, const v8::PropertyCallbackInfo<v8::Boolean>& info);
+     static void GetFastHostObjectPropertyIndices(const v8::PropertyCallbackInfo<v8::Array>& info);
+@@ -507,8 +507,8 @@ private:
+ 
+     v8::MaybeLocal<v8::Promise> ImportModule(const V8DocumentInfo* pSourceDocumentInfo, v8::Local<v8::String> hSpecifier);
+     v8::MaybeLocal<v8::Module> ResolveModule(v8::Local<v8::String> hSpecifier, const V8DocumentInfo* pSourceDocumentInfo);
+-    static v8::MaybeLocal<v8::Value> PopulateSyntheticModule(v8::Local<v8::Context> hContext, v8::Local<v8::Module> hModule);
+-    v8::MaybeLocal<v8::Value> PopulateSyntheticModule(v8::Local<v8::Module> hModule);
++    static v8::MaybeLocal<v8::Promise> PopulateSyntheticModule(v8::Local<v8::Context> hContext, v8::Local<v8::Module> hModule);
++    v8::MaybeLocal<v8::Promise> PopulateSyntheticModule(v8::Local<v8::Module> hModule);
+ 
+     static void DisposeWeakHandle(v8::Isolate* pIsolate, Persistent<v8::Object>* phObject, HostObjectHolder* pHolder, void* pvV8ObjectCache);
+ 
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index bd2c90c4..7da8ce62 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -2,6 +2,7 @@
+ // Licensed under the MIT license.
+ 
+ #include "ClearScriptV8Native.h"
++#include <cstdlib>
+ 
+ //-----------------------------------------------------------------------------
+ // V8Platform
+@@ -65,6 +66,16 @@ void V8Platform::EnsureInitialized()
+         auto defaultStackSize = V8_SPLIT_PROXY_MANAGED_INVOKE_NOTHROW(uint32_t, GetDefaultStackSize);
+ 
+         std::vector<std::string> flagStrings;
++        // SSRS2 (tools/V8 in SSRS2's repository): first, so that a flag V8 does not know later in the list cannot drop it
++        // (V8 ignores the flags after one it does not know). No full collection below 768 MB of old space (the most V8
++        // takes: half of the engine's 1,536 MB), so that a report's scripts building their data (a 300-chart portfolio's
++        // points, 570 MB) are not stopped each time the heap grows; only the flag does it (a constraint's initial size is
++        // recomputed after the first collection). The engine collects a runtime past 64 MB after its document.
++        flagStrings.push_back("--initial-old-space-size=768");
++        // Inline caches polymorphic up to 16 maps before they go megamorphic (V8's default 4): a library's base class
++        // defining its fields on every subclass's objects (Chart.js's Element: points, lines, scales, the legend) went
++        // through the megamorphic stub cache for every point; its optimized code now checks the maps it has seen.
++        flagStrings.push_back("--max-valid-polymorphic-map-count=16");
+         flagStrings.push_back("--no_memory_pool_share_memory_on_teardown");
+ 
+     #ifdef CLEARSCRIPT_TOP_LEVEL_AWAIT_CONTROL
+@@ -86,16 +97,31 @@ void V8Platform::EnsureInitialized()
+             flagStrings.push_back("--single_threaded");
+         }
+ 
++    #if V8_MAJOR_VERSION < 15
++
++        // (SSRS2: V8 15 ships explicit resource management and has no flag for it: V8 stops at a flag it does not know
++        // and ignores those after it)
+         if (!::HasFlag(m_GlobalFlags, V8GlobalFlags::DisableExplicitResourceManagement))
+         {
+             flagStrings.push_back("--js_explicit_resource_management");
+         }
+ 
++    #endif // V8_MAJOR_VERSION < 15
++
+         if ((defaultStackSize > 0) && (defaultStackSize <= INT_MAX))
+         {
+             flagStrings.push_back("--stack_size=" + std::to_string(defaultStackSize));
+         }
+ 
++        // SSRS2: the engine's own V8 flags for experiments, after the others (a flag given twice: the last wins).
++        if (const char* pSsrs2Flags = std::getenv("SSRS2_V8_FLAGS"))
++        {
++            if (*pSsrs2Flags != '\0')
++            {
++                flagStrings.push_back(pSsrs2Flags);
++            }
++        }
++
+         if (!flagStrings.empty())
+         {
+             std::string flagsString(flagStrings[0]);
+@@ -2277,14 +2303,7 @@ void V8IsolateImpl::PromiseRejectionCallbackWorker(const v8::PromiseRejectMessag
+                             contextEntry.pContextImpl->InvokePromiseRejectionCallback(V8Context::PromiseRejectionEventKind::HandlerAddedAfterRejection, hPromise, message.GetValue());
+                             break;
+ 
+-                        case v8::kPromiseRejectAfterResolved:
+-                            contextEntry.pContextImpl->InvokePromiseRejectionCallback(V8Context::PromiseRejectionEventKind::RejectedAfterSettlement, hPromise, message.GetValue());
+-                            break;
+-
+-                        case v8::kPromiseResolveAfterResolved:
+-                            contextEntry.pContextImpl->InvokePromiseRejectionCallback(V8Context::PromiseRejectionEventKind::ResolvedAfterSettlement, hPromise, message.GetValue());
+-                            break;
+-
++                        // (V8 15: the events after settlement are no longer sent)
+                         default:
+                             break;
+                     }
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 2a341c3c..d61f2911 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -269,8 +269,34 @@ NATIVE_ENTRY_POINT(void) Memory_Free(const void* pMemory) noexcept
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2 (tools/V8): the ICU data of the V8 this library is built with, inside it. ClearScript's ICU data package
++// holds its own V8's: another ICU version fails Intl's calls ("Internal error. Icu error.").
++#if defined(__APPLE__)
++__asm__(".section __TEXT,__const\n.p2align 4\n.globl _ssrs2_icu_data\n_ssrs2_icu_data:\n.incbin \"V8/icudtl.dat\"\n.globl _ssrs2_icu_data_end\n_ssrs2_icu_data_end:\n.text\n");
++#define SSRS2_ICU_DATA
++#elif defined(__linux__)
++__asm__(".section .rodata\n.p2align 4\n.globl ssrs2_icu_data\nssrs2_icu_data:\n.incbin \"V8/icudtl.dat\"\n.globl ssrs2_icu_data_end\nssrs2_icu_data_end:\n.text\n");
++#define SSRS2_ICU_DATA
++#elif defined(_WIN32) && defined(__clang__)
++// (ClearScript's ClangCL projects compile from their folder, ClearScriptV8\win-<cpu>; x86 decorates C names with _)
++#if defined(_M_IX86)
++__asm__(".section .rdata,\"dr\"\n.p2align 4\n.globl _ssrs2_icu_data\n_ssrs2_icu_data:\n.incbin \"../../V8/icudtl.dat\"\n.globl _ssrs2_icu_data_end\n_ssrs2_icu_data_end:\n.text\n");
++#else
++__asm__(".section .rdata,\"dr\"\n.p2align 4\n.globl ssrs2_icu_data\nssrs2_icu_data:\n.incbin \"../../V8/icudtl.dat\"\n.globl ssrs2_icu_data_end\nssrs2_icu_data_end:\n.text\n");
++#endif
++#define SSRS2_ICU_DATA
++#endif
++#ifdef SSRS2_ICU_DATA
++extern "C" const char ssrs2_icu_data[];
++extern "C" const char ssrs2_icu_data_end[];
++#endif
++
+ NATIVE_ENTRY_POINT(void) V8Environment_InitializeICU(const char* pICUData, uint32_t size) noexcept
+ {
++#ifdef SSRS2_ICU_DATA
++    pICUData = ssrs2_icu_data;
++    size = static_cast<uint32_t>(ssrs2_icu_data_end - ssrs2_icu_data);
++#endif
+     ASSERT_EVAL(v8::V8::InitializeICU(pICUData, size));
+ }
+ 

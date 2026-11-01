@@ -1,0 +1,2140 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 1df3d4e31bc..e0c7d8a5f40 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -12,7 +12,6 @@ import("//build/config/coverage/coverage.gni")
+ import("//build/config/dcheck_always_on.gni")
+ import("//build/config/host_byteorder.gni")
+ import("//build/config/mips.gni")
+-import("//build/config/riscv.gni")
+ import("//build/config/sanitizers/sanitizers.gni")
+ import("//build_overrides/build.gni")
+ import("//third_party/icu/config.gni")
+@@ -1691,7 +1690,7 @@ config("toolchain") {
+   visibility = [ "./*" ]
+ 
+   defines = []
+-  cflags = []
++  cflags = [ "-D_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING", "-DV8_TLS_USED_IN_LIBRARY", "-Wno-cast-function-type-mismatch", "-Wno-deprecated-this-capture" ]
+   ldflags = []
+ 
+   if (v8_current_cpu == "arm") {
+diff --git a/gni/v8.gni b/gni/v8.gni
+index 3fb7d2964ab..4def4f704cf 100644
+--- a/gni/v8.gni
++++ b/gni/v8.gni
+@@ -4,6 +4,7 @@
+ 
+ import("//build/config/chrome_build.gni")
+ import("//build/config/compiler/pgo/pgo.gni")
++import("//build/config/dcheck_always_on.gni")
+ import("//build/config/features.gni")
+ import("//build/config/gclient_args.gni")
+ import("//build/config/ios/config.gni")
+@@ -225,9 +226,7 @@ declare_args() {
+   cppgc_enable_slow_api_checks = false
+ 
+   # Enable object names in cppgc for profiling purposes.
+-  cppgc_enable_object_names =
+-      !(is_component_build && is_win) &&
+-      (is_chrome_for_testing || (!is_android && !is_fuchsia))
++  cppgc_enable_object_names = false
+ 
+   # Enable young generation in cppgc.
+   cppgc_enable_young_generation = false
+diff --git a/include/ClearScript/polyfill.h b/include/ClearScript/polyfill.h
+new file mode 100644
+index 00000000000..3a55fc7f8bc
+--- /dev/null
++++ b/include/ClearScript/polyfill.h
+@@ -0,0 +1,49 @@
++#ifndef INCLUDE_CLEARSCRIPT_POLYFILL_H_
++#define INCLUDE_CLEARSCRIPT_POLYFILL_H_
++
++#ifdef __linux__
++
++#include <cstring>
++#include <memory>
++#include <sstream>
++#include <utility>
++
++namespace std {
++
++  // make_unique_for_overwrite
++  template <typename T>
++  constexpr unique_ptr<T> make_unique_for_overwrite() {
++    return unique_ptr<T>(new T);
++  }
++  template <typename T>
++  constexpr unique_ptr<T> make_unique_for_overwrite(const size_t _Size) {
++    return unique_ptr<T>(new remove_extent_t<T>[_Size]);
++  }
++  
++  // format
++  inline void __append_format(std::ostringstream& oss, const char* fmt) {
++      oss << fmt;
++  }
++  template <typename T, typename... Rest>
++  void __append_format(std::ostringstream& oss, const char* fmt, T&& value, Rest&&... rest) {
++    const char* p = std::strstr(fmt, "{}");
++    if (!p) {
++        oss << fmt;
++        return;
++    }
++    oss.write(fmt, p - fmt);
++    oss << std::forward<T>(value);
++    __append_format(oss, p + 2, std::forward<Rest>(rest)...);
++  }
++  template <typename... Args>
++  std::string format(const char* fmt, Args&&... args) {
++    std::ostringstream oss;
++    __append_format(oss, fmt, std::forward<Args>(args)...);
++    return oss.str();
++  }
++
++}
++
++#endif // __linux__
++
++#endif // INCLUDE_CLEARSCRIPT_POLYFILL_H_
+diff --git a/include/libplatform/libplatform.h b/include/libplatform/libplatform.h
+index 6a34f432410..88a81ab4c40 100644
+--- a/include/libplatform/libplatform.h
++++ b/include/libplatform/libplatform.h
+@@ -49,6 +49,8 @@ V8_PLATFORM_EXPORT std::unique_ptr<v8::Platform> NewDefaultPlatform(
+     std::unique_ptr<v8::TracingController> tracing_controller = {},
+     PriorityMode priority_mode = PriorityMode::kDontApply);
+ 
++V8_PLATFORM_EXPORT std::unique_ptr<v8::PageAllocator> NewDefaultPageAllocator();
++
+ /**
+  * The same as NewDefaultPlatform but disables the worker thread pool.
+  * It must be used with the --single-threaded V8 flag.
+diff --git a/include/v8-initialization.h b/include/v8-initialization.h
+index 243f37b1af5..1328342b9dd 100644
+--- a/include/v8-initialization.h
++++ b/include/v8-initialization.h
+@@ -160,6 +160,7 @@ class V8_EXPORT V8 {
+    * of the data file has to be provided.
+    */
+   static bool InitializeICU(const char* icu_data_file = nullptr);
++  static bool InitializeICU(const char* icu_data_ptr, size_t size);
+ 
+   /**
+    * Initialize the ICU library bundled with V8. The embedder should only
+diff --git a/include/v8-internal.h b/include/v8-internal.h
+index 5c20dc45827..8cef0510d85 100644
+--- a/include/v8-internal.h
++++ b/include/v8-internal.h
+@@ -20,6 +20,28 @@
+ 
+ #include "v8config.h"  // NOLINT(build/include_directory)
+ 
++#if defined(__linux__)
++    #if defined(__x86_64__)
++        __asm__(".symver exp, exp@GLIBC_2.2.5");
++        __asm__(".symver exp2, exp2@GLIBC_2.2.5");
++        __asm__(".symver log, log@GLIBC_2.2.5");
++        __asm__(".symver log2, log2@GLIBC_2.2.5");
++        __asm__(".symver pow, pow@GLIBC_2.2.5");
++    #elif defined(__aarch64__)
++        __asm__(".symver exp, exp@GLIBC_2.17");
++        __asm__(".symver exp2, exp2@GLIBC_2.17");
++        __asm__(".symver log, log@GLIBC_2.17");
++        __asm__(".symver log2, log2@GLIBC_2.17");
++        __asm__(".symver pow, pow@GLIBC_2.17");
++    #elif defined(__arm__)
++        __asm__(".symver exp, exp@GLIBC_2.4");
++        __asm__(".symver exp2, exp2@GLIBC_2.4");
++        __asm__(".symver log, log@GLIBC_2.4");
++        __asm__(".symver log2, log2@GLIBC_2.4");
++        __asm__(".symver pow, pow@GLIBC_2.4");
++    #endif
++#endif
++
+ namespace v8 {
+ 
+ class Array;
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index a352b5f0164..84346da4818 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -670,6 +670,8 @@ class V8_EXPORT Isolate {
+     kRegExpMatcherFlagsMismatch = 188,
+     kRegExpCustomSpecies = 189,
+     kWasmWideArithmetic = 190,
++    // SSRS2: Date.prototype's @@toPrimitive or valueOf changed.
++    kInvalidatedDateToPrimitiveProtector = 191,
+ 
+     // If you add new values here, you'll also need to update Chromium's:
+     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
+@@ -1642,6 +1644,8 @@ class V8_EXPORT Isolate {
+    */
+   void SetStackLimit(uintptr_t stack_limit);
+ 
++  void ResetStackLimit();
++
+   /**
+    * Returns a memory range that can potentially contain jitted code. Code for
+    * V8's 'builtins' will not be in this range if embedded builtins is enabled.
+diff --git a/include/v8-source-location.h b/include/v8-source-location.h
+index 057273ad8ef..9354c4a36dc 100644
+--- a/include/v8-source-location.h
++++ b/include/v8-source-location.h
+@@ -6,7 +6,16 @@
+ #define INCLUDE_SOURCE_LOCATION_H_
+ 
+ #include <cstddef>
+-#include <source_location>
++#if __has_include(<source_location>)
++  #include <source_location>
++#elif __has_include(<experimental/source_location>)
++  #include <experimental/source_location>
++  namespace std {
++    using source_location = experimental::source_location;
++  }
++#else
++  #error "source_location is not supported on this platform"
++#endif
+ #include <string>
+ 
+ #include "v8config.h"  // NOLINT(build/include_directory)
+diff --git a/include/v8-template.h b/include/v8-template.h
+index 182293f05bd..580138f77a0 100644
+--- a/include/v8-template.h
++++ b/include/v8-template.h
+@@ -1065,6 +1065,9 @@ class V8_EXPORT ObjectTemplate : public Template {
+    */
+   void SetImmutableProto();
+ 
++  bool IsHostDelegate() const;
++  void SetHostDelegate();
++
+   /**
+    * Support for TC39 "dynamic code brand checks" proposal.
+    *
+diff --git a/include/v8config.h b/include/v8config.h
+index b7aeeade6b8..5384e8b6975 100644
+--- a/include/v8config.h
++++ b/include/v8config.h
+@@ -610,7 +610,7 @@ path. Add it with -I<path> to the command line
+ // Use like:
+ //   V8_NOINLINE V8_PRESERVE_MOST void UnlikelyMethod();
+ #if V8_HAS_ATTRIBUTE_PRESERVE_MOST
+-# define V8_PRESERVE_MOST __attribute__((preserve_most))
++# define V8_PRESERVE_MOST /* DISABLED */
+ #else
+ # define V8_PRESERVE_MOST /* NOT SUPPORTED */
+ #endif
+diff --git a/src/api/api-natives.cc b/src/api/api-natives.cc
+index 68ba61b7cbc..8db2fc2c784 100644
+--- a/src/api/api-natives.cc
++++ b/src/api/api-natives.cc
+@@ -357,6 +357,9 @@ MaybeHandle<JSObject> InstantiateObject(Isolate* isolate,
+   if (info->immutable_proto()) {
+     JSObject::SetImmutableProto(isolate, object);
+   }
++  else if (info->host_delegate()) {
++    JSObject::SetHostDelegate(isolate, object);
++  }
+   if (!is_prototype) {
+     // Keep prototypes in slow-mode. Let them be lazily turned fast later on.
+     // TODO(dcarney): is this necessary?
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 568671193c5..b92f2e88b38 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -1860,6 +1860,17 @@ void ObjectTemplate::SetImmutableProto() {
+   self->set_immutable_proto(true);
+ }
+ 
++bool ObjectTemplate::IsHostDelegate() const {
++  return Utils::OpenDirectHandle(this)->host_delegate();
++}
++
++void ObjectTemplate::SetHostDelegate() {
++  auto self = Utils::OpenDirectHandle(this);
++  i::Isolate* i_isolate = i::Isolate::Current();
++  EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
++  self->set_host_delegate(true);
++}
++
+ bool ObjectTemplate::IsCodeLike() const {
+   return Utils::OpenDirectHandle(this)->code_like();
+ }
+@@ -6659,6 +6670,10 @@ bool v8::V8::InitializeICU(const char* icu_data_file) {
+   return i::InitializeICU(icu_data_file);
+ }
+ 
++bool v8::V8::InitializeICU(const char* icu_data_ptr, size_t size) {
++  return i::InitializeICU(icu_data_ptr, size);
++}
++
+ bool v8::V8::InitializeICUDefaultLocation(const char* exec_path,
+                                           const char* icu_data_file) {
+   return i::InitializeICUDefaultLocation(exec_path, icu_data_file);
+@@ -10981,6 +10996,12 @@ void Isolate::SetStackLimit(uintptr_t stack_limit) {
+   i_isolate->SetStackSize(base::Stack::GetStackStart() - stack_limit);
+ }
+ 
++void Isolate::ResetStackLimit() {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
++  i_isolate->stack_guard()->ResetStackLimit();
++  i_isolate->SetStackSize(i::v8_flags.stack_size * i::KB);
++}
++
+ void Isolate::GetCodeRange(void** start, size_t* length_in_bytes) {
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+   const base::AddressRegion& code_region = i_isolate->heap()->code_region();
+@@ -12731,9 +12752,9 @@ TryToCopyAndConvertArrayToCppBuffer<CTypeInfoBuilder<double>::Build().GetId(),
+ 
+ std::string SourceLocation::ToString() const {
+   if (!*this) return {};
+-  return (std::ostringstream{} << loc_.function_name() << '@'
+-                               << loc_.file_name() << ':' << loc_.line())
+-      .str();
++  std::ostringstream oss;
++  oss << loc_.function_name() << '@' << loc_.file_name() << ':' << loc_.line();
++  return oss.str();
+ }
+ 
+ }  // namespace v8
+diff --git a/src/base/functional/bind-internal.h b/src/base/functional/bind-internal.h
+index 160664af5dd..2fa94eca5af 100644
+--- a/src/base/functional/bind-internal.h
++++ b/src/base/functional/bind-internal.h
+@@ -120,6 +120,13 @@ BIND_INTERNAL_EXTRACT_CALLABLE_RUN_TYPE_WITH_QUALS(const noexcept);
+ 
+ #undef BIND_INTERNAL_EXTRACT_CALLABLE_RUN_TYPE_WITH_QUALS
+ 
++#if defined(_WIN32) && (!defined(V8_TARGET_ARCH_ARM64) || defined(_M_ARM64))
++  template <typename R, typename... Args>
++  struct ExtractCallableRunTypeImpl<std::function<R(Args...)>> {
++    using Type = R(Args...);
++  };
++#endif
++
+ // Evaluated to the RunType of the given callable type; e.g.
+ // `ExtractCallableRunType<decltype([](int, char*) { return 0.1; })>` ->
+ //     `double(int, char*)`.
+diff --git a/src/base/macros.h b/src/base/macros.h
+index 5b1619f9ef0..8fcc2003715 100644
+--- a/src/base/macros.h
++++ b/src/base/macros.h
+@@ -13,6 +13,15 @@
+ #include "src/base/compiler-specific.h"
+ #include "src/base/logging.h"
+ 
++#if defined(__linux__)
++namespace std {
++template <typename To, typename From>
++constexpr To bit_cast(const From& src) noexcept {
++    return __builtin_bit_cast(To, src);
++}
++} // namespace std
++#endif
++
+ // No-op macro which is used to work around MSVC's funky VA_ARGS support.
+ #define EXPAND(X) X
+ 
+@@ -142,10 +151,6 @@ namespace v8::base {
+ 
+ template <class Dest, class Source>
+ V8_INLINE constexpr Dest bit_cast(Source const& source) noexcept {
+-  static_assert(!std::is_pointer_v<Source>,
+-                "bit_cast must not be used on pointer types");
+-  static_assert(!std::is_pointer_v<Dest>,
+-                "bit_cast must not be used on pointer types");
+   static_assert(!std::is_reference_v<Dest>,
+                 "bit_cast must not be used on reference types");
+   static_assert(
+diff --git a/src/base/memcopy.h b/src/base/memcopy.h
+index 4c2bea25979..a785b9a2246 100644
+--- a/src/base/memcopy.h
++++ b/src/base/memcopy.h
+@@ -9,6 +9,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <climits>
+ #include <limits>
+ #include <type_traits>
+ 
+diff --git a/src/base/platform/platform.h b/src/base/platform/platform.h
+index 7692528c10b..8ba6b3d42ea 100644
+--- a/src/base/platform/platform.h
++++ b/src/base/platform/platform.h
+@@ -52,6 +52,8 @@
+ #include <sanitizer/asan_interface.h>
+ #endif  // V8_USE_ADDRESS_SANITIZER
+ 
++#define V8_NO_FAST_TLS
++
+ #ifndef V8_NO_FAST_TLS
+ #if V8_CC_MSVC && V8_HOST_ARCH_IA32
+ // __readfsdword is supposed to be declared in intrin.h but it is missing from
+diff --git a/src/base/vector.h b/src/base/vector.h
+index 7900785219b..7b9cebcb30e 100644
+--- a/src/base/vector.h
++++ b/src/base/vector.h
+@@ -13,6 +13,7 @@
+ #include <ranges>
+ #include <type_traits>
+ 
++#include "include/ClearScript/polyfill.h"
+ #include "include/v8config.h"
+ #include "src/base/algorithm.h"
+ #include "src/base/hashing.h"
+diff --git a/src/bigint/bigint.h b/src/bigint/bigint.h
+index 80d6a5cfec1..04b8fbfc75f 100644
+--- a/src/bigint/bigint.h
++++ b/src/bigint/bigint.h
+@@ -13,6 +13,8 @@
+ #include <memory>
+ #include <utility>
+ 
++#include "include/ClearScript/polyfill.h"
++
+ namespace v8 {
+ namespace bigint {
+ 
+diff --git a/src/builtins/base.tq b/src/builtins/base.tq
+index 3bbd3108699..d409519c737 100644
+--- a/src/builtins/base.tq
++++ b/src/builtins/base.tq
+@@ -1520,6 +1520,8 @@ extern macro IsPrototypeTypedArrayPrototype(
+ extern macro IsSetIteratorProtectorCellInvalid(): bool;
+ extern macro IsMapIteratorProtectorCellInvalid(): bool;
+ extern macro InvalidateStringWrapperToPrimitiveProtector(): void;
++extern macro TryFastDateToNumber(implicit context: Context)(JSReceiver):
++    Number labels NotFast;
+ 
+ extern operator '.data_ptr' macro LoadJSTypedArrayDataPtr(JSTypedArray): RawPtr;
+ 
+diff --git a/src/builtins/builtins-date-gen.cc b/src/builtins/builtins-date-gen.cc
+index 2c15fa4792a..e56003e07ca 100644
+--- a/src/builtins/builtins-date-gen.cc
++++ b/src/builtins/builtins-date-gen.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "src/builtins/builtins-constructor-gen.h"
+ #include "src/builtins/builtins-inl.h"
+ #include "src/builtins/builtins-utils-gen.h"
+ #include "src/codegen/code-stub-assembler-inl.h"
+@@ -16,6 +17,90 @@ namespace internal {
+ // -----------------------------------------------------------------------------
+ // ES6 section 20.3 Date Objects
+ 
++// SSRS2: new Date(time) with Date itself as new.target and a number, and date.setUTCDate(number), made here without the
++// C++ builtins' entry and handle scope (a page's day-by-day loop makes and sets a date a day): the value is set by
++// JSDate::SetTimeValue and JSDate::SetUTCDayOfMonth, called as C functions, which work the date's cached fields out as
++// JSDate::SetValue does (V8's optimizing tiers read them). Anything else goes to the C++ builtins.
++TF_BUILTIN(DateConstructorFast, ConstructorBuiltinsAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto target = Parameter<JSFunction>(Descriptor::kJSTarget);
++  auto new_target = Parameter<Object>(Descriptor::kJSNewTarget);
++  Label slow(this, Label::kDeferred);
++  // (declared before the first jump to {slow}: a label merges a variable from every edge into it)
++  TVARIABLE(Float64T, var_time, Float64Constant(0));
++  CodeStubArguments args(this, argc);
++  // (argc counts the receiver)
++  GotoIfNot(IntPtrEqual(args.GetLengthWithoutReceiver(), IntPtrConstant(1)),
++            &slow);
++  GotoIfNot(TaggedEqual(new_target, target), &slow);
++  TNode<Object> value = args.AtIndex(0);
++  {
++    Label smi(this), done(this);
++    GotoIf(TaggedIsSmi(value), &smi);
++    GotoIfNot(IsHeapNumber(CAST(value)), &slow);
++    var_time = LoadHeapNumberValue(CAST(value));
++    Goto(&done);
++    BIND(&smi);
++    var_time = SmiToFloat64(CAST(value));
++    Goto(&done);
++    BIND(&done);
++  }
++  TNode<JSObject> date = FastNewObject(context, target, CAST(new_target), &slow);
++  CallCFunction(
++      ExternalConstant(ExternalReference::jsdate_set_time_value_function()),
++      MachineType::Float64(),
++      std::make_pair(MachineType::Pointer(),
++                     ExternalConstant(ExternalReference::isolate_address(isolate()))),
++      std::make_pair(MachineType::AnyTagged(), date),
++      std::make_pair(MachineType::Float64(), var_time.value()));
++  args.PopAndReturn(date);
++
++  BIND(&slow);
++  TailCallJSBuiltin(Builtin::kDateConstructor, context, target, new_target,
++                    argc, InvalidDispatchHandleConstant());
++}
++
++TF_BUILTIN(DatePrototypeSetUTCDateFast, CodeStubAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto target = Parameter<JSFunction>(Descriptor::kJSTarget);
++  Label slow(this, Label::kDeferred);
++  TVARIABLE(Float64T, var_day, Float64Constant(0));
++  CodeStubArguments args(this, argc);
++  GotoIf(IntPtrLessThan(args.GetLengthWithoutReceiver(), IntPtrConstant(1)),
++         &slow);
++  TNode<Object> receiver = args.GetReceiver();
++  GotoIf(TaggedIsSmi(receiver), &slow);
++  GotoIfNot(InstanceTypeEqual(LoadInstanceType(CAST(receiver)), JS_DATE_TYPE),
++            &slow);
++  TNode<Object> value = args.AtIndex(0);
++  {
++    Label smi(this), done(this);
++    GotoIf(TaggedIsSmi(value), &smi);
++    GotoIfNot(IsHeapNumber(CAST(value)), &slow);
++    var_day = LoadHeapNumberValue(CAST(value));
++    Goto(&done);
++    BIND(&smi);
++    var_day = SmiToFloat64(CAST(value));
++    Goto(&done);
++    BIND(&done);
++  }
++  TNode<Float64T> time = UncheckedCast<Float64T>(CallCFunction(
++      ExternalConstant(
++          ExternalReference::jsdate_set_utc_day_of_month_function()),
++      MachineType::Float64(),
++      std::make_pair(MachineType::Pointer(),
++                     ExternalConstant(ExternalReference::isolate_address(isolate()))),
++      std::make_pair(MachineType::AnyTagged(), receiver),
++      std::make_pair(MachineType::Float64(), var_day.value())));
++  args.PopAndReturn(ChangeFloat64ToTagged(time));
++
++  BIND(&slow);
++  TailCallJSBuiltin(Builtin::kDatePrototypeSetUTCDate, context, target,
++                    UndefinedConstant(), argc, InvalidDispatchHandleConstant());
++}
++
+ class DateBuiltinsAssembler : public CodeStubAssembler {
+  public:
+   explicit DateBuiltinsAssembler(compiler::CodeAssemblerState* state)
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index cdf10357995..7c133131705 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -716,6 +716,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+                                                                                \
+   /* Date */                                                                   \
+   CPP(DateConstructor, kDontAdaptArgumentsSentinel)                            \
++  TFJ(DateConstructorFast, kDontAdaptArgumentsSentinel)                        \
+   TFJ(DatePrototypeGetDate, kJSArgcReceiverSlots, kReceiver)                   \
+   TFJ(DatePrototypeGetDay, kJSArgcReceiverSlots, kReceiver)                    \
+   TFJ(DatePrototypeGetFullYear, kJSArgcReceiverSlots, kReceiver)               \
+@@ -749,6 +750,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+   CPP(DatePrototypeSetSeconds, kDontAdaptArgumentsSentinel)                    \
+   CPP(DatePrototypeSetTime, kDontAdaptArgumentsSentinel)                       \
+   CPP(DatePrototypeSetUTCDate, kDontAdaptArgumentsSentinel)                    \
++  TFJ(DatePrototypeSetUTCDateFast, kDontAdaptArgumentsSentinel)                \
+   CPP(DatePrototypeSetUTCFullYear, kDontAdaptArgumentsSentinel)                \
+   CPP(DatePrototypeSetUTCHours, kDontAdaptArgumentsSentinel)                   \
+   CPP(DatePrototypeSetUTCMilliseconds, kDontAdaptArgumentsSentinel)            \
+@@ -954,6 +956,9 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+                                                                                \
+   CPP(NumberPrototypeToExponential, kDontAdaptArgumentsSentinel)               \
+   CPP(NumberPrototypeToFixed, kDontAdaptArgumentsSentinel)                     \
++  TFJ(NumberPrototypeToFixedFast, kDontAdaptArgumentsSentinel)                 \
++  TFS(NumberToFixedNumber, NeedsContext{true}, kReceiver, kFractionDigits,      \
++      kFunction)                                                               \
+   CPP(NumberPrototypeToLocaleString, kDontAdaptArgumentsSentinel)              \
+   CPP(NumberPrototypeToPrecision, kDontAdaptArgumentsSentinel)                 \
+   CPP(MathSumPrecise, JSParameterCount(1))                                     \
+diff --git a/src/builtins/builtins-number-gen.cc b/src/builtins/builtins-number-gen.cc
+index 8613da3f613..716b33c81f7 100644
+--- a/src/builtins/builtins-number-gen.cc
++++ b/src/builtins/builtins-number-gen.cc
+@@ -13,6 +13,252 @@ namespace internal {
+ 
+ #include "src/codegen/define-code-stub-assembler-macros.inc"
+ 
++// SSRS2: Number.prototype.toFixed on a number with 0 to 20 digits (undefined: 0), |x| * 10^f below 2^52, written here
++// without the runtime (the C++ builtin's entry, its general dtoa and a heap buffer each call: 46 ns, a page's
++// +x.toFixed(2) a day for years of days). The digits are exact: x's integer part I and fraction r (exact), r * 10^f as an
++// exact sum hi + lo (Dekker's product: 10^f is exact up to 10^22), n = floor(hi), plus one when the exact fraction of
++// the product, (hi - n - 0.5) + lo (a sum whose rounding keeps its sign), is not below a half: the larger n of a tie, as
++// the specification asks; the result I * 10^f + n (exact below 2^52) as decimals, a point f from the right, a minus when x
++// is below 0 (not for -0), as the C++ builtin writes it. Anything else (a wrapper, other digits, NaN, the infinities,
++// larger values) goes to the C++ builtin.
++// SSRS2: ToNumber(x.toFixed(f)) without the string, for TurboFan's fold of +x.toFixed(f) (JSCallReducer::
++// ReduceNumberPrototypeToFixed): NumberPrototypeToFixedFast's exact rounding to f digits, then the decimal's value as
++// one division of exact integers (|x| * 10^f below 2^52, 10^f exact to 10^22: IEEE's division is the correctly
++// rounded value ToNumber reads from the digits); anything else the call itself ({function}, the original toFixed),
++// then ToNumber.
++TF_BUILTIN(NumberToFixedNumber, CodeStubAssembler) {
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto receiver = Parameter<Object>(Descriptor::kReceiver);
++  auto digits = Parameter<Object>(Descriptor::kFractionDigits);
++  auto function = Parameter<Object>(Descriptor::kFunction);
++  Label slow(this, Label::kDeferred);
++  // (every variable declared before the first jump to {slow})
++  TVARIABLE(Float64T, var_x, Float64Constant(0));
++  TVARIABLE(Float64T, var_pow, Float64Constant(1));
++  TVARIABLE(IntPtrT, var_k, IntPtrConstant(0));
++  {
++    Label smi(this), ready(this);
++    GotoIf(TaggedIsSmi(receiver), &smi);
++    GotoIfNot(IsHeapNumber(CAST(receiver)), &slow);
++    var_x = LoadHeapNumberValue(CAST(receiver));
++    Goto(&ready);
++    BIND(&smi);
++    var_x = SmiToFloat64(CAST(receiver));
++    Goto(&ready);
++    BIND(&ready);
++  }
++  GotoIfNot(TaggedIsSmi(digits), &slow);
++  TNode<IntPtrT> f = SmiUntag(CAST(digits));
++  GotoIf(IntPtrLessThan(f, IntPtrConstant(0)), &slow);
++  GotoIf(IntPtrGreaterThan(f, IntPtrConstant(20)), &slow);
++  TNode<Float64T> x = var_x.value();
++  {
++    Label loop(this, {&var_pow, &var_k}), done(this);
++    Goto(&loop);
++    BIND(&loop);
++    GotoIf(IntPtrGreaterThanOrEqual(var_k.value(), f), &done);
++    var_pow = Float64Mul(var_pow.value(), Float64Constant(10));
++    var_k = IntPtrAdd(var_k.value(), IntPtrConstant(1));
++    Goto(&loop);
++    BIND(&done);
++  }
++  TNode<Float64T> pow = var_pow.value();
++  TNode<Float64T> ax = Float64Abs(x);
++  // (NaN fails the comparison)
++  GotoIfNot(Float64LessThan(Float64Mul(ax, pow),
++                            Float64Constant(4503599627370496.0)),
++            &slow);
++  TNode<Float64T> ip = Float64Floor(ax);
++  TNode<Float64T> r = Float64Sub(ax, ip);
++  TNode<Float64T> hi = Float64Mul(r, pow);
++  auto split = [&](TNode<Float64T> a, TNode<Float64T>* high,
++                   TNode<Float64T>* low) {
++    TNode<Float64T> c = Float64Mul(Float64Constant(134217729.0), a);
++    *high = Float64Sub(c, Float64Sub(c, a));
++    *low = Float64Sub(a, *high);
++  };
++  TNode<Float64T> rh, rl, ph, pl;
++  split(r, &rh, &rl);
++  split(pow, &ph, &pl);
++  TNode<Float64T> lo = Float64Add(
++      Float64Add(Float64Add(Float64Sub(Float64Mul(rh, ph), hi),
++                            Float64Mul(rh, pl)),
++                 Float64Mul(rl, ph)),
++      Float64Mul(rl, pl));
++  TNode<Float64T> n0 = Float64Floor(hi);
++  TNode<Float64T> half = Float64Add(
++      Float64Sub(Float64Sub(hi, n0), Float64Constant(0.5)), lo);
++  TNode<Float64T> n = Select<Float64T>(
++      Float64LessThan(half, Float64Constant(0)), [=] { return n0; },
++      [=, this] { return Float64Add(n0, Float64Constant(1)); });
++  TNode<Float64T> value =
++      Float64Div(Float64Add(Float64Mul(ip, pow), n), pow);
++  // (a negative x keeps its sign through zero: "-0.00" is -0)
++  TNode<Float64T> result = Select<Float64T>(
++      Float64LessThan(x, Float64Constant(0)),
++      [=, this] { return Float64Neg(value); }, [=] { return value; });
++  Return(ChangeFloat64ToTagged(result));
++
++  BIND(&slow);
++  TNode<JSAny> s = Call(context, function, ConvertReceiverMode::kAny,
++                        CAST(receiver), digits);
++  Return(ToNumber(context, s));
++}
++
++TF_BUILTIN(NumberPrototypeToFixedFast, CodeStubAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kJSActualArgumentsCount);
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto target = Parameter<JSFunction>(Descriptor::kJSTarget);
++  CodeStubArguments args(this, argc);
++  TNode<JSAny> receiver = args.GetReceiver();
++  TNode<JSAny> digits = args.GetOptionalArgumentValue(0);
++  Label slow(this, Label::kDeferred);
++  // (declared before the first jump to {slow}: a label merges a variable from every edge into it)
++  TVARIABLE(IntPtrT, var_f, IntPtrConstant(0));
++
++  TVARIABLE(Float64T, var_x);
++  {
++    Label smi(this), ready(this);
++    GotoIf(TaggedIsSmi(receiver), &smi);
++    GotoIfNot(IsHeapNumber(CAST(receiver)), &slow);
++    var_x = LoadHeapNumberValue(CAST(receiver));
++    Goto(&ready);
++    BIND(&smi);
++    var_x = SmiToFloat64(CAST(receiver));
++    Goto(&ready);
++    BIND(&ready);
++  }
++  {
++    Label ready(this);
++    GotoIf(IsUndefined(digits), &ready);
++    GotoIfNot(TaggedIsSmi(digits), &slow);
++    TNode<IntPtrT> f = SmiUntag(CAST(digits));
++    GotoIf(IntPtrLessThan(f, IntPtrConstant(0)), &slow);
++    GotoIf(IntPtrGreaterThan(f, IntPtrConstant(20)), &slow);
++    var_f = f;
++    Goto(&ready);
++    BIND(&ready);
++  }
++  TNode<IntPtrT> f = var_f.value();
++  TNode<Float64T> x = var_x.value();
++
++  // 10^f
++  TVARIABLE(Float64T, var_pow, Float64Constant(1));
++  TVARIABLE(IntPtrT, var_k, IntPtrConstant(0));
++  {
++    Label loop(this, {&var_pow, &var_k}), done(this);
++    Goto(&loop);
++    BIND(&loop);
++    GotoIf(IntPtrGreaterThanOrEqual(var_k.value(), f), &done);
++    var_pow = Float64Mul(var_pow.value(), Float64Constant(10));
++    var_k = IntPtrAdd(var_k.value(), IntPtrConstant(1));
++    Goto(&loop);
++    BIND(&done);
++  }
++  TNode<Float64T> pow = var_pow.value();
++  TNode<Float64T> ax = Float64Abs(x);
++  // (NaN fails the comparison)
++  GotoIfNot(Float64LessThan(Float64Mul(ax, pow),
++                            Float64Constant(4503599627370496.0)),
++            &slow);
++  TNode<Float64T> ip = Float64Floor(ax);
++  TNode<Float64T> r = Float64Sub(ax, ip);
++  TNode<Float64T> hi = Float64Mul(r, pow);
++  auto split = [&](TNode<Float64T> a, TNode<Float64T>* high,
++                   TNode<Float64T>* low) {
++    TNode<Float64T> c = Float64Mul(Float64Constant(134217729.0), a);
++    *high = Float64Sub(c, Float64Sub(c, a));
++    *low = Float64Sub(a, *high);
++  };
++  TNode<Float64T> rh, rl, ph, pl;
++  split(r, &rh, &rl);
++  split(pow, &ph, &pl);
++  TNode<Float64T> lo = Float64Add(
++      Float64Add(Float64Add(Float64Sub(Float64Mul(rh, ph), hi),
++                            Float64Mul(rh, pl)),
++                 Float64Mul(rl, ph)),
++      Float64Mul(rl, pl));
++  TNode<Float64T> n0 = Float64Floor(hi);
++  TNode<Float64T> half = Float64Add(
++      Float64Sub(Float64Sub(hi, n0), Float64Constant(0.5)), lo);
++  TVARIABLE(Float64T, var_n, n0);
++  {
++    Label down(this);
++    GotoIf(Float64LessThan(half, Float64Constant(0)), &down);
++    var_n = Float64Add(n0, Float64Constant(1));
++    Goto(&down);
++    BIND(&down);
++  }
++  TNode<Int64T> whole = TruncateFloat64ToInt64(
++      Float64Add(Float64Mul(ip, pow), var_n.value()));
++
++  // its digits: at least f + 1
++  TVARIABLE(IntPtrT, var_count, IntPtrConstant(1));
++  {
++    TVARIABLE(Int64T, var_rest, Int64Div(whole, Int64Constant(10)));
++    Label loop(this, {&var_count, &var_rest}), done(this);
++    Goto(&loop);
++    BIND(&loop);
++    GotoIf(Word64Equal(var_rest.value(), Int64Constant(0)), &done);
++    var_count = IntPtrAdd(var_count.value(), IntPtrConstant(1));
++    var_rest = Int64Div(var_rest.value(), Int64Constant(10));
++    Goto(&loop);
++    BIND(&done);
++  }
++  TNode<IntPtrT> count = IntPtrMax(var_count.value(),
++                                   IntPtrAdd(f, IntPtrConstant(1)));
++  TNode<BoolT> negative = Float64LessThan(x, Float64Constant(0));
++  TNode<IntPtrT> length = IntPtrAdd(
++      IntPtrAdd(count, SelectIntPtrConstant(negative, 1, 0)),
++      SelectIntPtrConstant(IntPtrGreaterThan(f, IntPtrConstant(0)), 1, 0));
++  TNode<String> result =
++      AllocateSeqOneByteString(Unsigned(TruncateIntPtrToInt32(length)));
++  // (no allocation from here on: the raw pointer stays the string's)
++  TNode<IntPtrT> data = IntPtrAdd(
++      BitcastTaggedToWord(result),
++      IntPtrConstant(OFFSET_OF_DATA_START(SeqOneByteString) - kHeapObjectTag));
++  {
++    TVARIABLE(IntPtrT, var_at, IntPtrSub(length, IntPtrConstant(1)));
++    TVARIABLE(IntPtrT, var_written, IntPtrConstant(0));
++    TVARIABLE(Int64T, var_rest, whole);
++    Label loop(this, {&var_at, &var_written, &var_rest}), done(this),
++        digit(this);
++    Goto(&loop);
++    BIND(&loop);
++    GotoIf(IntPtrEqual(var_written.value(), count), &done);
++    GotoIfNot(IntPtrEqual(var_written.value(), f), &digit);
++    GotoIf(IntPtrEqual(f, IntPtrConstant(0)), &digit);
++    StoreNoWriteBarrier(MachineRepresentation::kWord8, data, var_at.value(),
++                        Int32Constant('.'));
++    var_at = IntPtrSub(var_at.value(), IntPtrConstant(1));
++    Goto(&digit);
++    BIND(&digit);
++    TNode<Int64T> next = Int64Div(var_rest.value(), Int64Constant(10));
++    TNode<Int64T> d = Int64Mod(var_rest.value(), Int64Constant(10));
++    StoreNoWriteBarrier(
++        MachineRepresentation::kWord8, data, var_at.value(),
++        Int32Add(TruncateInt64ToInt32(d), Int32Constant('0')));
++    var_rest = next;
++    var_at = IntPtrSub(var_at.value(), IntPtrConstant(1));
++    var_written = IntPtrAdd(var_written.value(), IntPtrConstant(1));
++    Goto(&loop);
++    BIND(&done);
++  }
++  {
++    Label positive(this);
++    GotoIfNot(negative, &positive);
++    StoreNoWriteBarrier(MachineRepresentation::kWord8, data, IntPtrConstant(0),
++                        Int32Constant('-'));
++    Goto(&positive);
++    BIND(&positive);
++  }
++  args.PopAndReturn(result);
++
++  BIND(&slow);
++  TailCallJSBuiltin(Builtin::kNumberPrototypeToFixed, context, target,
++                    UndefinedConstant(), argc, InvalidDispatchHandleConstant());
++}
++
+ // -----------------------------------------------------------------------------
+ // ES6 section 20.1 Number Objects
+ 
+diff --git a/src/builtins/conversion.tq b/src/builtins/conversion.tq
+index 28d3a2f3784..c2d610abc36 100644
+--- a/src/builtins/conversion.tq
++++ b/src/builtins/conversion.tq
+@@ -237,6 +237,13 @@ transitioning builtin NonPrimitiveToPrimitive_Default(
+ 
+ transitioning builtin NonPrimitiveToPrimitive_Number(
+     implicit context: Context)(input: JSReceiver): JSPrimitive {
++  // SSRS2: a plain date (this context's Date's initial map) with Date.prototype's @@toPrimitive and valueOf as built
++  // is its time value: no lookups or calls (a page comparing dates with <=, or subtracting them, made two calls each).
++  try {
++    return TryFastDateToNumber(input) otherwise NotFastDate;
++  } label NotFastDate {
++    // Fall through.
++  }
+   const exoticToPrimitive: JSAny = TryGetExoticToPrimitive(input)
+       otherwise return OrdinaryToPrimitive_Number_Inline(input);
+   return CallExoticToPrimitive(
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 200a57e7574..dae40424e2a 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -2604,6 +2604,10 @@ TNode<Uint32T> CodeStubAssembler::LoadMapBitField3(TNode<Map> map) {
+   return LoadObjectField<Uint32T>(map, offsetof(Map, bit_field3_));
+ }
+ 
++TNode<Uint32T> CodeStubAssembler::LoadMapHostBitField(TNode<Map> map) {
++  return LoadObjectField<Uint32T>(map, offsetof(Map, host_bit_field_));
++}
++
+ TNode<Uint16T> CodeStubAssembler::LoadMapInstanceType(TNode<Map> map) {
+   return LoadObjectField<Uint16T>(map, offsetof(Map, instance_type_));
+ }
+@@ -8446,6 +8450,22 @@ TNode<BoolT> CodeStubAssembler::IsMapIteratorProtectorCellInvalid() {
+   return TaggedEqual(cell_value, invalid);
+ }
+ 
++TNode<Number> CodeStubAssembler::TryFastDateToNumber(
++    TNode<Context> context, TNode<JSReceiver> input, Label* not_fast) {
++  TNode<NativeContext> native_context = LoadNativeContext(context);
++  TNode<JSFunction> date_function = CAST(
++      LoadContextElement(native_context, Context::DATE_FUNCTION_INDEX));
++  TNode<HeapObject> initial_map =
++      LoadJSFunctionPrototypeOrInitialMap(date_function);
++  GotoIfNot(TaggedEqual(LoadMap(input), initial_map), not_fast);
++  TNode<Object> cell_value = LoadObjectField(
++      DateToPrimitiveProtectorConstant(), offsetof(PropertyCell, value_));
++  GotoIf(TaggedEqual(cell_value, SmiConstant(Protectors::kProtectorInvalid)),
++         not_fast);
++  return ChangeFloat64ToTagged(
++      LoadObjectField<Float64T>(input, offsetof(JSDate, value_)));
++}
++
+ TNode<BoolT>
+ CodeStubAssembler::IsStringWrapperToPrimitiveProtectorCellInvalid() {
+   TNode<Smi> invalid = SmiConstant(Protectors::kProtectorInvalid);
+@@ -9898,12 +9918,90 @@ TNode<Number> CodeStubAssembler::StringToNumber(TNode<String> input) {
+ 
+   // Check if string has a cached array index.
+   TNode<Uint32T> raw_hash_field = LoadNameRawHashField(input);
++  Label decimal(this);
+   GotoIf(IsSetWord32(raw_hash_field, Name::kDoesNotContainCachedArrayIndexMask),
+-         &runtime);
++         &decimal);
+ 
+   var_result = SmiFromUint32(DecodeArrayIndexFromHashField(raw_hash_field));
+   Goto(&end);
+ 
++  // SSRS2: a plain decimal ("-123.45": an optional minus, digits, at most one point with digits on both sides, 15
++  // significant digits at most) converted here, without the runtime: its digits as an integer below 10^15 and a power
++  // of ten up to 10^15 are exact doubles, so their quotient is the correctly rounded value, the one the runtime's
++  // StringToDouble gives (Clinger's fast path, as fast_float's). A page's +x.toFixed(2) entered the runtime each time.
++  // Anything else (spaces, a plus, an exponent, hex, Infinity, ".5", "5.", more digits, a two-byte or non-sequential
++  // string) goes to the runtime.
++  BIND(&decimal);
++  {
++    TNode<Int32T> instance_type = LoadInstanceType(input);
++    GotoIfNot(IsSeqOneByteStringInstanceType(instance_type), &runtime);
++    TNode<IntPtrT> length = Signed(ChangeUint32ToWord(LoadStringLengthAsWord32(input)));
++    GotoIf(IntPtrGreaterThan(length, IntPtrConstant(17)), &runtime);
++    const int data = OFFSET_OF_DATA_START(SeqOneByteString);
++    TVARIABLE(IntPtrT, var_i, IntPtrConstant(0));
++    TVARIABLE(Float64T, var_m, Float64Constant(0));
++    TVARIABLE(Float64T, var_scale, Float64Constant(1));
++    TVARIABLE(Int32T, var_digits, Int32Constant(0));
++    TVARIABLE(Int32T, var_fraction, Int32Constant(-1));
++    TVARIABLE(BoolT, var_minus, Int32FalseConstant());
++    Label loop(this, {&var_i, &var_m, &var_scale, &var_digits, &var_fraction,
++                      &var_minus}),
++        done(this), point(this), digit(this);
++    GotoIf(IntPtrEqual(length, IntPtrConstant(0)), &runtime);
++    {
++      Label minus(this);
++      GotoIf(Word32Equal(LoadObjectField<Uint8T>(input, IntPtrConstant(data)),
++                         Int32Constant('-')),
++             &minus);
++      Goto(&loop);
++      BIND(&minus);
++      var_minus = Int32TrueConstant();
++      var_i = IntPtrConstant(1);
++      Goto(&loop);
++    }
++    BIND(&loop);
++    {
++      GotoIf(IntPtrEqual(var_i.value(), length), &done);
++      TNode<Int32T> c = UncheckedCast<Int32T>(LoadObjectField<Uint8T>(
++          input, IntPtrAdd(IntPtrConstant(data), var_i.value())));
++      var_i = IntPtrAdd(var_i.value(), IntPtrConstant(1));
++      GotoIf(Word32Equal(c, Int32Constant('.')), &point);
++      TNode<Int32T> d = Int32Sub(c, Int32Constant('0'));
++      Branch(Uint32LessThanOrEqual(d, Uint32Constant(9)), &digit, &runtime);
++      BIND(&digit);
++      var_m = Float64Add(Float64Mul(var_m.value(), Float64Constant(10)),
++                         ChangeInt32ToFloat64(d));
++      var_digits = Int32Add(var_digits.value(), Int32Constant(1));
++      GotoIf(Int32LessThan(var_fraction.value(), Int32Constant(0)), &loop);
++      var_fraction = Int32Add(var_fraction.value(), Int32Constant(1));
++      var_scale = Float64Mul(var_scale.value(), Float64Constant(10));
++      Goto(&loop);
++      BIND(&point);
++      // (one point, after a digit)
++      GotoIf(Int32GreaterThanOrEqual(var_fraction.value(), Int32Constant(0)),
++             &runtime);
++      GotoIf(Word32Equal(var_digits.value(), Int32Constant(0)), &runtime);
++      var_fraction = Int32Constant(0);
++      Goto(&loop);
++    }
++    BIND(&done);
++    // (digits, at most 15; after a point, at least one)
++    GotoIf(Word32Equal(var_digits.value(), Int32Constant(0)), &runtime);
++    GotoIf(Int32GreaterThan(var_digits.value(), Int32Constant(15)), &runtime);
++    GotoIf(Word32Equal(var_fraction.value(), Int32Constant(0)), &runtime);
++    TNode<Float64T> value = Float64Div(var_m.value(), var_scale.value());
++    TVARIABLE(Float64T, var_value, value);
++    {
++      Label positive(this, &var_value);
++      GotoIfNot(var_minus.value(), &positive);
++      var_value = Float64Neg(value);
++      Goto(&positive);
++      BIND(&positive);
++    }
++    var_result = ChangeFloat64ToTagged(var_value.value());
++    Goto(&end);
++  }
++
+   BIND(&runtime);
+   {
+     var_result =
+@@ -18541,6 +18639,11 @@ TNode<String> CodeStubAssembler::Typeof(
+ 
+   GotoIf(InstanceTypeEqual(instance_type, ODDBALL_TYPE), &if_oddball);
+ 
++  Label resume_default(this);
++  GotoIfNot(Word32And(LoadMapBitField(map), Int32Constant(Map::Bits1::HasNamedInterceptorBit::kMask)), &resume_default);
++  Branch(Word32And(LoadMapHostBitField(map), Int32Constant(Map::HostBits::IsHostDelegateBit::kMask)), &return_function, &return_object);
++  BIND(&resume_default);
++
+   TNode<Int32T> callable_or_undetectable_mask =
+       Word32And(LoadMapBitField(map),
+                 Int32Constant(Map::Bits1::IsCallableBit::kMask |
+diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
+index 004d38e895c..a27bdcb38be 100644
+--- a/src/codegen/code-stub-assembler.h
++++ b/src/codegen/code-stub-assembler.h
+@@ -1431,6 +1431,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   TNode<Int32T> LoadMapBitField2(TNode<Map> map);
+   // Load bit field 3 of a map.
+   TNode<Uint32T> LoadMapBitField3(TNode<Map> map);
++  // Load host bit field of a map.
++  TNode<Uint32T> LoadMapHostBitField(TNode<Map> map);
+   // Load the instance type of a map.
+   TNode<Uint16T> LoadMapInstanceType(TNode<Map> map);
+   // Load the ElementsKind of a map.
+@@ -3071,6 +3073,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   TNode<BoolT> IsSetIteratorProtectorCellInvalid();
+   TNode<BoolT> IsMapIteratorProtectorCellInvalid();
+   TNode<BoolT> IsStringWrapperToPrimitiveProtectorCellInvalid();
++  // SSRS2: a plain date's time value (its map the context's initial Date map, the DateToPrimitive protector intact),
++  // which is its ToPrimitive with the hint NUMBER; {not_fast} otherwise.
++  TNode<Number> TryFastDateToNumber(TNode<Context> context,
++                                    TNode<JSReceiver> input, Label* not_fast);
+   void InvalidateStringWrapperToPrimitiveProtector();
+ 
+   TNode<IntPtrT> LoadMemoryChunkFlags(TNode<HeapObject> object);
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 55aa8422578..7f51cd85501 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -532,6 +532,9 @@ FUNCTION_REFERENCE(allocate_and_initialize_young_external_pointer_table_entry,
+                    AllocateAndInitializeYoungExternalPointerTableEntry)
+ 
+ FUNCTION_REFERENCE(get_date_field_function, JSDate::GetField)
++FUNCTION_REFERENCE(jsdate_set_time_value_function, JSDate::SetTimeValue)
++FUNCTION_REFERENCE(jsdate_set_utc_day_of_month_function,
++                   JSDate::SetUTCDayOfMonth)
+ 
+ // static
+ ExternalReference
+diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
+index 87881c862b3..6b7a26b93c6 100644
+--- a/src/codegen/external-reference.h
++++ b/src/codegen/external-reference.h
+@@ -141,6 +141,8 @@ enum class IsolateFieldId : uint8_t;
+   V(ephemeron_key_write_barrier_function,                                      \
+     "Heap::EphemeronKeyWriteBarrierFromCode")                                  \
+   V(get_date_field_function, "JSDate::GetField")                               \
++  V(jsdate_set_time_value_function, "JSDate::SetTimeValue")                    \
++  V(jsdate_set_utc_day_of_month_function, "JSDate::SetUTCDayOfMonth")         \
+   V(get_or_create_hash_raw, "get_or_create_hash_raw")                          \
+   V(gsab_byte_length, "GsabByteLength")                                        \
+   V(ieee754_fp64_to_fp16_raw_bits, "ieee754_fp64_to_fp16_raw_bits")            \
+diff --git a/src/codegen/heap-object-list.h b/src/codegen/heap-object-list.h
+index 62202b07607..f4eedb0f994 100644
+--- a/src/codegen/heap-object-list.h
++++ b/src/codegen/heap-object-list.h
+@@ -34,6 +34,8 @@
+     StringIteratorProtector)                                                  \
+   V(StringWrapperToPrimitiveProtector, string_wrapper_to_primitive_protector, \
+     StringWrapperToPrimitiveProtector)                                        \
++  V(DateToPrimitiveProtector, date_to_primitive_protector,                    \
++    DateToPrimitiveProtector)                                                 \
+   V(TypedArraySpeciesProtector, typed_array_species_protector,                \
+     TypedArraySpeciesProtector)                                               \
+   BUILTINS_WITH_SFI_OBJECT_LIST(V)
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index ef2524264c2..eda89bb34b4 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/compiler/js-call-reducer.h"
++#include "src/date/date.h"
+ 
+ #include <functional>
+ #include <optional>
+@@ -5578,6 +5579,29 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
+       return ReduceDatePrototypeGetField(node, JSDate::kMinute);
+     case Builtin::kDatePrototypeGetSeconds:
+       return ReduceDatePrototypeGetField(node, JSDate::kSecond);
++    // SSRS2: with local time UTC (g_local_time_is_utc) a date's cached fields are its UTC fields: getUTCDate and its kin
++    // inlined as the local getters are (a field load under the same protector), not a builtin and a C call each.
++    case Builtin::kDatePrototypeGetUTCFullYear:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kYear)
++                                 : NoChange();
++    case Builtin::kDatePrototypeGetUTCMonth:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kMonth)
++                                 : NoChange();
++    case Builtin::kDatePrototypeGetUTCDate:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kDay)
++                                 : NoChange();
++    case Builtin::kDatePrototypeGetUTCDay:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kWeekday)
++                                 : NoChange();
++    case Builtin::kDatePrototypeGetUTCHours:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kHour)
++                                 : NoChange();
++    case Builtin::kDatePrototypeGetUTCMinutes:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kMinute)
++                                 : NoChange();
++    case Builtin::kDatePrototypeGetUTCSeconds:
++      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kSecond)
++                                 : NoChange();
+ 
+     case Builtin::kTypedArrayPrototypeByteLength:
+       return ReduceArrayBufferViewByteLengthAccessor(node, JS_TYPED_ARRAY_TYPE,
+@@ -5667,6 +5691,8 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
+       return ReduceNumberIsNaN(node);
+     case Builtin::kNumberParseInt:
+       return ReduceNumberParseInt(node);
++    case Builtin::kNumberPrototypeToFixedFast:
++      return ReduceNumberPrototypeToFixed(node);
+     case Builtin::kGlobalIsFinite:
+       return ReduceGlobalIsFinite(node);
+     case Builtin::kGlobalIsNaN:
+@@ -5769,6 +5795,8 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
+           FIRST_JS_SET_ITERATOR_TYPE, LAST_JS_SET_ITERATOR_TYPE);
+     case Builtin::kDatePrototypeGetTime:
+       return ReduceDatePrototypeGetTime(node);
++    case Builtin::kDateUTC:
++      return ReduceDateUTC(node);
+     case Builtin::kDateNow:
+       return ReduceDateNow(node);
+     case Builtin::kNumberConstructor:
+@@ -9650,6 +9678,33 @@ Reduction JSCallReducer::ReduceDatePrototypeGetField(Node* node,
+ #undef __
+ }
+ 
++// SSRS2: Date.UTC of number constants (a page's loop bound, written as its date) folded into its value, worked out as
++// BUILTIN(DateUTC) works it out (ToNumber of a number is the number: nothing observable is left out).
++Reduction JSCallReducer::ReduceDateUTC(Node* node) {
++  JSCallNode n(node);
++  int const argc = n.ArgumentCount();
++  if (argc < 1 || argc > 7) return NoChange();
++  double fields[7] = {std::numeric_limits<double>::quiet_NaN(), 0, 1, 0, 0, 0, 0};
++  for (int i = 0; i < argc; i++) {
++    NumberMatcher m(n.Argument(i));
++    if (!m.HasResolvedValue()) return NoChange();
++    fields[i] = m.ResolvedValue();
++  }
++  double year = fields[0];
++  if (!std::isnan(year)) {
++    double const y = DoubleToInteger(year);
++    if (0.0 <= y && y <= 99) year = 1900 + y;
++  }
++  double value = MakeDate(MakeDay(year, fields[1], fields[2]),
++                          MakeTime(fields[3], fields[4], fields[5], fields[6]));
++  if (!DateCache::TryTimeClip(&value)) {
++    value = std::numeric_limits<double>::quiet_NaN();
++  }
++  Node* result = jsgraph()->ConstantNoHole(value);
++  ReplaceWithValue(node, result, n.effect(), n.control());
++  return Replace(result);
++}
++
+ // ES6 section 20.3.3.1 Date.now ( )
+ Reduction JSCallReducer::ReduceDateNow(Node* node) {
+   Node* effect = NodeProperties::GetEffectInput(node);
+@@ -9661,6 +9716,162 @@ Reduction JSCallReducer::ReduceDateNow(Node* node) {
+ }
+ 
+ // ES6 section 20.1.2.13 Number.parseInt ( string, radix )
++// SSRS2: +x.toFixed(f), a number made a string and read back (a page rounding its data), without the string: when
++// every value use of the call is a ToNumber (or the accumulator of a frame state, which resumes at that ToNumber) and
++// {f} is a number (whose ToIntegerOrInfinity calls nothing: a constant, a phi of constants, else checked), the call is
++// NumberToFixedNumber's: the number ToNumber would read, else the call itself and then ToNumber.
++Reduction JSCallReducer::ReduceNumberPrototypeToFixed(Node* node) {
++  JSCallNode n(node);
++  CallParameters const& p = n.Parameters();
++  if (n.ArgumentCount() != 1) return NoChange();
++  if (NodeProperties::IsExceptionalCall(node)) return NoChange();
++  Node* digits = n.Argument(0);
++  bool to_number = false;
++  for (Edge edge : node->use_edges()) {
++    if (!NodeProperties::IsValueEdge(edge)) continue;
++    Node* const user = edge.from();
++    if (user->opcode() == IrOpcode::kJSToNumber && edge.index() == 0) {
++      to_number = true;
++      continue;
++    }
++    if (user->opcode() == IrOpcode::kFrameState &&
++        edge.index() == FrameState::kFrameStateStackInput) {
++      continue;
++    }
++    return NoChange();
++  }
++  if (!to_number) return NoChange();
++  auto constant = [](Node* x) { return NumberMatcher(x).HasResolvedValue(); };
++  bool known = constant(digits);
++  if (!known && digits->opcode() == IrOpcode::kPhi) {
++    known = true;
++    for (int i = 0; i < digits->op()->ValueInputCount(); i++) {
++      known = known && constant(NodeProperties::GetValueInput(digits, i));
++    }
++  }
++  Node* effect = n.effect();
++  Node* control = n.control();
++  if (known && p.speculation_mode() == SpeculationMode::kAllowSpeculation) {
++    // Digits 0 to 20 known here: toFixed's arithmetic (NumberToFixedNumber's) in the graph, the number never boxed. A
++    // receiver that is no number, or |x| * 10^f past 2^52 (NaN too), deoptimizes; the call site's next code then
++    // calls NumberToFixedNumber.
++    std::vector<Node*> cases;
++    if (digits->opcode() == IrOpcode::kPhi) {
++      for (int i = 0; i < digits->op()->ValueInputCount(); i++) {
++        cases.push_back(NodeProperties::GetValueInput(digits, i));
++      }
++    } else {
++      cases.push_back(digits);
++    }
++    std::vector<Node*> pows, pow_highs, pow_lows;
++    bool in_range = true;
++    for (Node* c : cases) {
++      double const f = NumberMatcher(c).ResolvedValue();
++      if (!(f >= 0 && f <= 20) || f != std::floor(f)) {
++        in_range = false;
++        break;
++      }
++      // (10^f as the builtin works it out, and Dekker's split of it)
++      double pw = 1;
++      for (int k = 0; k < static_cast<int>(f); k++) pw = pw * 10;
++      double const big = 134217729.0 * pw;
++      double const high = big - (big - pw);
++      double const low = pw - high;
++      pows.push_back(jsgraph()->ConstantNoHole(pw));
++      pow_highs.push_back(jsgraph()->ConstantNoHole(high));
++      pow_lows.push_back(jsgraph()->ConstantNoHole(low));
++    }
++    if (in_range) {
++      auto merged = [&](std::vector<Node*>& values) -> Node* {
++        if (values.size() == 1) return values[0];
++        values.push_back(NodeProperties::GetControlInput(digits));
++        return graph()->NewNode(
++            common()->Phi(MachineRepresentation::kTagged,
++                          static_cast<int>(values.size()) - 1),
++            static_cast<int>(values.size()), values.data());
++      };
++      Node* pow = merged(pows);
++      Node* pow_high = merged(pow_highs);
++      Node* pow_low = merged(pow_lows);
++      auto op = [&](const Operator* o, Node* a, Node* b) {
++        return graph()->NewNode(o, a, b);
++      };
++      Node* x = effect = graph()->NewNode(
++          simplified()->CheckNumber(p.feedback()), n.receiver(), effect, control);
++      Node* ax = graph()->NewNode(simplified()->NumberAbs(), x);
++      Node* fits = op(simplified()->NumberLessThan(),
++                      op(simplified()->NumberMultiply(), ax, pow),
++                      jsgraph()->ConstantNoHole(4503599627370496.0));
++      effect = graph()->NewNode(
++          simplified()->CheckIf(DeoptimizeReason::kLostPrecision, p.feedback()),
++          fits, effect, control);
++      Node* ip = graph()->NewNode(simplified()->NumberFloor(), ax);
++      Node* r = op(simplified()->NumberSubtract(), ax, ip);
++      Node* hi = op(simplified()->NumberMultiply(), r, pow);
++      Node* big = op(simplified()->NumberMultiply(),
++                     jsgraph()->ConstantNoHole(134217729.0), r);
++      Node* rh = op(simplified()->NumberSubtract(), big,
++                    op(simplified()->NumberSubtract(), big, r));
++      Node* rl = op(simplified()->NumberSubtract(), r, rh);
++      Node* lo = op(
++          simplified()->NumberAdd(),
++          op(simplified()->NumberAdd(),
++             op(simplified()->NumberAdd(),
++                op(simplified()->NumberSubtract(),
++                   op(simplified()->NumberMultiply(), rh, pow_high), hi),
++                op(simplified()->NumberMultiply(), rh, pow_low)),
++             op(simplified()->NumberMultiply(), rl, pow_high)),
++          op(simplified()->NumberMultiply(), rl, pow_low));
++      Node* n0 = graph()->NewNode(simplified()->NumberFloor(), hi);
++      Node* half = op(simplified()->NumberAdd(),
++                      op(simplified()->NumberSubtract(),
++                         op(simplified()->NumberSubtract(), hi, n0),
++                         jsgraph()->ConstantNoHole(0.5)),
++                      lo);
++      Node* rounded = graph()->NewNode(
++          common()->Select(MachineRepresentation::kTagged),
++          op(simplified()->NumberLessThan(), half, jsgraph()->ZeroConstant()),
++          n0, op(simplified()->NumberAdd(), n0, jsgraph()->OneConstant()));
++      Node* value = op(simplified()->NumberDivide(),
++                       op(simplified()->NumberAdd(),
++                          op(simplified()->NumberMultiply(), ip, pow), rounded),
++                       pow);
++      // (a negative x keeps its sign through zero: "-0.00" is -0)
++      value = graph()->NewNode(
++          common()->Select(MachineRepresentation::kTagged),
++          op(simplified()->NumberLessThan(), x, jsgraph()->ZeroConstant()),
++          op(simplified()->NumberMultiply(), value,
++             jsgraph()->ConstantNoHole(-1)),
++          value);
++      ReplaceWithValue(node, value, effect, control);
++      return Replace(value);
++    }
++  }
++  if (!known) {
++    if (p.speculation_mode() == SpeculationMode::kDisallowSpeculation) {
++      return NoChange();
++    }
++    digits = effect = graph()->NewNode(simplified()->CheckNumber(p.feedback()),
++                                       digits, effect, control);
++  }
++
++  Callable const callable =
++      Builtins::CallableFor(isolate(), Builtin::kNumberToFixedNumber);
++  CallDescriptor const* const call_descriptor = Linkage::GetStubCallDescriptor(
++      graph()->zone(), callable.descriptor(),
++      callable.descriptor().GetStackParameterCount(),
++      CallDescriptor::kNeedsFrameState, Operator::kNoProperties);
++  Node* value = graph()->NewNode(
++      common()->Call(call_descriptor),
++      jsgraph()->HeapConstantNoHole(callable.code()), n.receiver(), digits,
++      n.target(), n.context(), n.frame_state(), effect, control);
++  effect = control = value;
++  value = effect = graph()->NewNode(common()->TypeGuard(Type::Number()), value,
++                                    effect, control);
++  ReplaceWithValue(node, value, effect, control);
++  return Replace(value);
++}
++
+ Reduction JSCallReducer::ReduceNumberParseInt(Node* node) {
+   JSCallNode n(node);
+   if (n.ArgumentCount() < 1) {
+diff --git a/src/compiler/js-call-reducer.h b/src/compiler/js-call-reducer.h
+index 0d4d10d6dc6..6fe7c8169eb 100644
+--- a/src/compiler/js-call-reducer.h
++++ b/src/compiler/js-call-reducer.h
+@@ -252,6 +252,8 @@ class V8_EXPORT_PRIVATE JSCallReducer final : public AdvancedReducer {
+   Reduction ReduceDatePrototypeGetField(Node* node, JSDate::FieldIndex field);
+ 
+   Reduction ReduceDateNow(Node* node);
++  Reduction ReduceDateUTC(Node* node);
++  Reduction ReduceNumberPrototypeToFixed(Node* node);
+   Reduction ReduceNumberParseInt(Node* node);
+ 
+   Reduction ReduceNumberConstructor(Node* node);
+diff --git a/src/date/date.cc b/src/date/date.cc
+index d10e4c588b2..b19760eadf8 100644
+--- a/src/date/date.cc
++++ b/src/date/date.cc
+@@ -282,7 +282,10 @@ void DateCache::ExtendTheAfterSegment(int64_t time_ms, int offset_ms) {
+   }
+ }
+ 
++bool g_local_time_is_utc = false;
++
+ int DateCache::LocalOffsetInMs(int64_t time_ms, bool is_utc) {
++  if (g_local_time_is_utc) return 0;
+   if (!is_utc) {
+     return GetLocalOffsetFromOS(time_ms, is_utc);
+   }
+diff --git a/src/date/date.h b/src/date/date.h
+index 88b088ee585..936e11e53bd 100644
+--- a/src/date/date.h
++++ b/src/date/date.h
+@@ -15,6 +15,10 @@
+ namespace v8 {
+ namespace internal {
+ 
++// SSRS2: the embedder's pages have UTC as their local time (set with the ICU data, InitializeICU): local offsets are 0
++// without asking the time zone, and a date's UTC fields are its cached local ones (JSDate::DoGetField).
++V8_EXPORT_PRIVATE extern bool g_local_time_is_utc;
++
+ class V8_EXPORT_PRIVATE DateCache {
+  public:
+   static const int kMsPerMin = 60 * 1000;
+diff --git a/src/debug/debug-evaluate.cc b/src/debug/debug-evaluate.cc
+index 0ad55941094..b0a551bc285 100644
+--- a/src/debug/debug-evaluate.cc
++++ b/src/debug/debug-evaluate.cc
+@@ -695,6 +695,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
+     case Builtin::kBooleanPrototypeValueOf:
+     // Date builtins.
+     case Builtin::kDateConstructor:
++    case Builtin::kDateConstructorFast:
+     case Builtin::kDateNow:
+     case Builtin::kDateParse:
+     case Builtin::kDatePrototypeGetDate:
+@@ -796,6 +797,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
+     case Builtin::kNumberParseInt:
+     case Builtin::kNumberPrototypeToExponential:
+     case Builtin::kNumberPrototypeToFixed:
++    case Builtin::kNumberPrototypeToFixedFast:
+     case Builtin::kNumberPrototypeToPrecision:
+     case Builtin::kNumberPrototypeToString:
+     case Builtin::kNumberPrototypeToLocaleString:
+@@ -1045,6 +1047,7 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
+     case Builtin::kDatePrototypeSetSeconds:
+     case Builtin::kDatePrototypeSetTime:
+     case Builtin::kDatePrototypeSetUTCDate:
++    case Builtin::kDatePrototypeSetUTCDateFast:
+     case Builtin::kDatePrototypeSetUTCFullYear:
+     case Builtin::kDatePrototypeSetUTCHours:
+     case Builtin::kDatePrototypeSetUTCMilliseconds:
+diff --git a/src/diagnostics/unwinding-info-win64.cc b/src/diagnostics/unwinding-info-win64.cc
+index daf312db7e5..d80914b5c72 100644
+--- a/src/diagnostics/unwinding-info-win64.cc
++++ b/src/diagnostics/unwinding-info-win64.cc
+@@ -464,6 +464,14 @@ void InitUnwindingRecord(Record* record, size_t code_size_in_bytes) {
+ namespace {
+ 
+ V8_DECLARE_ONCE(load_ntdll_unwinding_functions_once);
++
++#if defined(V8_OS_WIN_X64)
++static decltype(
++    &::RtlAddFunctionTable) add_function_table_func = nullptr;
++static decltype(
++    &::RtlDeleteFunctionTable) delete_function_table_func = nullptr;
++#endif  // V8_OS_WIN_X64
++
+ static decltype(
+     &::RtlAddGrowableFunctionTable) add_growable_function_table_func = nullptr;
+ static decltype(
+@@ -471,6 +479,19 @@ static decltype(
+     nullptr;
+ 
+ void LoadNtdllUnwindingFunctionsOnce() {
++
++#if defined(V8_OS_WIN_X64)
++  HMODULE kernel32_module =
++	LoadLibraryEx(L"kernel32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++  DCHECK_NOT_NULL(kernel32_module);
++  add_function_table_func =
++	reinterpret_cast<decltype(&::RtlAddFunctionTable)>(
++		::GetProcAddress(kernel32_module, "RtlAddFunctionTable"));
++  delete_function_table_func =
++	reinterpret_cast<decltype(&::RtlDeleteFunctionTable)>(
++		::GetProcAddress(kernel32_module, "RtlDeleteFunctionTable"));
++#endif  // V8_OS_WIN_X64
++
+   // Load functions from the ntdll.dll module.
+   HMODULE ntdll_module =
+       LoadLibraryEx(L"ntdll.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+@@ -493,6 +514,21 @@ void LoadNtdllUnwindingFunctions() {
+                  &LoadNtdllUnwindingFunctionsOnce);
+ }
+ 
++#if defined(V8_OS_WIN_X64)
++BOOLEAN AddFunctionTable(PRUNTIME_FUNCTION FunctionTable,
++                         DWORD EntryCount,
++                         DWORD64 BaseAddress) {
++  LoadNtdllUnwindingFunctions();
++  DCHECK_NOT_NULL(add_function_table_func);
++  return add_function_table_func(FunctionTable, EntryCount, BaseAddress);
++}
++BOOLEAN DeleteFunctionTable(PRUNTIME_FUNCTION FunctionTable) {
++  LoadNtdllUnwindingFunctions();
++  DCHECK_NOT_NULL(delete_function_table_func);
++  return delete_function_table_func(FunctionTable);
++}
++#endif  // V8_OS_WIN_X64
++
+ bool AddGrowableFunctionTable(PVOID* DynamicTable,
+                               PRUNTIME_FUNCTION FunctionTable, DWORD EntryCount,
+                               DWORD MaximumEntryCount, ULONG_PTR RangeBase,
+@@ -544,7 +580,7 @@ void RegisterNonABICompliantCodeRange(void* start, size_t size_in_bytes) {
+       ExceptionHandlerRecord* record = new (start) ExceptionHandlerRecord();
+       InitUnwindingRecord(record, size_in_bytes);
+ 
+-      CHECK(::RtlAddFunctionTable(record->runtime_function,
++      CHECK(AddFunctionTable(record->runtime_function,
+                                   kDefaultRuntimeFunctionCount,
+                                   reinterpret_cast<DWORD64>(start)));
+ 
+@@ -582,7 +618,7 @@ void UnregisterNonABICompliantCodeRange(void* start) {
+     if (unhandled_exception_callback_g) {
+       ExceptionHandlerRecord* record =
+           reinterpret_cast<ExceptionHandlerRecord*>(start);
+-      CHECK(::RtlDeleteFunctionTable(record->runtime_function));
++      CHECK(DeleteFunctionTable(record->runtime_function));
+ 
+       // Unprotect reserved page.
+       DWORD old_protect;
+diff --git a/src/execution/protectors.h b/src/execution/protectors.h
+index 2129033705e..5e076b2f1d4 100644
+--- a/src/execution/protectors.h
++++ b/src/execution/protectors.h
+@@ -101,6 +101,9 @@ class Protectors : public AllStatic {
+   /* default type hint NUMBER). */                                            \
+   V(StringWrapperToPrimitive, StringWrapperToPrimitiveProtector,              \
+     string_wrapper_to_primitive_protector)                                    \
++  /* SSRS2: a Date.prototype's @@toPrimitive and valueOf as built (the     */ \
++  /* ToPrimitive conversion of a plain date with the type hint NUMBER).    */ \
++  V(DateToPrimitive, DateToPrimitiveProtector, date_to_primitive_protector)   \
+   V(TypedArraySpeciesLookupChain, TypedArraySpeciesProtector,                 \
+     typed_array_species_protector)
+ 
+diff --git a/src/execution/stack-guard.cc b/src/execution/stack-guard.cc
+index 33f0a514e75..c612e453fb4 100644
+--- a/src/execution/stack-guard.cc
++++ b/src/execution/stack-guard.cc
+@@ -59,6 +59,16 @@ void StackGuard::SetStackLimit(uintptr_t limit) {
+                         SimulatorStack::JsLimitFromCLimit(isolate_, limit));
+ }
+ 
++void StackGuard::ResetStackLimit() {
++  SetStackLimit(DefaultStackLimit());
++}
++
++uintptr_t StackGuard::DefaultStackLimit() {
++  const uintptr_t kLimitSize = v8_flags.stack_size * KB;
++  DCHECK_GT(base::Stack::GetStackStart(), kLimitSize);
++  return (base::Stack::GetStackStart() <= kLimitSize) ? 0 : (base::Stack::GetStackStart() - kLimitSize);
++}
++
+ void StackGuard::SetStackLimitInternal(const ExecutionAccess& lock,
+                                        uintptr_t limit, uintptr_t jslimit) {
+   // If the current limits are special (e.g. due to a pending interrupt) then
+@@ -246,9 +256,7 @@ void StackGuard::FreeThreadResources() {
+ 
+ void StackGuard::ThreadLocal::Initialize(Isolate* isolate,
+                                          const ExecutionAccess& lock) {
+-  const uintptr_t kLimitSize = v8_flags.stack_size * KB;
+-  DCHECK_GT(base::Stack::GetStackStart(), kLimitSize);
+-  uintptr_t limit = base::Stack::GetStackStart() - kLimitSize;
++  uintptr_t limit = StackGuard::DefaultStackLimit();
+   real_jslimit_ = SimulatorStack::JsLimitFromCLimit(isolate, limit);
+   set_jslimit(SimulatorStack::JsLimitFromCLimit(isolate, limit));
+ #ifdef USE_SIMULATOR
+@@ -397,6 +405,8 @@ Tagged<Object> StackGuard::HandleInterrupts(InterruptLevel level) {
+ 
+   isolate_->counters()->stack_interrupts()->Increment();
+ 
++  if (isolate_->has_exception()) return ReadOnlyRoots(isolate_).exception();
++
+   return ReadOnlyRoots(isolate_).undefined_value();
+ }
+ 
+diff --git a/src/execution/stack-guard.h b/src/execution/stack-guard.h
+index 29ac411a360..b822be10641 100644
+--- a/src/execution/stack-guard.h
++++ b/src/execution/stack-guard.h
+@@ -34,6 +34,10 @@ class V8_EXPORT_PRIVATE V8_NODISCARD StackGuard final {
+   // the simulator's stack instead of using {limit}.
+   void SetStackLimit(uintptr_t limit);
+ 
++  static uintptr_t DefaultStackLimit();
++
++  void ResetStackLimit();
++
+   // Try to compare and swap the given jslimit without the ExecutionAccess lock.
+   // Expects potential concurrent writes of the interrupt limit, and of the
+   // interrupt limit only.
+diff --git a/src/heap/cppgc-internal/heap-object-header.h b/src/heap/cppgc-internal/heap-object-header.h
+index 33e26d1ef8f..90fedbf953a 100644
+--- a/src/heap/cppgc-internal/heap-object-header.h
++++ b/src/heap/cppgc-internal/heap-object-header.h
+@@ -368,7 +368,7 @@ uint16_t HeapObjectHeader::LoadEncoded() const {
+   if constexpr (mode == AccessMode::kNonAtomic) {
+     return half;
+   }
+-  return std::atomic_ref(const_cast<uint16_t&>(half)).load(memory_order);
++  return std::atomic_ref<uint16_t>(const_cast<uint16_t&>(half)).load(memory_order);
+ }
+ 
+ template <AccessMode mode, HeapObjectHeader::EncodedHalf part,
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index d2a5f284e01..4de7231aa9d 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -2771,6 +2771,7 @@ Tagged<Map> Factory::InitializeMap(Tagged<Map> map, InstanceType type,
+       Map::Bits3::ConstructionCounterBits::encode(Map::kNoSlackTracking) |
+       Map::Bits3::IsExtensibleBit::encode(true);
+   map->set_bit_field3(bit_field3);
++  map->set_host_bit_field(0);
+   map->set_instance_type(type);
+   if (during_bootstrap) {
+     map->init_prototype_and_constructor_or_back_pointer_during_bootstrap(roots);
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 7a4e5c3e0bf..93328e3191a 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -296,6 +296,7 @@ void InitializePartialMap(Isolate* isolate, Tagged<Map> map,
+       Map::Bits3::OwnsDescriptorsBit::encode(true) |
+       Map::Bits3::ConstructionCounterBits::encode(Map::kNoSlackTracking);
+   map->set_bit_field3(bit_field3);
++  map->set_host_bit_field(0);
+   DCHECK(!map->is_in_retained_map_list());
+   map->clear_padding();
+   map->set_elements_kind(TERMINAL_FAST_ELEMENTS_KIND);
+@@ -1547,6 +1548,7 @@ void Heap::CreateInitialMutableObjects() {
+   set_string_iterator_protector(*factory->NewProtector());
+   set_string_length_protector(*factory->NewProtector());
+   set_string_wrapper_to_primitive_protector(*factory->NewProtector());
++  set_date_to_primitive_protector(*factory->NewProtector());
+   set_number_string_not_regexp_like_protector(*factory->NewProtector());
+   set_typed_array_species_protector(*factory->NewProtector());
+ 
+diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
+index 7299c9561a9..bf8f1a47808 100644
+--- a/src/init/bootstrapper.cc
++++ b/src/init/bootstrapper.cc
+@@ -2615,7 +2615,7 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+                           Builtin::kNumberPrototypeToExponential, 1,
+                           kDontAdapt);
+     SimpleInstallFunction(isolate_, prototype, "toFixed",
+-                          Builtin::kNumberPrototypeToFixed, 1, kDontAdapt);
++                          Builtin::kNumberPrototypeToFixedFast, 1, kDontAdapt);
+     SimpleInstallFunction(isolate_, prototype, "toPrecision",
+                           Builtin::kNumberPrototypeToPrecision, 1, kDontAdapt);
+     SimpleInstallFunction(isolate_, prototype, "toString",
+@@ -2978,7 +2978,7 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+   {  // --- D a t e ---
+     DirectHandle<JSFunction> date_fun = InstallFunction(
+         isolate_, global, "Date", JS_DATE_TYPE, sizeof(JSDate), 0,
+-        factory->the_hole_value(), Builtin::kDateConstructor, 7, kDontAdapt);
++        factory->the_hole_value(), Builtin::kDateConstructorFast, 7, kDontAdapt);
+     InstallWithIntrinsicDefaultProto(isolate_, date_fun,
+                                      Context::DATE_FUNCTION_INDEX);
+ 
+@@ -3048,7 +3048,7 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+     SimpleInstallFunction(isolate_, prototype, "getUTCDate",
+                           Builtin::kDatePrototypeGetUTCDate, 0, kAdapt);
+     SimpleInstallFunction(isolate_, prototype, "setUTCDate",
+-                          Builtin::kDatePrototypeSetUTCDate, 1, kDontAdapt);
++                          Builtin::kDatePrototypeSetUTCDateFast, 1, kDontAdapt);
+     SimpleInstallFunction(isolate_, prototype, "getUTCDay",
+                           Builtin::kDatePrototypeGetUTCDay, 0, kAdapt);
+     SimpleInstallFunction(isolate_, prototype, "getUTCFullYear",
+diff --git a/src/init/icu_util.cc b/src/init/icu_util.cc
+index f210b157032..ee1dc47d499 100644
+--- a/src/init/icu_util.cc
++++ b/src/init/icu_util.cc
+@@ -11,12 +11,16 @@
+ #if defined(V8_INTL_SUPPORT)
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ #include "src/base/build_config.h"
+ #include "src/base/file-utils.h"
+ #include "src/base/platform/wrappers.h"
+ #include "unicode/putil.h"
+ #include "unicode/udata.h"
++#include "unicode/timezone.h"
++#include "unicode/unistr.h"
++#include "src/date/date.h"
+ 
+ #define ICU_UTIL_DATA_FILE 0
+ #define ICU_UTIL_DATA_STATIC 1
+@@ -103,6 +107,31 @@ bool InitializeICU(const char* icu_data_file) {
+ #endif
+ }
+ 
++bool InitializeICU(const char* icu_data_ptr, size_t size) {
++#if !defined(V8_INTL_SUPPORT)
++  return true;
++#else
++#if ICU_UTIL_DATA_IMPL == ICU_UTIL_DATA_STATIC
++  return true;
++#elif ICU_UTIL_DATA_IMPL == ICU_UTIL_DATA_FILE
++  if (!icu_data_ptr) return false;
++  if (g_icu_data_ptr) return true;
++  g_icu_data_ptr = new char[size];
++  memcpy(g_icu_data_ptr, icu_data_ptr, size);
++  atexit(free_icu_data_ptr);
++  UErrorCode err = U_ZERO_ERROR;
++  udata_setCommonData(reinterpret_cast<void*>(g_icu_data_ptr), &err);
++  udata_setFileAccess(UDATA_ONLY_PACKAGES, &err);
++  if (err != U_ZERO_ERROR) return false;
++  // SSRS2: the embedder's pages have UTC as their local time, whatever the machine's zone (Intl's default zone too).
++  icu::TimeZone::adoptDefault(
++      icu::TimeZone::createTimeZone(icu::UnicodeString("Etc/UTC")));
++  g_local_time_is_utc = true;
++  return true;
++#endif
++#endif
++}
++
+ #undef ICU_UTIL_DATA_FILE
+ #undef ICU_UTIL_DATA_STATIC
+ 
+diff --git a/src/init/icu_util.h b/src/init/icu_util.h
+index 4f6857c66e7..9ecdc793007 100644
+--- a/src/init/icu_util.h
++++ b/src/init/icu_util.h
+@@ -6,6 +6,7 @@
+ #define V8_INIT_ICU_UTIL_H_
+ 
+ #include "src/common/globals.h"
++#include <stddef.h>
+ 
+ namespace v8 {
+ 
+@@ -14,6 +15,7 @@ namespace internal {
+ // Call this function to load ICU's data tables for the current process.  This
+ // function should be called before ICU is used.
+ V8_WARN_UNUSED_RESULT bool InitializeICU(const char* icu_data_file);
++bool InitializeICU(const char* icu_data_ptr, size_t size);
+ 
+ // Like above, but using the default icudt[lb].dat location if icu_data_file is
+ // not specified.
+diff --git a/src/init/v8.cc b/src/init/v8.cc
+index 91463a1ead9..c6721f528a6 100644
+--- a/src/init/v8.cc
++++ b/src/init/v8.cc
+@@ -108,7 +108,6 @@ V8_DECLARE_ONCE(init_snapshot_once);
+ // static
+ void V8::InitializePlatform(v8::Platform* platform) {
+   AdvanceStartupState(V8StartupState::kPlatformInitializing);
+-  CHECK(!platform_);
+   CHECK_NOT_NULL(platform);
+   platform_ = platform;
+   v8::base::SetPrintStackTrace(platform_->GetStackTracePrinter());
+diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
+index b6b59326301..061905eaa70 100644
+--- a/src/interpreter/bytecode-generator.cc
++++ b/src/interpreter/bytecode-generator.cc
+@@ -7851,6 +7851,8 @@ static bool IsCharU(const AstRawString* str) {
+   return str->length() == 1 && str->FirstCharacter() == 'u';
+ }
+ 
++static bool disable_literal_compare_typeof_detection = true;
++
+ static bool IsLiteralCompareTypeof(CompareOperation* expr,
+                                    Expression** sub_expr,
+                                    TestTypeOfFlags::LiteralFlag* flag,
+@@ -7864,6 +7866,7 @@ static bool IsLiteralCompareTypeof(CompareOperation* expr,
+   DCHECK_NE(expr->op(), Token::kNotEq);
+   DCHECK_NE(expr->op(), Token::kNotEqStrict);
+ 
++  if (disable_literal_compare_typeof_detection) return false;
+   if (IsTypeof(expr->left()) && expr->right()->IsStringLiteral()) {
+     Literal* right_lit = expr->right()->AsLiteral();
+ 
+diff --git a/src/libplatform/default-platform.cc b/src/libplatform/default-platform.cc
+index 0e6e9611c36..3fc86e14eb1 100644
+--- a/src/libplatform/default-platform.cc
++++ b/src/libplatform/default-platform.cc
+@@ -61,6 +61,10 @@ std::unique_ptr<v8::Platform> NewDefaultPlatform(
+   return platform;
+ }
+ 
++std::unique_ptr<v8::PageAllocator> NewDefaultPageAllocator() {
++  return std::make_unique<v8::base::PageAllocator>();
++}
++
+ std::unique_ptr<v8::Platform> NewSingleThreadedDefaultPlatform(
+     IdleTaskSupport idle_task_support,
+     InProcessStackDumping in_process_stack_dumping,
+diff --git a/src/maglev/maglev-reducer-inl.h b/src/maglev/maglev-reducer-inl.h
+index 41371336573..59377146887 100644
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -12,6 +12,7 @@
+ #include "src/base/bits.h"
+ #include "src/base/container-utils.h"
+ #include "src/base/division-by-constant.h"
++#include "src/date/date.h"
+ #include "src/base/ieee754.h"
+ #include "src/base/logging.h"
+ #include "src/builtins/builtins.h"
+@@ -5556,6 +5557,50 @@ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetSeconds(
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kSecond);
+ }
+ 
++// SSRS2: getUTCDate and its kin, with local time UTC (g_local_time_is_utc): the cached fields are the UTC fields.
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCFullYear(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kYear);
++}
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCMonth(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kMonth);
++}
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCDate(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kDay);
++}
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCDay(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kWeekday);
++}
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCHours(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kHour);
++}
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCMinutes(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kMinute);
++}
++template <typename BaseT>
++MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCSeconds(
++    ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
++  if (!g_local_time_is_utc) return {};
++  return TryReduceDatePrototypeGetField(target, args, JSDate::kSecond);
++}
++
+ #ifdef V8_INTL_SUPPORT
+ template <typename BaseT>
+ MaybeReduceResult
+diff --git a/src/maglev/maglev-reducer.h b/src/maglev/maglev-reducer.h
+index ef286e3e6b1..cfeea302811 100644
+--- a/src/maglev/maglev-reducer.h
++++ b/src/maglev/maglev-reducer.h
+@@ -1254,6 +1254,13 @@ class MaglevReducer {
+   V(DatePrototypeGetMonth)                     \
+   V(DatePrototypeGetSeconds)                   \
+   V(DatePrototypeGetTime)                      \
++  V(DatePrototypeGetUTCFullYear)                 \
++  V(DatePrototypeGetUTCMonth)                    \
++  V(DatePrototypeGetUTCDate)                     \
++  V(DatePrototypeGetUTCDay)                      \
++  V(DatePrototypeGetUTCHours)                    \
++  V(DatePrototypeGetUTCMinutes)                  \
++  V(DatePrototypeGetUTCSeconds)                  \
+   V(FunctionPrototypeHasInstance)              \
+   V(MapPrototypeEntries)                       \
+   V(MapPrototypeKeys)                          \
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index 69e7d3101a5..a78b1e523f8 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -5524,6 +5524,14 @@ void JSObject::SetImmutableProto(Isolate* isolate,
+   object->set_map(isolate, *new_map, kReleaseStore);
+ }
+ 
++void JSObject::SetHostDelegate(Isolate* isolate,
++                               DirectHandle<JSObject> object) {
++  DirectHandle<Map> map(object->map(), isolate);
++  if (map->is_host_delegate()) return;
++  DirectHandle<Map> new_map = Map::TransitionToHostDelegate(isolate, map);
++  object->set_map(isolate, *new_map, kReleaseStore);
++}
++
+ void JSObject::EnsureCanContainElements(Isolate* isolate,
+                                         DirectHandle<JSObject> object,
+                                         JavaScriptArguments* args,
+@@ -5905,6 +5913,42 @@ int64_t JSDate::CurrentTimeValue(Isolate* isolate) {
+ }
+ 
+ // static
++double JSDate::SetTimeValue(Isolate* isolate, Address raw_date, double time) {
++  // Called through CallCFunction.
++  DisallowGarbageCollection no_gc;
++  DisallowHandleAllocation no_handles;
++  DisallowJavascriptExecution no_js(isolate);
++
++  Tagged<JSDate> date = Cast<JSDate>(Tagged<Object>(raw_date));
++  if (DateCache::TryTimeClip(&time)) {
++    date->SetValue(isolate, time);
++    return time;
++  }
++  date->SetNanValue();
++  return std::numeric_limits<double>::quiet_NaN();
++}
++
++double JSDate::SetUTCDayOfMonth(Isolate* isolate, Address raw_date,
++                                double day_of_month) {
++  // Called through CallCFunction.
++  DisallowGarbageCollection no_gc;
++  DisallowHandleAllocation no_handles;
++  DisallowJavascriptExecution no_js(isolate);
++
++  Tagged<JSDate> date = Cast<JSDate>(Tagged<Object>(raw_date));
++  double time_val = date->value();
++  if (std::isnan(time_val)) return time_val;
++  DateCache* date_cache = isolate->date_cache();
++  int64_t const time_ms = static_cast<int64_t>(time_val);
++  int const days = date_cache->DaysFromTime(time_ms);
++  int const time_within_day = date_cache->TimeInDay(time_ms, days);
++  int year, month, day;
++  date_cache->YearMonthDayFromDays(days, &year, &month, &day);
++  return SetTimeValue(isolate, raw_date,
++                      MakeDate(MakeDay(year, month, day_of_month),
++                               time_within_day));
++}
++
+ Address JSDate::GetField(Isolate* isolate, Address raw_object,
+                          Address smi_index) {
+   // Called through CallCFunction.
+@@ -5922,6 +5966,12 @@ Address JSDate::GetField(Isolate* isolate, Address raw_object,
+ Tagged<Object> JSDate::DoGetField(Isolate* isolate, FieldIndex index) {
+   DateCache* date_cache = isolate->date_cache();
+ 
++  // SSRS2: with local time UTC (g_local_time_is_utc), getUTCDate and its kin read the cached local fields: a date's
++  // calendar fields worked out once after it is set, not again for each of them.
++  if (g_local_time_is_utc && index >= kYearUTC && index <= kSecondUTC) {
++    index = static_cast<FieldIndex>(index - kYearUTC + kYear);
++  }
++
+   if (index < kFirstUncachedField) {
+     Tagged<Object> stamp = cache_stamp();
+     if (stamp != isolate->date_cache_stamp() && IsSmi(stamp)) {
+diff --git a/src/objects/js-objects.h b/src/objects/js-objects.h
+index 558c0723146..3af5792523e 100644
+--- a/src/objects/js-objects.h
++++ b/src/objects/js-objects.h
+@@ -869,6 +869,9 @@ V8_OBJECT class JSObject : public JSReceiver {
+   static void SetImmutableProto(Isolate* isolate,
+                                 DirectHandle<JSObject> object);
+ 
++  static void SetHostDelegate(Isolate* isolate,
++                                DirectHandle<JSObject> object);
++
+   // Initializes the body starting at |start_offset|. It is responsibility of
+   // the caller to initialize object header. Fill the pre-allocated fields with
+   // undefined_value and the rest with filler_map.
+@@ -1345,6 +1348,14 @@ V8_OBJECT class JSDate : public JSObject {
+   static Address GetField(Isolate* isolate, Address raw_date,
+                           Address smi_index);
+ 
++  // SSRS2: called through CallCFunction by the Date constructor's and setUTCDate's builtins: SetTimeValue sets the
++  // date's time value, clipped, its cached fields worked out as SetValue works them out, and returns it (NaN past the
++  // range); SetUTCDayOfMonth sets the day of the month in UTC as setUTCDate does (NaN left as it is). They allocate
++  // nothing.
++  static double SetTimeValue(Isolate* isolate, Address raw_date, double time);
++  static double SetUTCDayOfMonth(Isolate* isolate, Address raw_date,
++                                 double day_of_month);
++
+   inline double value() const;
+   inline void set_value(double v);
+ 
+diff --git a/src/objects/lookup.cc b/src/objects/lookup.cc
+index 872d78cc45b..771bcab2702 100644
+--- a/src/objects/lookup.cc
++++ b/src/objects/lookup.cc
+@@ -250,6 +250,22 @@ void LookupIterator::InternalUpdateProtector(
+   auto receiver = Cast<JSObject>(receiver_generic);
+ 
+   ReadOnlyRoots roots(isolate);
++  // SSRS2: a Date.prototype's @@toPrimitive or valueOf set, defined, reconfigured or deleted: a plain date's
++  // ToPrimitive with the hint NUMBER (NonPrimitiveToPrimitive_Number's fast path, its time value) is no longer known.
++  if ((*name == roots.to_primitive_symbol() ||
++       *name == roots.valueOf_string()) &&
++      Protectors::IsDateToPrimitiveIntact(isolate) &&
++      receiver->map()->is_prototype_map()) {
++    Tagged<Map> metamap = receiver->map()->map();
++    if (metamap != roots.meta_map()) {
++      Tagged<JSFunction> date_function =
++          metamap->native_context()->date_function();
++      if (date_function->has_instance_prototype() &&
++          date_function->instance_prototype() == *receiver) {
++        Protectors::InvalidateDateToPrimitive(isolate);
++      }
++    }
++  }
+   if (*name == roots.constructor_string()) {
+     // Setting the constructor property could change an instance's @@species
+     if (IsJSArray(*receiver)) {
+diff --git a/src/objects/map-inl.h b/src/objects/map-inl.h
+index 63cfe9edd10..a8ec6c80f10 100644
+--- a/src/objects/map-inl.h
++++ b/src/objects/map-inl.h
+@@ -229,6 +229,9 @@ BIT_FIELD_ACCESSORS(Map, bit_field3, may_have_interesting_properties,
+ BIT_FIELD_ACCESSORS(Map, relaxed_bit_field3, construction_counter,
+                     Map::Bits3::ConstructionCounterBits)
+ 
++// |host_bit_field| fields (ClearScript).
++BIT_FIELD_ACCESSORS(Map, host_bit_field, is_host_delegate, Map::HostBits::IsHostDelegateBit)
++
+ bool IsMetaMap(Tagged<Map> map) {
+   return InstanceTypeChecker::IsMap(map->instance_type());
+ }
+@@ -677,6 +680,9 @@ uint8_t Map::bit_field2() const { return bit_field2_; }
+ 
+ void Map::set_bit_field2(uint8_t value) { bit_field2_ = value; }
+ 
++uint32_t Map::host_bit_field() const { return host_bit_field_; }
++void Map::set_host_bit_field(uint32_t value) { host_bit_field_ = value; }
++
+ uint32_t Map::bit_field3() const {
+   // TODO(solanes, v8:7790, v8:11353): Make this and the setter non-atomic
+   // when TSAN sees the map's store synchronization.
+@@ -953,9 +959,8 @@ void Map::InitializeDescriptors(Tagged<DescriptorArray> descriptors) {
+ }
+ 
+ void Map::clear_padding() {
+-#if TAGGED_SIZE_8_BYTES
+-  optional_padding_ = 0;
+-#endif
++  // ClearScript: what was padding is host_bit_field_, set where a map is made or
++  // copied (Factory::InitializeMap, InitializePartialMap, Map::RawCopy), never cleared.
+ }
+ 
+ void Map::AppendDescriptor(Isolate* isolate, Descriptor* desc) {
+diff --git a/src/objects/map.cc b/src/objects/map.cc
+index cdc41455019..07fb3dc6e55 100644
+--- a/src/objects/map.cc
++++ b/src/objects/map.cc
+@@ -1332,6 +1332,7 @@ Handle<Map> Map::RawCopy(Isolate* isolate, DirectHandle<Map> src_handle,
+     }
+     // Same as bit_field comment above.
+     raw->set_bit_field3(new_bit_field3);
++    raw->set_host_bit_field(src->host_bit_field());
+     if (v8_flags.proto_assign_seq_lazy_func_opt) {
+       if (Tagged<PrototypeSharedClosureInfo> infos;
+           src_handle->TryGetPrototypeSharedClosureInfo(&infos)) {
+@@ -1506,6 +1507,13 @@ DirectHandle<Map> Map::TransitionToImmutableProto(Isolate* isolate,
+   return new_map;
+ }
+ 
++DirectHandle<Map> Map::TransitionToHostDelegate(Isolate* isolate,
++                                          DirectHandle<Map> map) {
++  DirectHandle<Map> new_map = Map::Copy(isolate, map, "HostDelegate");
++  new_map->set_is_host_delegate(true);
++  return new_map;
++}
++
+ namespace {
+ void EnsureInitialMap(Isolate* isolate, DirectHandle<Map> map) {
+ #ifdef DEBUG
+diff --git a/src/objects/map.h b/src/objects/map.h
+index a33c7f01ac1..802eec3720d 100644
+--- a/src/objects/map.h
++++ b/src/objects/map.h
+@@ -367,6 +367,7 @@ V8_OBJECT class Map : public HeapObject {
+   // performs the read/write non-atomically if it's off. This is done to have
+   // wider TSAN coverage on the cases where it's possible.
+   DECL_PRIMITIVE_ACCESSORS(bit_field3, uint32_t)
++  DECL_PRIMITIVE_ACCESSORS(host_bit_field, uint32_t)
+ 
+   DECL_PRIMITIVE_ACCESSORS(relaxed_bit_field3, uint32_t)
+   DECL_PRIMITIVE_ACCESSORS(release_acquire_bit_field3, uint32_t)
+@@ -406,6 +407,11 @@ V8_OBJECT class Map : public HeapObject {
+   static_assert(kSlackTrackingCounterStart <=
+                 Bits3::ConstructionCounterBits::kMax);
+ 
++  // Bit positions for |host_bits|.
++  struct HostBits {
++    using IsHostDelegateBit = base::BitField<bool, 0, 1, uint32_t>;
++  };
++
+   // Inobject slack tracking is the way to reclaim unused inobject space.
+   //
+   // The instance size is initially determined by adding some slack to
+@@ -832,6 +838,8 @@ V8_OBJECT class Map : public HeapObject {
+ 
+   DECL_BOOLEAN_ACCESSORS(is_immutable_proto)
+ 
++  DECL_BOOLEAN_ACCESSORS(is_host_delegate)
++
+   // This counter is used for in-object slack tracking.
+   // The in-object slack tracking is considered enabled when the counter is
+   // non zero. The counter only has a valid count for initial maps. For
+@@ -1025,6 +1033,9 @@ V8_OBJECT class Map : public HeapObject {
+   static DirectHandle<Map> TransitionToImmutableProto(Isolate* isolate,
+                                                       DirectHandle<Map> map);
+ 
++  static DirectHandle<Map> TransitionToHostDelegate(Isolate* isolate,
++                                                    DirectHandle<Map> map);
++
+   class BodyDescriptor;
+ 
+   // Compares this map to another to see if they describe equivalent objects,
+@@ -1189,9 +1200,8 @@ V8_OBJECT class Map : public HeapObject {
+   std::atomic<uint8_t> bit_field_;
+   uint8_t bit_field2_;
+   std::atomic<uint32_t> bit_field3_;
+-#if TAGGED_SIZE_8_BYTES
+-  uint32_t optional_padding_;
+-#endif
++  // ClearScript: the host bits (is_host_delegate), where 64-bit targets had padding.
++  uint32_t host_bit_field_;
+   TaggedMember<JSPrototype> prototype_;
+   TaggedMember<Object> constructor_or_back_pointer_or_native_context_;
+ #if V8_ENABLE_WEBASSEMBLY
+diff --git a/src/objects/map.tq b/src/objects/map.tq
+index cb85e7788e6..cfda5886891 100644
+--- a/src/objects/map.tq
++++ b/src/objects/map.tq
+@@ -36,6 +36,10 @@ bitfield struct MapBitFields3 extends uint32 {
+   construction_counter: int32: 3 bit;
+ }
+ 
++bitfield struct MapHostBitFields extends uint32 {
++  is_host_delegate: bool: 1 bit;
++}
++
+ @cppObjectLayoutDefinition
+ extern class Map extends HeapObject {
+   macro PrototypeInfo(): PrototypeInfo labels HasNoPrototypeInfo {
+@@ -80,7 +84,7 @@ extern class Map extends HeapObject {
+   bit_field2: MapBitFields2;
+   bit_field3: MapBitFields3;
+ 
+-  @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
++  host_bit_field: MapHostBitFields;
+ 
+   prototype: JSReceiver|Null;
+   constructor_or_back_pointer_or_native_context: Object;
+diff --git a/src/objects/objects.cc b/src/objects/objects.cc
+index 3ff2dd2f8d5..f030e27ea47 100644
+--- a/src/objects/objects.cc
++++ b/src/objects/objects.cc
+@@ -1045,7 +1045,12 @@ Handle<String> Object::TypeOf(Isolate* isolate, DirectHandle<Object> object) {
+   if (IsString(*object)) return isolate->factory()->string_string();
+   if (IsSymbol(*object)) return isolate->factory()->symbol_string();
+   if (IsBigInt(*object)) return isolate->factory()->bigint_string();
+-  if (IsCallable(*object)) return isolate->factory()->function_string();
++  if (IsJSObject(*object)) {
++    DirectHandle<JSObject> obj = Cast<JSObject>(object);
++    if (obj->HasNamedInterceptor()) {
++      return obj->map()->is_host_delegate() ? isolate->factory()->function_string() : isolate->factory()->object_string();
++    }
++  }  if (IsCallable(*object)) return isolate->factory()->function_string();
+   return isolate->factory()->object_string();
+ }
+ 
+diff --git a/src/objects/templates-inl.h b/src/objects/templates-inl.h
+index 1cc85747432..14caf84c674 100644
+--- a/src/objects/templates-inl.h
++++ b/src/objects/templates-inl.h
+@@ -348,6 +348,14 @@ void ObjectTemplateInfo::set_code_like(bool is_code_like) {
+   return set_data(IsCodeKindBit::update(data(), is_code_like));
+ }
+ 
++bool ObjectTemplateInfo::host_delegate() const {
++  return IsHostDelegateBit::decode(data());
++}
++
++void ObjectTemplateInfo::set_host_delegate(bool value) {
++  return set_data(IsHostDelegateBit::update(data(), value));
++}
++
+ bool FunctionTemplateInfo::IsTemplateFor(Tagged<JSObject> object) const {
+   return IsTemplateFor(object->map());
+ }
+diff --git a/src/objects/templates.h b/src/objects/templates.h
+index 2f7c880c1f1..839edfb8f6a 100644
+--- a/src/objects/templates.h
++++ b/src/objects/templates.h
+@@ -458,6 +458,7 @@ V8_OBJECT class ObjectTemplateInfo : public TemplateInfoWithProperties {
+   DECL_INT_ACCESSORS(embedder_field_count)
+   DECL_BOOLEAN_ACCESSORS(immutable_proto)
+   DECL_BOOLEAN_ACCESSORS(code_like)
++  DECL_BOOLEAN_ACCESSORS(host_delegate)
+ 
+   // Starting from given object template's constructor walk up the inheritance
+   // chain till a function template that has an instance template is found.
+@@ -485,7 +486,9 @@ V8_OBJECT class ObjectTemplateInfo : public TemplateInfoWithProperties {
+  private:
+   using IsImmutablePrototypeBit = base::BitField<bool, 0, 1, uint32_t>;
+   using IsCodeKindBit = IsImmutablePrototypeBit::Next<bool, 1>;
+-  using EmbedderFieldCountBits = IsCodeKindBit::Next<int32_t, 28>;
++  // ClearScript: the template's objects are host delegates (typeof "function").
++  using IsHostDelegateBit = IsCodeKindBit::Next<bool, 1>;
++  using EmbedderFieldCountBits = IsHostDelegateBit::Next<int32_t, 27>;
+   friend class TorqueGeneratedBitFieldAsserts;
+ } V8_OBJECT_END;
+ 
+diff --git a/src/objects/templates.tq b/src/objects/templates.tq
+index d2b5d9c7f58..72a7ed71c13 100644
+--- a/src/objects/templates.tq
++++ b/src/objects/templates.tq
+@@ -113,7 +113,8 @@ extern class FunctionTemplateInfo extends TemplateInfoWithProperties {
+ bitfield struct ObjectTemplateInfoFlags extends uint31 {
+   is_immutable_prototype: bool: 1 bit;
+   is_code_kind: bool: 1 bit;
+-  embedder_field_count: int32: 28 bit;
++  is_host_delegate: bool: 1 bit;
++  embedder_field_count: int32: 27 bit;
+ }
+ 
+ @cppObjectLayoutDefinition
+diff --git a/src/roots/roots.h b/src/roots/roots.h
+index b995b4bffd6..7ed63074aa4 100644
+--- a/src/roots/roots.h
++++ b/src/roots/roots.h
+@@ -401,6 +401,7 @@ class RootVisitor;
+   V(PropertyCell, string_iterator_protector, StringIteratorProtector)          \
+   V(PropertyCell, string_wrapper_to_primitive_protector,                       \
+     StringWrapperToPrimitiveProtector)                                         \
++  V(PropertyCell, date_to_primitive_protector, DateToPrimitiveProtector)       \
+   V(PropertyCell, number_string_not_regexp_like_protector,                     \
+     NumberStringNotRegexpLikeProtector)                                        \
+   /* Caches */                                                                 \
