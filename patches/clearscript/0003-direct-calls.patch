@@ -1,0 +1,335 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index d61f2911..ff5ba47a 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2123,3 +2123,330 @@ NATIVE_ENTRY_POINT(void) V8UnitTestSupport_GetStatistics(uint64_t& isolateCount,
+     isolateCount = V8IsolateImpl::GetInstanceCount();
+     contextCount = V8ContextImpl::GetInstanceCount();
+ }
++
++//-----------------------------------------------------------------------------
++// SSRS2 (its HTML engine's scripts calling .NET straight from V8: HTML_ENGINE_SINGLE_DOM.md in SSRS2's repository):
++// direct calls, any arguments. A function of a script object calls one host dispatcher with its slot (the host's handler) and its arguments as values the host reads in
++// place: numbers and booleans as doubles, strings as UTF-16 copied into a per-thread buffer, typed arrays and array
++// buffers as a pointer to their memory and a length in bytes; the host answers a number, a boolean, a string (UTF-16 it
++// keeps until its next answer), null, undefined, or an error message thrown as an Error.
++//-----------------------------------------------------------------------------
++
++namespace Ssrs2DirectCalls
++{
++    enum Kind : int32_t { Undefined = 0, Null = 1, Number = 2, Boolean = 3, String = 4, Bytes = 5, Other = 6, Error = 7 };
++
++    struct Value
++    {
++        int32_t kind;
++        int32_t length;
++        double number;
++        const void* data;
++    };
++
++    using Dispatch = void (*)(int32_t slot, const Value* args, int32_t count, Value* result);
++
++    static Dispatch g_dispatch = nullptr;
++    constexpr int32_t MaxArgs = 16;
++
++    static void Callback(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        int32_t slot = info.Data().As<v8::Int32>()->Value();
++        int32_t count = info.Length() < MaxArgs ? info.Length() : MaxArgs;
++        Value args[MaxArgs];
++        thread_local std::vector<uint16_t> chars;
++        size_t total = 0;
++        for (int32_t i = 0; i < count; i++)
++        {
++            auto value = info[i];
++            Value& arg = args[i];
++            arg = Value{ Undefined, 0, 0, nullptr };
++            if (value->IsNumber())
++            {
++                arg.kind = Number;
++                arg.number = value.As<v8::Number>()->Value();
++            }
++            else if (value->IsString())
++            {
++                arg.kind = String;
++                arg.length = static_cast<int32_t>(value.As<v8::String>()->Length());
++                arg.number = static_cast<double>(total);
++                total += static_cast<size_t>(arg.length);
++            }
++            else if (value->IsArrayBufferView())
++            {
++                auto view = value.As<v8::ArrayBufferView>();
++                arg.kind = Bytes;
++                arg.length = static_cast<int32_t>(view->ByteLength());
++                arg.data = static_cast<const char*>(view->Buffer()->Data()) + view->ByteOffset();
++            }
++            else if (value->IsArrayBuffer())
++            {
++                auto buffer = value.As<v8::ArrayBuffer>();
++                arg.kind = Bytes;
++                arg.length = static_cast<int32_t>(buffer->ByteLength());
++                arg.data = buffer->Data();
++            }
++            else if (value->IsBoolean())
++            {
++                arg.kind = Boolean;
++                arg.number = value->BooleanValue(isolate) ? 1 : 0;
++            }
++            else if (value->IsNull())
++            {
++                arg.kind = Null;
++            }
++            else if (!value->IsUndefined())
++            {
++                arg.kind = Other;
++            }
++        }
++        // (the strings written once their room is known: the buffer does not move after)
++        if (total > 0)
++        {
++            if (chars.size() < total)
++            {
++                chars.resize(total);
++            }
++            for (int32_t i = 0; i < count; i++)
++            {
++                if (args[i].kind == String)
++                {
++                    auto at = chars.data() + static_cast<size_t>(args[i].number);
++                    info[i].As<v8::String>()->WriteV2(isolate, 0, static_cast<uint32_t>(args[i].length), at);
++                    args[i].data = at;
++                    args[i].number = 0;
++                }
++            }
++        }
++        Value result{ Undefined, 0, 0, nullptr };
++        g_dispatch(slot, args, count, &result);
++        switch (result.kind)
++        {
++            case Number:
++                info.GetReturnValue().Set(result.number);
++                break;
++            case Boolean:
++                info.GetReturnValue().Set(result.number != 0);
++                break;
++            case Null:
++                info.GetReturnValue().SetNull();
++                break;
++            case String:
++            case Error:
++            {
++                v8::Local<v8::String> text;
++                if (!v8::String::NewFromTwoByte(isolate, static_cast<const uint16_t*>(result.data), v8::NewStringType::kNormal, result.length).ToLocal(&text))
++                {
++                    break;
++                }
++                if (result.kind == String)
++                {
++                    info.GetReturnValue().Set(text);
++                }
++                else
++                {
++                    isolate->ThrowException(v8::Exception::Error(text));
++                }
++                break;
++            }
++            default:
++                break;
++        }
++    }
++}
++
++// The functions made: on the object global[holder] (made if missing), names[i] calling the dispatcher with slots[i]. In a
++// host call only (the isolate entered, a context current); 0 otherwise.
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallDirectCalls(const char* holder, int32_t count, const char* const* names, const int32_t* slots, void* dispatch) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || dispatch == nullptr)
++    {
++        return 0;
++    }
++    Ssrs2DirectCalls::g_dispatch = reinterpret_cast<Ssrs2DirectCalls::Dispatch>(dispatch);
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    for (int32_t i = 0; i < count; i++)
++    {
++        v8::Local<v8::Function> function;
++        if (!v8::Function::New(context, Ssrs2DirectCalls::Callback, v8::Integer::New(isolate, slots[i]), 0, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++        {
++            return 0;
++        }
++        if (object->Set(context, v8::String::NewFromUtf8(isolate, names[i]).ToLocalChecked(), function).IsNothing())
++        {
++            return 0;
++        }
++    }
++    return 1;
++}
++
++//-----------------------------------------------------------------------------
++// SSRS2: typed fast calls (its HTML engine's DOM read by scripts): functions of int32 arguments answering an
++// int32, each a host function pointer, made from a FunctionTemplate kept once per isolate (in its data slot 3: ClearScript
++// keeps its own in slot 0) with a V8 fast API call TurboFan makes directly, and a callback for the interpreter's calls.
++//-----------------------------------------------------------------------------
++
++#include "v8-fast-api-calls.h"
++#include <string>
++#include <unordered_map>
++
++namespace Ssrs2FastCalls
++{
++    using F1 = int32_t (*)(int32_t);
++    using F2 = int32_t (*)(int32_t, int32_t);
++    using F3 = int32_t (*)(int32_t, int32_t, int32_t);
++    using F4 = int32_t (*)(int32_t, int32_t, int32_t, int32_t);
++
++    constexpr uint32_t CacheSlot = 3;
++
++    struct Cache
++    {
++        std::unordered_map<std::string, v8::Global<v8::FunctionTemplate>> templates;
++    };
++
++    static void* Target(v8::Local<v8::Value> data)
++    {
++        return data.As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault);
++    }
++
++    static int32_t Arg(const v8::FunctionCallbackInfo<v8::Value>& info, int index)
++    {
++        if (index >= info.Length())
++        {
++            return 0;
++        }
++        auto value = info[index];
++        if (value->IsInt32())
++        {
++            return value.As<v8::Int32>()->Value();
++        }
++        return value->Int32Value(info.GetIsolate()->GetCurrentContext()).FromMaybe(0);
++    }
++
++    static void Slow1(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        info.GetReturnValue().Set(reinterpret_cast<F1>(Target(info.Data()))(Arg(info, 0)));
++    }
++    static void Slow2(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        info.GetReturnValue().Set(reinterpret_cast<F2>(Target(info.Data()))(Arg(info, 0), Arg(info, 1)));
++    }
++    static void Slow3(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        info.GetReturnValue().Set(reinterpret_cast<F3>(Target(info.Data()))(Arg(info, 0), Arg(info, 1), Arg(info, 2)));
++    }
++    static void Slow4(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        info.GetReturnValue().Set(reinterpret_cast<F4>(Target(info.Data()))(Arg(info, 0), Arg(info, 1), Arg(info, 2), Arg(info, 3)));
++    }
++
++    static int32_t Fast1(v8::Local<v8::Object>, int32_t a, v8::FastApiCallbackOptions& options)
++    {
++        return reinterpret_cast<F1>(Target(options.data))(a);
++    }
++    static int32_t Fast2(v8::Local<v8::Object>, int32_t a, int32_t b, v8::FastApiCallbackOptions& options)
++    {
++        return reinterpret_cast<F2>(Target(options.data))(a, b);
++    }
++    static int32_t Fast3(v8::Local<v8::Object>, int32_t a, int32_t b, int32_t c, v8::FastApiCallbackOptions& options)
++    {
++        return reinterpret_cast<F3>(Target(options.data))(a, b, c);
++    }
++    static int32_t Fast4(v8::Local<v8::Object>, int32_t a, int32_t b, int32_t c, int32_t d, v8::FastApiCallbackOptions& options)
++    {
++        return reinterpret_cast<F4>(Target(options.data))(a, b, c, d);
++    }
++}
++
++// The functions made: on the object global[holder] (made if missing), names[i] calling functions[i] with arities[i] int32
++// arguments (1 to 4); fast[i] 0 for a function that may call back into the script or allocate in it (never a fast call).
++// In a host call only (the isolate entered, a context current); 0 otherwise.
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallFastCalls(const char* holder, int32_t count, const char* const* names, const int32_t* arities, const int32_t* fast, void* const* functions) noexcept
++{
++    using namespace Ssrs2FastCalls;
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext())
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto cache = static_cast<Cache*>(isolate->GetData(CacheSlot));
++    if (cache == nullptr)
++    {
++        // (the isolate's for its life: a few templates, left when it goes)
++        cache = new Cache();
++        isolate->SetData(CacheSlot, cache);
++    }
++    static const v8::CFunction c1 = v8::CFunction::Make(Fast1);
++    static const v8::CFunction c2 = v8::CFunction::Make(Fast2);
++    static const v8::CFunction c3 = v8::CFunction::Make(Fast3);
++    static const v8::CFunction c4 = v8::CFunction::Make(Fast4);
++    static const v8::CFunction* cFunctions[] = { nullptr, &c1, &c2, &c3, &c4 };
++    static const v8::FunctionCallback callbacks[] = { nullptr, Slow1, Slow2, Slow3, Slow4 };
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    for (int32_t i = 0; i < count; i++)
++    {
++        int32_t arity = arities[i];
++        if (arity < 1 || arity > 4 || functions[i] == nullptr)
++        {
++            return 0;
++        }
++        // (a template a name and a function make, kept: the same function each document of the isolate)
++        std::string id = std::string(names[i]) + '\0' + std::to_string(reinterpret_cast<uintptr_t>(functions[i])) + (fast[i] ? "f" : "s");
++        auto& slot = cache->templates[id];
++        v8::Local<v8::FunctionTemplate> functionTemplate;
++        if (slot.IsEmpty())
++        {
++            functionTemplate = v8::FunctionTemplate::New(isolate, callbacks[arity], v8::External::New(isolate, functions[i], v8::kExternalPointerTypeTagDefault),
++                v8::Local<v8::Signature>(), arity, v8::ConstructorBehavior::kThrow, v8::SideEffectType::kHasSideEffect, fast[i] ? cFunctions[arity] : nullptr);
++            slot.Reset(isolate, functionTemplate);
++        }
++        else
++        {
++            functionTemplate = slot.Get(isolate);
++        }
++        v8::Local<v8::Function> function;
++        if (!functionTemplate->GetFunction(context).ToLocal(&function)
++            || object->Set(context, v8::String::NewFromUtf8(isolate, names[i]).ToLocalChecked(), function).IsNothing())
++        {
++            return 0;
++        }
++    }
++    return 1;
++}

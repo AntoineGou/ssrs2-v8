@@ -32,7 +32,13 @@ library and layout rules (a configuration Chrome does not build: pointers uncomp
 The library, in order (`patches/clearscript`): `0001-v8-15.6-port.patch`, ClearScript 7.5.1.1's native side ported to
 V8 15.6's API, with V8 15.6's ICU data built in (ClearScript's ICU data package holds V8 14.7's); then
 `0002-ssrs2.patch`: V8 starts with no full collection below 768 MB of old space and inline caches polymorphic up to 16
-maps, and `SSRS2_V8_FLAGS` adds flags for experiments.
+maps, and `SSRS2_V8_FLAGS` adds flags for experiments; then `0003-direct-calls.patch`, the library's two exports through
+which SSRS2's HTML engine lets scripts call .NET straight from V8, without ClearScript's host objects:
+`Ssrs2_InstallDirectCalls` makes functions of a script object that call one host dispatcher with their arguments read in
+place (numbers, booleans, strings as UTF-16, typed arrays as their memory) and take back a number, a string, null or an
+error; `Ssrs2_InstallFastCalls` makes functions of int32 arguments answering an int32, each a host function pointer, as
+V8 fast API calls (the optimizing compiler calls them directly), their templates kept once per isolate. Both are called
+from inside a host call. `test/Smoke` installs one of each and calls them on every platform.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 tasks from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
