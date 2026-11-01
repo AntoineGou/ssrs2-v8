@@ -2,7 +2,7 @@ diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNa
 index d61f2911..ff5ba47a 100644
 --- a/ClearScriptV8/V8SplitProxyNative.cpp
 +++ b/ClearScriptV8/V8SplitProxyNative.cpp
-@@ -2123,3 +2123,330 @@ NATIVE_ENTRY_POINT(void) V8UnitTestSupport_GetStatistics(uint64_t& isolateCount,
+@@ -2123,3 +2123,337 @@ NATIVE_ENTRY_POINT(void) V8UnitTestSupport_GetStatistics(uint64_t& isolateCount,
      isolateCount = V8IsolateImpl::GetInstanceCount();
      contextCount = V8ContextImpl::GetInstanceCount();
  }
@@ -333,3 +333,10 @@ index d61f2911..ff5ba47a 100644
 +    }
 +    return 1;
 +}
++
++// (32-bit Windows decorates a __stdcall export's name, _Ssrs2_InstallDirectCalls@20: the plain names too, which a host
++// looking the functions up by name finds on every platform)
++#if defined(_M_IX86)
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
++#endif
