@@ -65,8 +65,24 @@ if [[ "$os" == linux ]]; then
     for a in x64 $([[ "$cpu" == arm ]] && echo x86) "$cpu"; do
         build/linux/sysroot_scripts/install-sysroot.py --arch="$a" > "sysroot-$a.log" 2>&1 || { cat "sysroot-$a.log"; exit 1; }
     done
-    # (the library compiled and linked against the same sysroot as V8: glibc's symbols there are 2.26's at most)
-    make_args+=("CXXCROSSFLAGS=--sysroot=$PWD/build/linux/debian_bullseye_$(sysroot_arch "$cpu")-sysroot")
+    # (the library compiled and linked against the same sysroot as V8: glibc's symbols there are 2.26's at most; it
+    # links the C++ runtime statically, as ClearScript's does, and V8's sysroot leaves out the static archives: Debian
+    # 11's own packages of them are unpacked into it, checked against their hashes)
+    sysroot="$PWD/build/linux/debian_bullseye_$(sysroot_arch "$cpu")-sysroot"
+    while read -r sha deb; do
+        [[ "$deb" == *"_$(sysroot_arch "$cpu").deb" ]] || continue
+        curl -sfL "https://deb.debian.org/debian/pool/main/g/gcc-10/$deb" -o "$work/$deb"
+        echo "$sha  $work/$deb" | shasum -a 256 -c - > /dev/null || { echo "$deb: not the expected file"; exit 1; }
+        dpkg-deb -x "$work/$deb" "$sysroot"
+    done <<'DEBS'
+20b1f56863dcc5f187d6cb53b2aa6149bd013be4ec67e10c2c31a22fda619a01 libstdc++-10-dev_10.2.1-6_amd64.deb
+3b711374092b84e732c4e73cf33e02cff02e34a5f105eb6467de8d9038e4cd9d libgcc-10-dev_10.2.1-6_amd64.deb
+cee7ca63613b50a8a51cc670db385c7e6d1181b72c94148fc8b7992e4570782d libstdc++-10-dev_10.2.1-6_arm64.deb
+80fc73d339ada2e194175afe83cd89014565242153b6e3c2128849d8817da367 libgcc-10-dev_10.2.1-6_arm64.deb
+c00e1a23851ebcb64b8d31e309e32399b1132cc7ba8eb55e8fed1c842c65beca libstdc++-10-dev_10.2.1-6_armhf.deb
+74061bfde97be2c26b160cc81292ea58e3867023aa239abc8f35fed585d9c290 libgcc-10-dev_10.2.1-6_armhf.deb
+DEBS
+    make_args+=("CXXCROSSFLAGS=--sysroot=$sysroot")
 fi
 echo "Building V8 ($cpu)"
 gn gen "out/$cpu/Release" --args="fatal_linker_warnings=false is_cfi=false is_component_build=false is_debug=false target_cpu=\"$cpu\" use_clang_modules=false use_custom_libcxx=false use_thin_lto=false v8_embedder_string=\"-ClearScript\" v8_enable_fuzztest=false v8_enable_pointer_compression=false v8_enable_31bit_smis_on_64bit_arch=false v8_enable_temporal_support=false v8_monolithic=true v8_use_external_startup_data=false v8_target_cpu=\"$cpu\" v8_disallow_js_in_api_interrupts_is_checked=false" > gn.log 2>&1 || { cat gn.log; exit 1; }
