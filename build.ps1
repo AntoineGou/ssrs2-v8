@@ -64,7 +64,14 @@ $v8Patch = Join-Path $here "patches\v8-$v8Revision.patch"
 $patched = "$v8Revision $(git hash-object $v8Patch)"
 if (-not (Test-Path v8\.ssrs2-patched) -or (Get-Content v8\.ssrs2-patched) -ne $patched) {
     Write-Host "Downloading V8 $v8Revision and its dependencies"
-    Invoke-Native 'gclient sync' { gclient sync -r $v8Revision -D --force --reset --no-history } 'sync.log'
+    # (three tries: V8's download hooks run at once, and on Windows depot_tools' lock on gsutil's folder is a file opened
+    # exclusively, which the others give up on after 30 seconds while the first installs gsutil)
+    for ($try = 1; ; $try++) {
+        gclient sync -r $v8Revision -D --force --reset --no-history *> "sync-$try.log"
+        if ($LASTEXITCODE -eq 0) { break }
+        if ($try -eq 3) { Get-Content "sync-$try.log" -Tail 60; throw "gclient sync failed ($LASTEXITCODE)" }
+        Write-Host "gclient sync failed ($LASTEXITCODE), again"
+    }
     Push-Location v8
     git config user.name ClearScript
     git config user.email clearscript@clearfoundry.net
