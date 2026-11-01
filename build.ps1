@@ -127,7 +127,8 @@ $gnArgs = 'fatal_linker_warnings=false', 'is_cfi=false', 'is_component_build=fal
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Content "$out\args.gn" ($gnArgs -join "`n")
 Invoke-Native 'gn gen' { gn gen $out } 'gn.log'
-ninja -C $out obj\v8_monolith.lib *> build.log
+# (-k 0: every file that fails, not the first few, while V8 15.6 is ported to this platform)
+ninja -k 0 -C $out obj\v8_monolith.lib *> build.log
 if ($LASTEXITCODE -ne 0) {
     Get-Content build.log -Tail 60
     # (the record layouts Microsoft's rules gave the classes V8's layout checks fail on most, into layout-*.log: what a

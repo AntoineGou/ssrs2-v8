@@ -1,0 +1,63 @@
+diff --git a/src/objects/js-atomics-synchronization.h b/src/objects/js-atomics-synchronization.h
+index 906102e7df6..87244091f22 100644
+--- a/src/objects/js-atomics-synchronization.h
++++ b/src/objects/js-atomics-synchronization.h
+@@ -112,6 +112,11 @@ V8_OBJECT class JSSynchronizationPrimitive : public AlwaysSharedSpaceJSObject {
+  public:
+   ExternalPointerMember<kWaiterQueueNodeTag> waiter_queue_head_;
+   std::atomic<uint32_t> state_;
++#if defined(_MSC_VER) && TAGGED_SIZE_8_BYTES
++  // SSRS2: the 8-byte alignment of waiter_queue_head_ pads this class to 40 bytes, where V8's Torque layout starts its
++  // subclasses' fields; Microsoft's layout put them in the padding, at 36 (JSAtomicsMutex's owner_thread_id_).
++  uint32_t msvc_tail_padding_;
++#endif
+ } V8_OBJECT_END;
+ 
+ // Synchronization primitives only store raw data past JSObject; no tagged
+diff --git a/src/objects/map.h b/src/objects/map.h
+index 802eec3720d..f4534234c95 100644
+--- a/src/objects/map.h
++++ b/src/objects/map.h
+@@ -252,6 +252,29 @@ using MapHandlesSpan = std::span<DirectHandle<Map>>;
+ // |               |   [raw_transitions]                             |
+ // +---------------+-------------------------------------------------+
+ 
++// SSRS2: Microsoft's C++ library declares std::atomic<T> with an explicit alignment, which #pragma pack does not lower,
++// so ExtendedMap (pack(1)) took 4-byte alignment from Map and was 76 bytes where V8's Torque layout has 73
++// (JSInterceptorMap's fields at 76 for 73). There, Map's wider atomics are their plain types, read and written through
++// std::atomic_ref (Map only loads and stores them).
++#if defined(_MSVC_STL_VERSION)
++template <typename T>
++class MapAtomic {
++ public:
++  T load(std::memory_order order = std::memory_order_seq_cst) const {
++    return std::atomic_ref<T>(const_cast<T&>(value_)).load(order);
++  }
++  void store(T value, std::memory_order order = std::memory_order_seq_cst) {
++    std::atomic_ref<T>(value_).store(value, order);
++  }
++
++ private:
++  T value_;
++};
++#else
++template <typename T>
++using MapAtomic = std::atomic<T>;
++#endif
++
+ V8_OBJECT class Map : public HeapObject {
+   V8_IT_OWN_TYPE;
+ 
+@@ -1196,10 +1219,10 @@ V8_OBJECT class Map : public HeapObject {
+   std::atomic<uint8_t> inobject_properties_start_or_constructor_function_index_;
+   std::atomic<uint8_t> used_or_unused_instance_size_in_words_;
+   std::atomic<uint8_t> visitor_id_;
+-  std::atomic<uint16_t> instance_type_;
++  MapAtomic<uint16_t> instance_type_;
+   std::atomic<uint8_t> bit_field_;
+   uint8_t bit_field2_;
+-  std::atomic<uint32_t> bit_field3_;
++  MapAtomic<uint32_t> bit_field3_;
+   // ClearScript: the host bits (is_host_delegate), where 64-bit targets had padding.
+   uint32_t host_bit_field_;
+   TaggedMember<JSPrototype> prototype_;

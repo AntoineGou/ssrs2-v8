@@ -12,7 +12,9 @@ same output byte for byte.
 ## What it changes
 
 V8, in order (`patches/v8`): `0001-clearscript-7.5.1.1-port.patch`, ClearScript 7.5.1.1's own V8 changes ported to
-15.6 (its host objects, interrupts, ICU data from memory...), then `0002-ssrs2.patch`, SSRS2's:
+15.6 (its host objects, interrupts, ICU data from memory...), then `0002-ssrs2.patch`, SSRS2's, below, then
+`0003-windows-layouts.patch`, V8 15.6's object layouts made to agree with its Torque layouts under Microsoft's C++
+library and layout rules (a configuration Chrome does not build: pointers uncompressed, the system's C++ library):
 
 - Local time is UTC once the embedder gives V8 its ICU data (a server prints in UTC), and a date's fields are worked out
   without a time zone.
