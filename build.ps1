@@ -93,6 +93,18 @@ cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" $vcvarsArch >nul && set" | ForE
 }
 
 Set-Location v8
+# V8 15.6 asks for the Windows SDK of Chromium's own toolchain (10.0.28000.0): a machine without it builds with its newest
+$sdkVersion = [regex]::Match((Get-Content -Raw build\toolchain\win\setup_toolchain.py), "SDK_VERSION = '([0-9.]+)'").Groups[1].Value
+$sdks = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+if (-not (Test-Path "$sdks\$sdkVersion\um\windows.h")) {
+    $newest = Get-ChildItem $sdks -Directory | Where-Object { Test-Path "$($_.FullName)\um\windows.h" } |
+        Sort-Object { [version]$_.Name } | Select-Object -Last 1
+    if (-not $newest) { throw 'No Windows SDK' }
+    Write-Host "Windows SDK $sdkVersion not installed: building with $($newest.Name)"
+    foreach ($f in 'build\toolchain\win\setup_toolchain.py', 'build\vs_toolchain.py') {
+        (Get-Content -Raw $f).Replace("SDK_VERSION = '$sdkVersion'", "SDK_VERSION = '$($newest.Name)'") | Set-Content -NoNewline $f
+    }
+}
 Write-Host "Building V8 ($Cpu)"
 $out = "out\$platform\Release"
 # (in args.gn: PowerShell drops the quotes inside an argument given to a batch file, as gn is)
