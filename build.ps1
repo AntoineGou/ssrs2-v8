@@ -122,7 +122,19 @@ $gnArgs = 'fatal_linker_warnings=false', 'is_cfi=false', 'is_component_build=fal
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Content "$out\args.gn" ($gnArgs -join "`n")
 Invoke-Native 'gn gen' { gn gen $out } 'gn.log'
-Invoke-Native 'Building V8' { ninja -C $out obj\v8_monolith.lib } 'build.log'
+ninja -C $out obj\v8_monolith.lib *> build.log
+if ($LASTEXITCODE -ne 0) {
+    Get-Content build.log -Tail 60
+    # (the record layouts Microsoft's rules gave the classes V8's layout checks fail on most, into layout-*.log: what a
+    # port to this platform needs to see)
+    Push-Location $out
+    foreach ($o in 'js-interceptor-map-tq', 'js-atomics-synchronization-tq') {
+        $command = ninja -t commands "obj/torque_generated_definitions/$o.obj" | Select-Object -Last 1
+        if ($command) { cmd /c "$command -Xclang -fdump-record-layouts-simple" *> "..\..\..\layout-$o.log" }
+    }
+    Pop-Location
+    throw 'Building V8 failed'
+}
 # (the library builds V8's ICU data into itself from here)
 Copy-Item "$out\icudtl.dat" "$root\V8\icudtl.dat"
 
