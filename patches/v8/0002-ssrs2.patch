@@ -25,7 +25,7 @@ index 3bbd3108699..d409519c737 100644
  extern operator '.data_ptr' macro LoadJSTypedArrayDataPtr(JSTypedArray): RawPtr;
  
 diff --git a/src/builtins/builtins-date-gen.cc b/src/builtins/builtins-date-gen.cc
-index 2c15fa4792a..e56003e07ca 100644
+index 2c15fa4792a..77dbc167c2f 100644
 --- a/src/builtins/builtins-date-gen.cc
 +++ b/src/builtins/builtins-date-gen.cc
 @@ -2,6 +2,7 @@
@@ -36,7 +36,7 @@ index 2c15fa4792a..e56003e07ca 100644
  #include "src/builtins/builtins-inl.h"
  #include "src/builtins/builtins-utils-gen.h"
  #include "src/codegen/code-stub-assembler-inl.h"
-@@ -16,6 +17,90 @@ namespace internal {
+@@ -16,6 +17,101 @@ namespace internal {
  // -----------------------------------------------------------------------------
  // ES6 section 20.3 Date Objects
  
@@ -52,6 +52,11 @@ index 2c15fa4792a..e56003e07ca 100644
 +  Label slow(this, Label::kDeferred);
 +  // (declared before the first jump to {slow}: a label merges a variable from every edge into it)
 +  TVARIABLE(Float64T, var_time, Float64Constant(0));
++#ifndef V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
++  // (no floating-point parameters in calls to C on this target, IA32 and 32-bit
++  // ARM: the C++ builtin)
++  Goto(&slow);
++#else
 +  CodeStubArguments args(this, argc);
 +  // (argc counts the receiver)
 +  GotoIfNot(IntPtrEqual(args.GetLengthWithoutReceiver(), IntPtrConstant(1)),
@@ -78,6 +83,7 @@ index 2c15fa4792a..e56003e07ca 100644
 +      std::make_pair(MachineType::AnyTagged(), date),
 +      std::make_pair(MachineType::Float64(), var_time.value()));
 +  args.PopAndReturn(date);
++#endif
 +
 +  BIND(&slow);
 +  TailCallJSBuiltin(Builtin::kDateConstructor, context, target, new_target,
@@ -90,6 +96,10 @@ index 2c15fa4792a..e56003e07ca 100644
 +  auto target = Parameter<JSFunction>(Descriptor::kJSTarget);
 +  Label slow(this, Label::kDeferred);
 +  TVARIABLE(Float64T, var_day, Float64Constant(0));
++#ifndef V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
++  // (as DateConstructorFast)
++  Goto(&slow);
++#else
 +  CodeStubArguments args(this, argc);
 +  GotoIf(IntPtrLessThan(args.GetLengthWithoutReceiver(), IntPtrConstant(1)),
 +         &slow);
@@ -118,6 +128,7 @@ index 2c15fa4792a..e56003e07ca 100644
 +      std::make_pair(MachineType::AnyTagged(), receiver),
 +      std::make_pair(MachineType::Float64(), var_day.value())));
 +  args.PopAndReturn(ChangeFloat64ToTagged(time));
++#endif
 +
 +  BIND(&slow);
 +  TailCallJSBuiltin(Builtin::kDatePrototypeSetUTCDate, context, target,
