@@ -104,6 +104,12 @@ if (-not (Test-Path "$sdks\$sdkVersion\um\windows.h")) {
     foreach ($f in 'build\toolchain\win\setup_toolchain.py', 'build\vs_toolchain.py') {
         (Get-Content -Raw $f).Replace("SDK_VERSION = '$sdkVersion'", "SDK_VERSION = '$($newest.Name)'") | Set-Content -NoNewline $f
     }
+    # (and the newest Windows version that SDK names: V8's NTDDI_VERSION is one only the newer SDK defines, read as 0)
+    $ntddi = (Select-String -Path "$sdks\$($newest.Name)\shared\sdkddkver.h" -Pattern '^#define\s+(NTDDI_WIN\w+)\s' |
+        Select-Object -Last 1).Matches[0].Groups[1].Value
+    Write-Host "NTDDI_VERSION: $ntddi"
+    (Get-Content -Raw build\config\win\BUILD.gn) -replace 'NTDDI_VERSION=NTDDI_\w+', "NTDDI_VERSION=$ntddi" |
+        Set-Content -NoNewline build\config\win\BUILD.gn
 }
 Write-Host "Building V8 ($Cpu)"
 $out = "out\$platform\Release"

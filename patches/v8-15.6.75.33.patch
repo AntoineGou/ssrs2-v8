@@ -44,10 +44,10 @@ index 3fb7d2964ab..4def4f704cf 100644
    cppgc_enable_young_generation = false
 diff --git a/include/ClearScript/polyfill.h b/include/ClearScript/polyfill.h
 new file mode 100644
-index 00000000000..3a55fc7f8bc
+index 00000000000..27e0e4a81e9
 --- /dev/null
 +++ b/include/ClearScript/polyfill.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,56 @@
 +#ifndef INCLUDE_CLEARSCRIPT_POLYFILL_H_
 +#define INCLUDE_CLEARSCRIPT_POLYFILL_H_
 +
@@ -57,9 +57,13 @@ index 00000000000..3a55fc7f8bc
 +#include <memory>
 +#include <sstream>
 +#include <utility>
++#include <version>
 +
++// SSRS2: each only where the C++ library lacks it (Debian 11's libstdc++ 10 has neither; the libc++ V8's host tools
++// are built with has both)
 +namespace std {
 +
++#ifndef __cpp_lib_smart_ptr_for_overwrite
 +  // make_unique_for_overwrite
 +  template <typename T>
 +  constexpr unique_ptr<T> make_unique_for_overwrite() {
@@ -69,7 +73,9 @@ index 00000000000..3a55fc7f8bc
 +  constexpr unique_ptr<T> make_unique_for_overwrite(const size_t _Size) {
 +    return unique_ptr<T>(new remove_extent_t<T>[_Size]);
 +  }
-+  
++#endif
++
++#ifndef __cpp_lib_format
 +  // format
 +  inline void __append_format(std::ostringstream& oss, const char* fmt) {
 +      oss << fmt;
@@ -91,6 +97,7 @@ index 00000000000..3a55fc7f8bc
 +    __append_format(oss, fmt, std::forward<Args>(args)...);
 +    return oss.str();
 +  }
++#endif
 +
 +}
 +
