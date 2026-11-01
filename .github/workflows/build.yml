@@ -3,6 +3,10 @@ name: Build
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: Only the RIDs starting so (win, linux-arm...), to try a fix; empty for all
+        default: ''
   push:
     tags: ['v*']
 
@@ -27,17 +31,21 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     steps:
+      - name: Selected
+        run: echo "SELECTED=${{ inputs.only == '' || startsWith(matrix.rid, inputs.only) }}" >> "$GITHUB_ENV"
+        shell: bash
       - uses: actions/checkout@v4
+        if: env.SELECTED == 'true'
       - name: Free disk space
-        if: runner.os == 'Linux'
+        if: env.SELECTED == 'true' && runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h /
       - name: Build
-        if: runner.os != 'Windows'
+        if: env.SELECTED == 'true' && runner.os != 'Windows'
         run: ./build.sh "$RUNNER_TEMP/work" ${{ matrix.cpu }}
       - name: Build
-        if: runner.os == 'Windows'
+        if: env.SELECTED == 'true' && runner.os == 'Windows'
         shell: pwsh
         # (on C:, which has room for V8: the runner's temporary folder is on a small drive)
         run: ./build.ps1 C:\v8work ${{ matrix.cpu }}
@@ -51,6 +59,7 @@ jobs:
             ${{ runner.os == 'Windows' && 'C:/v8work' || format('{0}/work', runner.temp) }}/ClearScript/V8/build/v8/*.log
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
+        if: env.SELECTED == 'true'
         with:
           name: ${{ matrix.rid }}
           path: ${{ runner.os == 'Windows' && 'C:/v8work' || format('{0}/work', runner.temp) }}/out/
@@ -74,35 +83,42 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
+      - name: Selected
+        run: echo "SELECTED=${{ inputs.only == '' || startsWith(matrix.rid, inputs.only) }}" >> "$GITHUB_ENV"
+        shell: bash
       - uses: actions/checkout@v4
+        if: env.SELECTED == 'true'
       - uses: actions/setup-dotnet@v4
+        if: env.SELECTED == 'true'
         with:
           dotnet-version: 8.0.x
       - uses: actions/download-artifact@v4
+        if: env.SELECTED == 'true'
         with:
           name: ${{ matrix.rid }}
           path: lib
       - name: Build the test
+        if: env.SELECTED == 'true'
         run: dotnet publish test/Smoke -c Release -o app
       # (our V8's local time is UTC whatever the machine's zone: the test checks it in another zone)
       - name: Test
-        if: matrix.dotnet == '' && matrix.docker == '' && runner.os != 'Windows'
+        if: env.SELECTED == 'true' && matrix.dotnet == '' && matrix.docker == '' && runner.os != 'Windows'
         run: TZ=America/New_York dotnet app/Smoke.dll lib
       - name: Test
-        if: matrix.dotnet == '' && runner.os == 'Windows'
+        if: env.SELECTED == 'true' && matrix.dotnet == '' && runner.os == 'Windows'
         shell: pwsh
         run: |
           tzutil /s "Eastern Standard Time"
           dotnet app/Smoke.dll lib
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Test (x64 .NET under Rosetta)
-        if: matrix.dotnet == 'x64' && runner.os == 'macOS'
+        if: env.SELECTED == 'true' && matrix.dotnet == 'x64' && runner.os == 'macOS'
         run: |
           curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
           bash dotnet-install.sh --channel 8.0 --runtime dotnet --architecture x64 --install-dir "$RUNNER_TEMP/dotnet-x64"
           TZ=America/New_York arch -x86_64 "$RUNNER_TEMP/dotnet-x64/dotnet" app/Smoke.dll lib
       - name: Test (x86 .NET)
-        if: matrix.dotnet == 'x86'
+        if: env.SELECTED == 'true' && matrix.dotnet == 'x86'
         shell: pwsh
         run: |
           Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile dotnet-install.ps1
@@ -111,10 +127,10 @@ jobs:
           & "$env:RUNNER_TEMP\dotnet-x86\dotnet.exe" app/Smoke.dll lib
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Set up QEMU
-        if: matrix.docker != ''
+        if: env.SELECTED == 'true' && matrix.docker != ''
         uses: docker/setup-qemu-action@v3
       - name: Test (emulated)
-        if: matrix.docker != ''
+        if: env.SELECTED == 'true' && matrix.docker != ''
         run: >
           docker run --rm --platform ${{ matrix.docker }} -e TZ=America/New_York -v "$PWD:/w" -w /w
           mcr.microsoft.com/dotnet/runtime:8.0 dotnet app/Smoke.dll lib
