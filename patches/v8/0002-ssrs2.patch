@@ -607,7 +607,7 @@ index 62202b07607..f4eedb0f994 100644
      TypedArraySpeciesProtector)                                               \
    BUILTINS_WITH_SFI_OBJECT_LIST(V)
 diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
-index ef2524264c2..eda89bb34b4 100644
+index ef2524264c2..59f3eaceb0a 100644
 --- a/src/compiler/js-call-reducer.cc
 +++ b/src/compiler/js-call-reducer.cc
 @@ -3,6 +3,7 @@
@@ -666,7 +666,16 @@ index ef2524264c2..eda89bb34b4 100644
      case Builtin::kDateNow:
        return ReduceDateNow(node);
      case Builtin::kNumberConstructor:
-@@ -9650,6 +9678,33 @@ Reduction JSCallReducer::ReduceDatePrototypeGetField(Node* node,
+@@ -6081,6 +6109,8 @@ Reduction JSCallReducer::ReduceJSConstruct(Node* node) {
+           }
+           break;
+         }
++        case Builtin::kDateConstructorFast:
++          return ReduceDateConstructor(node, function);
+         case Builtin::kPromiseConstructor:
+           return ReducePromiseConstructor(node);
+         case Builtin::kStringConstructor:
+@@ -9650,6 +9680,110 @@ Reduction JSCallReducer::ReduceDatePrototypeGetField(Node* node,
  #undef __
  }
  
@@ -697,10 +706,87 @@ index ef2524264c2..eda89bb34b4 100644
 +  return Replace(result);
 +}
 +
++// SSRS2: new Date(c) of a number constant c (Date.UTC of constants folds to one), with local time UTC: the date is made
++// here, a JSCreate (an inline allocation once lowered) with its value and its cached fields worked out now, as
++// JSDate::SetValue works them out (the optimizing tiers read them unchecked: they are always valid) and the date cache's
++// stamp (it changes only with the NoDateTimeConfigurationChange protector, which this code depends on). No builtin or C
++// call makes the date, and escape analysis can drop one nothing keeps (a loop's bound: d <= new Date(Date.UTC(...))).
++Reduction JSCallReducer::ReduceDateConstructor(Node* node,
++                                               JSFunctionRef function) {
++  JSConstructNode n(node);
++  if (n.ArgumentCount() != 1 || !g_local_time_is_utc) return NoChange();
++  HeapObjectMatcher m_new_target(n.new_target());
++  if (!m_new_target.HasResolvedValue() ||
++      !m_new_target.Ref(broker()).equals(function)) {
++    return NoChange();
++  }
++  NumberMatcher m_time(n.Argument(0));
++  if (!m_time.HasResolvedValue()) return NoChange();
++  double time = m_time.ResolvedValue();
++  // (an invalid date, and a date made before any other, which V8's date cache does not count as used yet: the builtin's)
++  if (!DateCache::TryTimeClip(&time) || !isolate()->is_date_cache_used()) {
++    return NoChange();
++  }
++  if (!dependencies()->DependOnNoDateTimeConfigurationChangeProtector()) {
++    return NoChange();
++  }
++
++  // The fields of a local time that is UTC: days since the epoch, then the civil date of those days (H. Hinnant's
++  // days_from_civil inverse, exact over the whole range of a time value).
++  constexpr int64_t kMsPerDay = 24 * 60 * 60 * 1000;
++  int64_t const ms = static_cast<int64_t>(time);
++  int64_t const days = (ms >= 0 ? ms : ms - (kMsPerDay - 1)) / kMsPerDay;
++  int64_t const time_in_day = ms - days * kMsPerDay;
++  int64_t const shifted = days + 719468;
++  int64_t const era = (shifted >= 0 ? shifted : shifted - 146096) / 146097;
++  int64_t const doe = shifted - era * 146097;
++  int64_t const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
++  int64_t const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++  int64_t const mp = (5 * doy + 2) / 153;
++  int64_t const civil_month = mp < 10 ? mp + 3 : mp - 9;
++  int const fields[JSDate::kFirstUncachedField] = {
++      static_cast<int>(yoe + era * 400 + (civil_month <= 2 ? 1 : 0)),  // kYear
++      static_cast<int>(civil_month - 1),                                // kMonth
++      static_cast<int>(doy - (153 * mp + 2) / 5 + 1),                   // kDay
++      static_cast<int>(((days + 4) % 7 + 7) % 7),                       // kWeekday
++      static_cast<int>(time_in_day / (60 * 60 * 1000)),                 // kHour
++      static_cast<int>((time_in_day / (60 * 1000)) % 60),               // kMinute
++      static_cast<int>((time_in_day / 1000) % 60)};                     // kSecond
++
++  Node* effect = n.effect();
++  Node* control = n.control();
++  Node* date = effect = graph()->NewNode(
++      javascript()->Create(), n.target(), n.new_target(), n.context(),
++      n.frame_state(), effect, control);
++  effect = graph()->NewNode(
++      simplified()->StoreField(AccessBuilder::ForJSDateValue()), date,
++      jsgraph()->ConstantNoHole(time), effect, control);
++  for (int i = 0; i < JSDate::kFirstUncachedField; i++) {
++    effect = graph()->NewNode(
++        simplified()->StoreField(
++            AccessBuilder::ForJSDateField(static_cast<JSDate::FieldIndex>(i))),
++        date, jsgraph()->SmiConstant(fields[i]), effect, control);
++  }
++  FieldAccess const stamp_access = {kTaggedBase,
++                                    offsetof(JSDate, cache_stamp_),
++                                    MaybeHandle<Name>(),
++                                    OptionalMapRef(),
++                                    Type::SignedSmall(),
++                                    MachineType::AnyTagged(),
++                                    kNoWriteBarrier,
++                                    "JSDateCacheStamp"};
++  effect = graph()->NewNode(
++      simplified()->StoreField(stamp_access), date,
++      jsgraph()->SmiConstant(isolate()->date_cache_stamp().value()), effect,
++      control);
++  ReplaceWithValue(node, date, effect, control);
++  return Replace(date);
++}
++
  // ES6 section 20.3.3.1 Date.now ( )
  Reduction JSCallReducer::ReduceDateNow(Node* node) {
    Node* effect = NodeProperties::GetEffectInput(node);
-@@ -9661,6 +9716,162 @@ Reduction JSCallReducer::ReduceDateNow(Node* node) {
+@@ -9661,6 +9795,162 @@ Reduction JSCallReducer::ReduceDateNow(Node* node) {
  }
  
  // ES6 section 20.1.2.13 Number.parseInt ( string, radix )
@@ -864,14 +950,15 @@ index ef2524264c2..eda89bb34b4 100644
    JSCallNode n(node);
    if (n.ArgumentCount() < 1) {
 diff --git a/src/compiler/js-call-reducer.h b/src/compiler/js-call-reducer.h
-index 0d4d10d6dc6..6fe7c8169eb 100644
+index 0d4d10d6dc6..3d46f6b5e7b 100644
 --- a/src/compiler/js-call-reducer.h
 +++ b/src/compiler/js-call-reducer.h
-@@ -252,6 +252,8 @@ class V8_EXPORT_PRIVATE JSCallReducer final : public AdvancedReducer {
+@@ -252,6 +252,9 @@ class V8_EXPORT_PRIVATE JSCallReducer final : public AdvancedReducer {
    Reduction ReduceDatePrototypeGetField(Node* node, JSDate::FieldIndex field);
  
    Reduction ReduceDateNow(Node* node);
 +  Reduction ReduceDateUTC(Node* node);
++  Reduction ReduceDateConstructor(Node* node, JSFunctionRef function);
 +  Reduction ReduceNumberPrototypeToFixed(Node* node);
    Reduction ReduceNumberParseInt(Node* node);
  
@@ -934,6 +1021,19 @@ index 0ad55941094..b0a551bc285 100644
      case Builtin::kDatePrototypeSetUTCFullYear:
      case Builtin::kDatePrototypeSetUTCHours:
      case Builtin::kDatePrototypeSetUTCMilliseconds:
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index f8c0c95e78f..69d2737b2c2 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -1690,6 +1690,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   }
+   // Returns current date_cache_stamp value and records the fact that the
+   // date cache is used (i.e. there are JSDate instances created).
++  // SSRS2: whether a date was made (TurboFan makes a date of a constant only then: the stamp it writes is current).
++  bool is_date_cache_used() const { return isolate_data()->is_date_cache_used_; }
+   Tagged<Smi> GetDateCacheStampAndRecordUsage() {
+     isolate_data()->is_date_cache_used_ = true;
+     return date_cache_stamp();
 diff --git a/src/execution/protectors.h b/src/execution/protectors.h
 index 2129033705e..5e076b2f1d4 100644
 --- a/src/execution/protectors.h
