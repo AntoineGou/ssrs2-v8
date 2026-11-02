@@ -33,7 +33,7 @@ git checkout -q "$clearscript_tag"
 # (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed)
 cs_patched="$clearscript_tag $(cat "$here"/patches/clearscript/*.patch | git hash-object --stdin)"
 if [[ "$(cat .ssrs2-patched 2>/dev/null || true)" != "$cs_patched" ]]; then
-    git checkout -q HEAD -- ClearScriptV8
+    git checkout -q HEAD -- ClearScriptV8 Unix/ClearScriptV8/Makefile
     for p in "$here"/patches/clearscript/*.patch; do git apply --3way "$p" || exit 1; done
     echo "$cs_patched" > .ssrs2-patched
 fi
@@ -115,5 +115,10 @@ done
 if [[ "$os" == linux ]]; then
     glibc=$(V8/build/v8/third_party/llvm-build/Release+Asserts/bin/llvm-objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
     echo "Needs $glibc"
+    # (ClearScript's entry points and its own code's symbols; V8's and the C++ runtime's stay inside: 86,000 made a
+    # fifth of the library)
+    exports=$(V8/build/v8/third_party/llvm-build/Release+Asserts/bin/llvm-objdump -T "$lib" | grep -v '\*UND\*' | grep -Ec '^[0-9a-f]{8,} ' || true)
+    echo "Exports $exports symbols"
+    (( exports < 20000 )) || { echo "V8's symbols are exported: the link's --exclude-libs is missing"; exit 1; }
 fi
 ls -la "$work/out/ClearScriptV8.$rid.$ext"

@@ -47,7 +47,10 @@ V8 15.6's API, with V8 15.6's ICU data built in (ClearScript's ICU data package 
 `0002-ssrs2.patch`: V8 starts with no full collection below 768 MB of old space and inline caches polymorphic up to 16
 maps, `SSRS2_V8_FLAGS` adds flags for experiments, and an interrupt of the isolate runs only V8's nestable tasks: a
 non-nestable one may run JavaScript (a `FinalizationRegistry`'s cleanup), which V8 forbids in an interrupt (and which
-would run in the middle of a script), and waits for the isolate scope's exit; then `0003-direct-calls.patch`, the library's two exports through
+would run in the middle of a script), and waits for the isolate scope's exit; and on Linux the library exports only its own
+symbols: V8's and the C++ runtime's, linked from their static archives, stay inside it (86,000 dynamic symbols were a
+fifth of the library, and V8's calls between its own functions went through the PLT; `build.sh` fails a library
+exporting 20,000 or more); then `0003-direct-calls.patch`, the library's two exports through
 which SSRS2's HTML engine lets scripts call .NET straight from V8, without ClearScript's host objects:
 `Ssrs2_InstallDirectCalls` makes functions of a script object that call one host dispatcher with their arguments read in
 place (numbers, booleans, strings as UTF-16, typed arrays as their memory) and take back a number, a string, null or an

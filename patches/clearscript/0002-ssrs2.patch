@@ -60,3 +60,18 @@ index 0f44deb9..0272feef 100644
  }
  
  //-----------------------------------------------------------------------------
+diff --git a/Unix/ClearScriptV8/Makefile b/Unix/ClearScriptV8/Makefile
+index 6a27244f..a61c8dc9 100644
+--- a/Unix/ClearScriptV8/Makefile
++++ b/Unix/ClearScriptV8/Makefile
+@@ -101,7 +101,9 @@ ifeq ($(TARGETOS), linux)
+     ifndef DEBUG
+         CXXLINKFLAGS := -s
+     endif
+-    CXXLINKFLAGS := $(CXXLINKFLAGS) -static-libstdc++ -static-libgcc -ldl -lrt --no-undefined -fuse-ld=lld
++    # SSRS2: only the library's own entry points exported, not V8's and the C++ runtime's symbols from their static
++    # archives (86,000 of them: 20 MB of dynamic symbols, and V8's calls between its own functions made through the PLT)
++    CXXLINKFLAGS := $(CXXLINKFLAGS) -static-libstdc++ -static-libgcc -ldl -lrt --no-undefined -fuse-ld=lld -Wl,--exclude-libs,ALL
+     ifneq ($(HOSTCPU), $(CPU))
+         CXXCROSSFLAGS := -I/usr/$(TARGET)/include
+     endif

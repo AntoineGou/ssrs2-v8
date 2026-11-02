@@ -50,7 +50,7 @@ Invoke-Native 'Checking ClearScript out' { git checkout -q $clearScriptTag }
 $csPatches = Get-ChildItem (Join-Path $here 'patches\clearscript') -Filter *.patch | Sort-Object Name
 $csPatched = "$clearScriptTag $((Get-Content -Raw $csPatches.FullName) -join '' | git hash-object --stdin)"
 if (-not (Test-Path .ssrs2-patched) -or (Get-Content .ssrs2-patched) -ne $csPatched) {
-    Invoke-Native 'Resetting ClearScript' { git checkout -q HEAD -- ClearScriptV8 }
+    Invoke-Native 'Resetting ClearScript' { git checkout -q HEAD -- ClearScriptV8 Unix/ClearScriptV8/Makefile }
     foreach ($p in $csPatches) { Invoke-Native "Applying $($p.Name)" { git apply --3way $p.FullName } }
     Set-Content .ssrs2-patched $csPatched
 }
