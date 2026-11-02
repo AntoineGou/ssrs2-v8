@@ -1391,3 +1391,23 @@ index c9c117d0a9b..a0281dad1a7 100644
  }
  
  DirectHandle<Object> ScriptCacheKey::AsHandle(
+diff --git a/src/heap/cppgc-internal/sweeper.cc b/src/heap/cppgc-internal/sweeper.cc
+index b771a1b52de..faf10c58a85 100644
+--- a/src/heap/cppgc-internal/sweeper.cc
++++ b/src/heap/cppgc-internal/sweeper.cc
+@@ -1012,6 +1012,15 @@ class Sweeper::SweeperImpl final {
+         foreground_task_runner_.reset();
+         low_priority_foreground_task_runner_.reset();
+       }
++      // SSRS2: no low-priority foreground sweeping. Its task reposts itself at
++      // once while sweeping is in progress, which assumes a platform running it
++      // in idle time; ClearScript runs a foreground task at once, through the
++      // .NET thread pool and an interrupt of the isolate, and the reposts became
++      // a storm of tasks with documents running on several isolates at once (a
++      // 15-chart report rendered 8 at a time fell from 30 documents a second
++      // to 1). Regular-priority incremental sweeping, with its delays, and
++      // concurrent sweeping still run.
++      low_priority_foreground_task_runner_.reset();
+     }
+ 
+     if (ShouldDiscardMemory(config_.free_memory_handling)) {

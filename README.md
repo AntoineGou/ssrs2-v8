@@ -36,6 +36,11 @@ library and layout rules (a configuration Chrome does not build: pointers uncomp
 - TurboFan folds `Date.UTC` of constants, and makes `new Date(c)` of a constant itself, its fields worked out when
   compiling (local time UTC): escape analysis drops a date nothing keeps, as a loop's bound
   (`d <= new Date(Date.UTC(2026, 9, 15))`).
+- No low-priority foreground sweeping of the C++ heap: its task posts itself again at once while sweeping is in
+  progress, which assumes a platform running it in idle time; ClearScript runs a foreground task at once, through the
+  .NET thread pool and an interrupt of the isolate, and with documents on several isolates at once the posts became a
+  storm of tasks (SSRS2's 15-chart report rendered 8 at a time fell from 30 documents a second to 1, now and then).
+  Incremental sweeping at regular priority, with its delays, and concurrent sweeping still run.
 
 The library, in order (`patches/clearscript`): `0001-v8-15.6-port.patch`, ClearScript 7.5.1.1's native side ported to
 V8 15.6's API, with V8 15.6's ICU data built in (ClearScript's ICU data package holds V8 14.7's); then
