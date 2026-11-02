@@ -1,5 +1,5 @@
 diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
-index 0f44deb9..7da8ce62 100644
+index 0f44deb9..0272feef 100644
 --- a/ClearScriptV8/V8IsolateImpl.cpp
 +++ b/ClearScriptV8/V8IsolateImpl.cpp
 @@ -2,6 +2,7 @@
@@ -43,3 +43,20 @@ index 0f44deb9..7da8ce62 100644
          if (!flagStrings.empty())
          {
              std::string flagsString(flagStrings[0]);
+@@ -1765,7 +1785,15 @@ void V8IsolateImpl::CallWithLockAsync(bool allowNesting, CallWithLockCallback&&
+ 
+ void V8IsolateImpl::ProcessCallWithLockQueue(v8::Isolate* /*pIsolate*/, void* pvIsolateImpl)
+ {
+-    static_cast<V8IsolateImpl*>(pvIsolateImpl)->ProcessCallWithLockQueue();
++    // SSRS2: an API interrupt must not run JavaScript (V8 aborts the process: "Invoke in
++    // DisallowJavascriptExecutionScope"), and a non-nestable task may (FinalizationRegistry cleanup);
++    // from an interrupt, only the nestable calls run, as in a nested call; the others wait for the
++    // isolate scope's exit, which processes the queue.
++
++    auto pIsolateImpl = static_cast<V8IsolateImpl*>(pvIsolateImpl);
++    BEGIN_PULSE_VALUE_SCOPE(&pIsolateImpl->m_CallWithLockLevel, pIsolateImpl->m_CallWithLockLevel + 1)
++        pIsolateImpl->ProcessCallWithLockQueue();
++    END_PULSE_VALUE_SCOPE
+ }
+ 
+ //-----------------------------------------------------------------------------
