@@ -1375,3 +1375,19 @@ index 9fb474514c5..2902de60f50 100644
      *result_double =
          StringToDouble(chars,
                         NO_CONVERSION_FLAG,  // Hex, octal or trailing junk.
+diff --git a/src/objects/compilation-cache-table.cc b/src/objects/compilation-cache-table.cc
+index c9c117d0a9b..a0281dad1a7 100644
+--- a/src/objects/compilation-cache-table.cc
++++ b/src/objects/compilation-cache-table.cc
+@@ -355,7 +355,10 @@ bool ScriptCacheKey::IsMatch(Tagged<Object> other) {
+   Tagged<Script> other_script = Cast<Script>(other_script_object);
+   Tagged<String> other_source = Cast<String>(other_script->source());
+ 
+-  return other_source->Equals(*source_) && MatchesScript(other_script);
++  // SSRS2: the origin first, then the source: a long source's hash is little more than its length, and the entries of
++  // documents gone (a module compiled again in each new context, its host-defined options another document's) each
++  // cost a whole comparison of the source before their origin rejected them.
++  return MatchesScript(other_script) && other_source->Equals(*source_);
+ }
+ 
+ DirectHandle<Object> ScriptCacheKey::AsHandle(

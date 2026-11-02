@@ -29,6 +29,10 @@ library and layout rules (a configuration Chrome does not build: pointers uncomp
   fast path: the digits an exact integer, one correctly rounded division by a power of ten up to 10^22), the number
   `StringToDouble` gives, without reading the characters again (a page's data as JSON: SSRS2's 300-page report parses
   1.6 million prices, its scripts about 6 ms faster; a million random decimals read as `Number` reads them).
+- The compilation cache checks a script's origin before its source: a long source's hash is little more than its
+  length, so each entry left by a document gone (a module compiled again in each new context, its host-defined options
+  another document's) cost a whole comparison of the source before its origin rejected it (a Three.js module of
+  690 KB rendered again and again: 4% of the page's time).
 - TurboFan folds `Date.UTC` of constants, and makes `new Date(c)` of a constant itself, its fields worked out when
   compiling (local time UTC): escape analysis drops a date nothing keeps, as a loop's bound
   (`d <= new Date(Date.UTC(2026, 9, 15))`).
