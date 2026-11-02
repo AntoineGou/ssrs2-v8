@@ -25,6 +25,10 @@ library and layout rules (a configuration Chrome does not build: pointers uncomp
 - `Number.prototype.toFixed` is a CSA builtin for up to 20 digits below 2^52, and TurboFan makes `+x.toFixed(f)` a
   number without the string.
 - Plain decimals (`"-123.45"`) are made numbers without the runtime.
+- `JSON.parse` reads a decimal of at most 15 significant digits and no exponent from the digits it scanned (Clinger's
+  fast path: the digits an exact integer, one correctly rounded division by a power of ten up to 10^22), the number
+  `StringToDouble` gives, without reading the characters again (a page's data as JSON: SSRS2's 300-page report parses
+  1.6 million prices, its scripts about 6 ms faster; a million random decimals read as `Number` reads them).
 - TurboFan folds `Date.UTC` of constants, and makes `new Date(c)` of a constant itself, its fields worked out when
   compiling (local time UTC): escape analysis drops a date nothing keeps, as a loop's bound
   (`d <= new Date(Date.UTC(2026, 9, 15))`).

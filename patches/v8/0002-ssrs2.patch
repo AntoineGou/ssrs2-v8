@@ -1325,3 +1325,53 @@ index b995b4bffd6..7ed63074aa4 100644
    V(PropertyCell, number_string_not_regexp_like_protector,                     \
      NumberStringNotRegexpLikeProtector)                                        \
    /* Caches */                                                                 \
+diff --git a/src/json/json-parser.cc b/src/json/json-parser.cc
+index 9fb474514c5..2902de60f50 100644
+--- a/src/json/json-parser.cc
++++ b/src/json/json-parser.cc
+@@ -1897,6 +1897,45 @@ bool JsonParser<Char>::ParseJsonNumberAsDoubleOrSmi(double* result_double,
+     }
+ 
+     base::Vector<const Char> chars(start, cursor_ - start);
++    // SSRS2: a decimal of at most 15 significant digits and no exponent part, as Clinger's fast path reads it: its digits
++    // an exact integer, divided by an exact power of ten at most 10^22, one correctly rounded division, the double
++    // StringToDouble gives (which reads the characters again; a data page's thousands of prices).
++    {
++      const Char* p = chars.begin();
++      const Char* end = chars.end();
++      bool negative = false;
++      if (p < end && *p == '-') {
++        negative = true;
++        ++p;
++      }
++      uint64_t mantissa = 0;
++      int significant = 0;
++      int scale = 0;
++      bool fast = true;
++      for (; p < end && IsDecimalDigit(*p); ++p) {
++        if ((mantissa != 0 || *p != '0') && ++significant > 15) fast = false;
++        mantissa = mantissa * 10 + static_cast<uint64_t>(*p - '0');
++      }
++      if (fast && p < end && *p == '.') {
++        for (++p; p < end && IsDecimalDigit(*p); ++p) {
++          if ((mantissa != 0 || *p != '0') && ++significant > 15) {
++            fast = false;
++            break;
++          }
++          mantissa = mantissa * 10 + static_cast<uint64_t>(*p - '0');
++          ++scale;
++        }
++      }
++      if (fast && p == end && scale <= 22) {
++        static constexpr double kPowersOfTen[] = {
++            1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
++            1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
++        double value = static_cast<double>(mantissa);
++        if (scale > 0) value /= kPowersOfTen[scale];
++        *result_double = negative ? -value : value;
++        return !DoubleToSmiInteger(*result_double, result_smi);
++      }
++    }
+     *result_double =
+         StringToDouble(chars,
+                        NO_CONVERSION_FLAG,  // Hex, octal or trailing junk.

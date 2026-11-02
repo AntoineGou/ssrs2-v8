@@ -14,6 +14,21 @@
   out.push(String(n), new Date(Date.UTC(2026, 1, 29)).toISOString(), String(new Date(Date.UTC(2026, 9, 15)) - new Date(Date.UTC(2026, 0, 1))));
   // decimals made numbers
   out.push(String(Number("-123.45") * 2), String(+"0.1" + +"0.2"), String(parseFloat("3.14159265358979")));
+  // decimals read by JSON.parse, as Number reads them (random digits, signs, leading zeros of fractions, past 15 digits)
+  let seed = 7, unlike = 0;
+  const rnd = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8;
+  const texts = [];
+  for (let i = 0; i < 100000; i++) {
+    let ip = ''; for (let k = rnd() % 12; k > 0; k--) ip += rnd() % 10;
+    ip = ip.replace(/^0+/, '') || '0';
+    let text = (rnd() % 3 === 0 ? '-' : '') + ip;
+    const f = rnd() % 24; if (f > 0) { text += '.'; for (let k = 0; k < f; k++) text += rnd() % 10; }
+    texts.push(text);
+  }
+  const values = JSON.parse('[' + texts.join(',') + ']');
+  for (let i = 0; i < texts.length; i++) if (!Object.is(values[i], Number(texts[i]))) unlike++;
+  const edge = JSON.parse('[0.1, -0, -0.0, 5.0, 1e5, 123456789012345.6, 0.0000000000000000000001, 2147483648.5]');
+  out.push(String(unlike), edge.map(v => Object.is(v, -0) ? '-0' : String(v)).join(','));
   // polymorphic objects (inline caches past four maps)
   class E { constructor() { this.x = 1; this.y = 2; } }
   const kinds = [];
