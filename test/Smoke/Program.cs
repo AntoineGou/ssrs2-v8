@@ -16,9 +16,53 @@ var offset = Convert.ToInt32(engine.Evaluate("new Date(0).getTimezoneOffset()"))
 Console.WriteLine($"{answer}\ntime zone offset {offset}");
 var calls = HostCalls.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"host calls: {calls}");
-if (answer == expected && offset == 0 && calls == HostCalls.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}");
+using var moduleEngine = new V8ScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+var modules = Modules.Check(moduleEngine);
+Console.WriteLine($"modules: {modules}");
+if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}");
 return 1;
+
+// patches/clearscript/0004: an import's type attribute reaches the loader after the specifier ("\0type=text"), a text
+// module made of a JSON document is the text (a synthetic module, evaluated in its context), and a dynamic import of a
+// module that throws rejects with its error.
+static class Modules
+{
+    public const string Expected = "hello|loader saw ./t.txt type=text|bad module";
+
+    sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    {
+        public string Seen = "";
+
+        public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
+        {
+            int marker = specifier.IndexOf("\0type=", StringComparison.Ordinal);
+            if (marker >= 0)
+            {
+                Seen = $"{specifier[..marker]} type={specifier[(marker + 6)..]}";
+                return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///t.txt")) { Category = Microsoft.ClearScript.DocumentCategory.Json }, "\"hello\"");
+            }
+            return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+                "throw new Error('bad module');");
+        }
+
+        public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+            Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
+    }
+
+    public static string Check(V8ScriptEngine engine)
+    {
+        var loader = new Loader();
+        engine.DocumentSettings.Loader = loader;
+        engine.DocumentSettings.AccessFlags = Microsoft.ClearScript.DocumentAccessFlags.EnableAllLoading;
+        engine.Execute(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///main.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            "import t from './t.txt' with { type: 'text' }; globalThis.moduleText = t;"
+            + " import('./bad.js').then(() => { globalThis.moduleError = 'resolved'; }, e => { globalThis.moduleError = e.message; });");
+        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}";
+    }
+}
 
 // SSRS2's direct and fast calls (patches/clearscript/0003): installed from inside a host call, as SSRS2's engine does,
 // then called by the script: a fast call of two int32s (enough times for the optimizing compiler's direct call) and a

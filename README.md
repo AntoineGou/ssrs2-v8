@@ -56,7 +56,15 @@ which SSRS2's HTML engine lets scripts call .NET straight from V8, without Clear
 place (numbers, booleans, strings as UTF-16, typed arrays as their memory) and take back a number, a string, null or an
 error; `Ssrs2_InstallFastCalls` makes functions of int32 arguments answering an int32, each a host function pointer, as
 V8 fast API calls (the optimizing compiler calls them directly), their templates kept once per isolate. Both are called
-from inside a host call. `test/Smoke` installs one of each and calls them on every platform.
+from inside a host call. `test/Smoke` installs one of each and calls them on every platform. Then
+`0004-import-attributes.patch`, modules: an import's `type` attribute (`import t from "./t.txt" with { type: "text" }`,
+`import(url, { with: { type: "json" } })`) reaches the host's module loader after the specifier, a NUL and `type=`
+(ClearScript gives its loader the specifier alone: a text, JSON or CSS module could not be told from a script); a
+dynamic import of a module whose evaluation throws rejects with its error, and one of a module awaiting at its top level
+settles when its evaluation does (the import resolved with the namespace of a module that had thrown); and a synthetic
+module (ClearScript's JSON modules) finds its context when evaluated (the context was read back with another tag than
+it was stored with, V8 15.6 answered null, and V8 stopped the process: "Check failed: has_exception()").
+`test/Smoke` imports a text module and a module that throws on every platform.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

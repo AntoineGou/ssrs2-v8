@@ -1,0 +1,118 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 890d25c0..ed16feda 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -2050,9 +2050,37 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(const V8DocumentInfo* pS
+                     ASSERT_EVAL(FROM_MAYBE(hModule->InstantiateModule(m_hContext, V8IsolateImpl::ModuleResolveCallback)));
+                 }
+ 
++                v8::Local<v8::Value> hEvaluation;
+                 if (hModule->GetStatus() == v8::Module::kInstantiated)
+                 {
+-                    FROM_MAYBE(hModule->Evaluate(m_hContext));
++                    hEvaluation = FROM_MAYBE(hModule->Evaluate(m_hContext));
++                }
++
++                // SSRS2: a module whose evaluation threw (now or before) rejects the import with its error, and one whose
++                // evaluation is a promise (top-level await) settles the import when it settles: V8 tells an evaluation's
++                // error through the promise Evaluate answers, which the import ignored (it resolved with the namespace of
++                // a module that had thrown: HTML's dynamic import of a failing module rejects).
++                if (hModule->GetStatus() == v8::Module::kErrored)
++                {
++                    ASSERT_EVAL(FROM_MAYBE(hResolver->Reject(m_hContext, hModule->GetException())));
++                    return hResolver->GetPromise();
++                }
++
++                if (!hEvaluation.IsEmpty() && hEvaluation->IsPromise())
++                {
++                    auto hEvaluationPromise = hEvaluation.As<v8::Promise>();
++                    if (hEvaluationPromise->State() == v8::Promise::kRejected)
++                    {
++                        ASSERT_EVAL(FROM_MAYBE(hResolver->Reject(m_hContext, hEvaluationPromise->Result())));
++                        return hResolver->GetPromise();
++                    }
++
++                    if (hEvaluationPromise->State() == v8::Promise::kPending)
++                    {
++                        auto hAnswer = FROM_MAYBE(v8::Function::New(m_hContext, [] (const v8::FunctionCallbackInfo<v8::Value>& info) { info.GetReturnValue().Set(info.Data()); }, hModule->GetModuleNamespace()));
++                        ASSERT_EVAL(FROM_MAYBE(hResolver->Resolve(m_hContext, FROM_MAYBE(hEvaluationPromise->Then(m_hContext, hAnswer)))));
++                        return hResolver->GetPromise();
++                    }
+                 }
+ 
+                 ASSERT_EVAL(FROM_MAYBE(hResolver->Resolve(m_hContext, hModule->GetModuleNamespace())));
+@@ -2221,7 +2249,10 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::PopulateSyntheticModule(v8::Local<v8:
+ {
+     if (hContext->GetNumberOfEmbedderDataFields() > 1)
+     {
+-        auto pContextImpl = static_cast<V8ContextImpl*>(hContext->GetAlignedPointerFromEmbedderData(1, v8::kEmbedderDataTypeTagDefault));
++        // SSRS2: read with the tag the context set it with (SetAlignedPointerInEmbedderData(1, this, 1)): with the default
++        // tag V8 15.6 answers null, the evaluation answered nothing without an exception, and V8 stopped the process
++        // (a JSON module's, "Check failed: has_exception()").
++        auto pContextImpl = static_cast<V8ContextImpl*>(hContext->GetAlignedPointerFromEmbedderData(1, 1));
+         if (pContextImpl != nullptr)
+         {
+             return pContextImpl->PopulateSyntheticModule(hModule);
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index 0272feef..0d2125f3 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -1454,16 +1454,55 @@ void V8IsolateImpl::ImportMetaInitializeCallback(v8::Local<v8::Context> hContext
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2: an import's type attribute (import ... with { type: "text" }, import(..., { with: { type: "json" } })) told to
++// the host with its specifier, which is all ClearScript's module loader is given: the specifier, a NUL, "type=" and the
++// type. The host's loader reads it and takes it off; a specifier without the attribute is passed as it is. A dynamic
++// import's attributes come as key-value pairs, a static import's as triples (key, value, source location).
++static v8::Local<v8::String> WithImportType(v8::Isolate* pIsolate, v8::Local<v8::Context> hContext, v8::Local<v8::String> hSpecifier, v8::Local<v8::FixedArray> hAttributes, int stride)
++{
++    if (hAttributes.IsEmpty())
++    {
++        return hSpecifier;
++    }
++
++    auto hType = v8::String::NewFromUtf8Literal(pIsolate, "type");
++    for (int index = 0; index + 1 < hAttributes->Length(); index += stride)
++    {
++        auto hKey = hAttributes->Get(index);
++        auto hValue = hAttributes->Get(index + 1);
++        if (hKey.IsEmpty() || hValue.IsEmpty() || !hKey->IsValue() || !hValue->IsValue())
++        {
++            continue;
++        }
++
++        auto hKeyValue = hKey.As<v8::Value>();
++        auto hValueValue = hValue.As<v8::Value>();
++        if (!hKeyValue->IsString() || !hValueValue->IsString() || !hKeyValue.As<v8::String>()->StringEquals(hType))
++        {
++            continue;
++        }
++
++        auto hMarker = v8::String::NewFromUtf8Literal(pIsolate, "\0type=");
++        return v8::String::Concat(pIsolate, v8::String::Concat(pIsolate, hSpecifier, hMarker), hValueValue.As<v8::String>());
++    }
++
++    return hSpecifier;
++}
++
++//-----------------------------------------------------------------------------
++
+ v8::MaybeLocal<v8::Promise> V8IsolateImpl::ModuleImportCallback(v8::Local<v8::Context> hContext, v8::Local<v8::Data> hHostDefinedOptions, v8::Local<v8::Value> hResourceName, v8::Local<v8::String> hSpecifier, v8::Local<v8::FixedArray> hImportAssertions)
+ {
+-    return GetInstanceFromIsolate(v8::Isolate::GetCurrent())->ImportModule(hContext, hHostDefinedOptions, hResourceName, hSpecifier, hImportAssertions);
++    auto pIsolate = v8::Isolate::GetCurrent();
++    return GetInstanceFromIsolate(pIsolate)->ImportModule(hContext, hHostDefinedOptions, hResourceName, WithImportType(pIsolate, hContext, hSpecifier, hImportAssertions, 2), hImportAssertions);
+ }
+ 
+ //-----------------------------------------------------------------------------
+ 
+-v8::MaybeLocal<v8::Module> V8IsolateImpl::ModuleResolveCallback(v8::Local<v8::Context> hContext, v8::Local<v8::String> hSpecifier, v8::Local<v8::FixedArray> /*importAssertions*/, v8::Local<v8::Module> hReferrer)
++v8::MaybeLocal<v8::Module> V8IsolateImpl::ModuleResolveCallback(v8::Local<v8::Context> hContext, v8::Local<v8::String> hSpecifier, v8::Local<v8::FixedArray> importAssertions, v8::Local<v8::Module> hReferrer)
+ {
+-    return GetInstanceFromIsolate(v8::Isolate::GetCurrent())->ResolveModule(hContext, hSpecifier, hReferrer);
++    auto pIsolate = v8::Isolate::GetCurrent();
++    return GetInstanceFromIsolate(pIsolate)->ResolveModule(hContext, WithImportType(pIsolate, hContext, hSpecifier, importAssertions, 3), hReferrer);
+ }
+ 
+ //-----------------------------------------------------------------------------
