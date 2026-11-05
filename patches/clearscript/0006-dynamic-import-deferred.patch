@@ -1,0 +1,116 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index ed16fed..87d0b25 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -2045,45 +2045,78 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(const V8DocumentInfo* pS
+ 
+                 auto hModule = FROM_MAYBE(ResolveModule(hSpecifier, pSourceDocumentInfo));
+ 
+-                if (hModule->GetStatus() == v8::Module::kUninstantiated)
++                // SSRS2: the module is had now (its URL resolved, its source fetched and compiled, a blob URL read before a
++                // revocation that follows the call), and linked and evaluated in a microtask, after the script that asked
++                // for it (HTML's import() evaluates the module once fetched, not inside the call); the promise settles then.
++                struct Deferred
+                 {
+-                    ASSERT_EVAL(FROM_MAYBE(hModule->InstantiateModule(m_hContext, V8IsolateImpl::ModuleResolveCallback)));
+-                }
+-
+-                v8::Local<v8::Value> hEvaluation;
+-                if (hModule->GetStatus() == v8::Module::kInstantiated)
++                    v8::Global<v8::Context> Context;
++                    v8::Global<v8::Module> Module;
++                    v8::Global<v8::Promise::Resolver> Resolver;
++                };
++                auto pIsolate = v8::Isolate::GetCurrent();
++                auto pDeferred = new Deferred();
++                pDeferred->Context.Reset(pIsolate, pIsolate->GetCurrentContext());
++                pDeferred->Module.Reset(pIsolate, hModule);
++                pDeferred->Resolver.Reset(pIsolate, hResolver);
++                pIsolate->EnqueueMicrotask([] (void* pvData)
+                 {
+-                    hEvaluation = FROM_MAYBE(hModule->Evaluate(m_hContext));
+-                }
+-
+-                // SSRS2: a module whose evaluation threw (now or before) rejects the import with its error, and one whose
+-                // evaluation is a promise (top-level await) settles the import when it settles: V8 tells an evaluation's
+-                // error through the promise Evaluate answers, which the import ignored (it resolved with the namespace of
+-                // a module that had thrown: HTML's dynamic import of a failing module rejects).
+-                if (hModule->GetStatus() == v8::Module::kErrored)
+-                {
+-                    ASSERT_EVAL(FROM_MAYBE(hResolver->Reject(m_hContext, hModule->GetException())));
+-                    return hResolver->GetPromise();
+-                }
+-
+-                if (!hEvaluation.IsEmpty() && hEvaluation->IsPromise())
+-                {
+-                    auto hEvaluationPromise = hEvaluation.As<v8::Promise>();
+-                    if (hEvaluationPromise->State() == v8::Promise::kRejected)
++                    std::unique_ptr<Deferred> upDeferred(static_cast<Deferred*>(pvData));
++                    auto pIsolate = v8::Isolate::GetCurrent();
++                    v8::HandleScope handleScope(pIsolate);
++                    auto hContext = upDeferred->Context.Get(pIsolate);
++                    auto hModule = upDeferred->Module.Get(pIsolate);
++                    auto hResolver = upDeferred->Resolver.Get(pIsolate);
++                    v8::Context::Scope contextScope(hContext);
++                    v8::TryCatch tryCatch(pIsolate);
++                    v8::Local<v8::Value> hEvaluation;
++                    bool ok = true;
++                    if (hModule->GetStatus() == v8::Module::kUninstantiated)
+                     {
+-                        ASSERT_EVAL(FROM_MAYBE(hResolver->Reject(m_hContext, hEvaluationPromise->Result())));
+-                        return hResolver->GetPromise();
++                        ok = hModule->InstantiateModule(hContext, V8IsolateImpl::ModuleResolveCallback).FromMaybe(false);
+                     }
+-
+-                    if (hEvaluationPromise->State() == v8::Promise::kPending)
++                    if (ok && hModule->GetStatus() == v8::Module::kInstantiated)
+                     {
+-                        auto hAnswer = FROM_MAYBE(v8::Function::New(m_hContext, [] (const v8::FunctionCallbackInfo<v8::Value>& info) { info.GetReturnValue().Set(info.Data()); }, hModule->GetModuleNamespace()));
+-                        ASSERT_EVAL(FROM_MAYBE(hResolver->Resolve(m_hContext, FROM_MAYBE(hEvaluationPromise->Then(m_hContext, hAnswer)))));
+-                        return hResolver->GetPromise();
++                        ok = hModule->Evaluate(hContext).ToLocal(&hEvaluation);
+                     }
+-                }
+-
+-                ASSERT_EVAL(FROM_MAYBE(hResolver->Resolve(m_hContext, hModule->GetModuleNamespace())));
++                    if (!ok)
++                    {
++                        if (tryCatch.HasCaught()) (void)hResolver->Reject(hContext, tryCatch.Exception());
++                        return;
++                    }
++                    // (a module whose evaluation threw, now or before, rejects the import with its error; one whose
++                    // evaluation is a promise, top-level await, settles it when it settles)
++                    if (hModule->GetStatus() == v8::Module::kErrored)
++                    {
++                        (void)hResolver->Reject(hContext, hModule->GetException());
++                        return;
++                    }
++                    if (!hEvaluation.IsEmpty() && hEvaluation->IsPromise())
++                    {
++                        auto hEvaluationPromise = hEvaluation.As<v8::Promise>();
++                        if (hEvaluationPromise->State() == v8::Promise::kRejected)
++                        {
++                            (void)hResolver->Reject(hContext, hEvaluationPromise->Result());
++                            return;
++                        }
++                        if (hEvaluationPromise->State() == v8::Promise::kPending)
++                        {
++                            v8::Local<v8::Function> hAnswer;
++                            v8::Local<v8::Promise> hThen;
++                            if (v8::Function::New(hContext, [] (const v8::FunctionCallbackInfo<v8::Value>& info) { info.GetReturnValue().Set(info.Data()); }, hModule->GetModuleNamespace()).ToLocal(&hAnswer)
++                                && hEvaluationPromise->Then(hContext, hAnswer).ToLocal(&hThen))
++                            {
++                                (void)hResolver->Resolve(hContext, hThen);
++                            }
++                            else if (tryCatch.HasCaught())
++                            {
++                                (void)hResolver->Reject(hContext, tryCatch.Exception());
++                            }
++                            return;
++                        }
++                    }
++                    (void)hResolver->Resolve(hContext, hModule->GetModuleNamespace());
++                }, pDeferred);
+                 return hResolver->GetPromise();
+ 
+             FROM_MAYBE_CATCH_CONSUME

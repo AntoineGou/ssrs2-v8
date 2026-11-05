@@ -42,10 +42,11 @@ static unsafe class Microtasks
 
 // patches/clearscript/0004: an import's type attribute reaches the loader after the specifier ("\0type=text"), a text
 // module made of a JSON document is the text (a synthetic module, evaluated in its context), and a dynamic import of a
-// module that throws rejects with its error.
+// module that throws rejects with its error; patches/clearscript/0006: a module import() asks for is evaluated after the
+// script that asked (before after evaluated), not inside the call.
 static class Modules
 {
-    public const string Expected = "hello|loader saw ./t.txt type=text|bad module";
+    public const string Expected = "hello|loader saw ./t.txt type=text|bad module|before after evaluated";
 
     sealed class Loader : Microsoft.ClearScript.DocumentLoader
     {
@@ -60,6 +61,9 @@ static class Modules
                 Seen = $"{specifier[..marker]} type={specifier[(marker + 6)..]}";
                 return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///t.txt")) { Category = Microsoft.ClearScript.DocumentCategory.Json }, "\"hello\"");
             }
+            if (specifier.Contains("side", StringComparison.Ordinal))
+                return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///side.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+                    "globalThis.order.push('evaluated');");
             return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
                 "throw new Error('bad module');");
         }
@@ -76,8 +80,9 @@ static class Modules
         engine.DocumentSettings.AccessFlags = Microsoft.ClearScript.DocumentAccessFlags.EnableAllLoading;
         engine.Execute(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///main.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
             "import t from './t.txt' with { type: 'text' }; globalThis.moduleText = t;"
-            + " import('./bad.js').then(() => { globalThis.moduleError = 'resolved'; }, e => { globalThis.moduleError = e.message; });");
-        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}";
+            + " import('./bad.js').then(() => { globalThis.moduleError = 'resolved'; }, e => { globalThis.moduleError = e.message; });"
+            + " globalThis.order = ['before']; import('./side.js'); globalThis.order.push('after');");
+        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((Microsoft.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}";
     }
 }
 

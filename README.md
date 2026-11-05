@@ -67,7 +67,11 @@ it was stored with, V8 15.6 answered null, and V8 stopped the process: "Check fa
 `test/Smoke` imports a text module and a module that throws on every platform. Then `0005-microtask-checkpoint.patch`:
 `Ssrs2_PerformMicrotaskCheckpoint`, an export running the current isolate's microtask queue at once, from inside a host
 call too (HTML's "perform a microtask checkpoint": V8 runs the queue by itself only when the outermost script returns,
-and SSRS2's frames run their parsers' scripts from inside the page's); 0 outside an isolate.
+and SSRS2's frames run their parsers' scripts from inside the page's); 0 outside an isolate. Then
+`0006-dynamic-import-deferred.patch`: `import()` has its module now (the specifier resolved, the source fetched and
+compiled, so a blob URL revoked after the call still loads) and links and evaluates it in a microtask, after the script
+that asked for it, as HTML's import() does (ClearScript evaluated it inside the call: the importing script's code after
+`import()` ran after the module's). `test/Smoke` checks the order.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
