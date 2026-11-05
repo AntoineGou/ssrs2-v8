@@ -19,9 +19,26 @@ Console.WriteLine($"host calls: {calls}");
 using var moduleEngine = new V8ScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
 var modules = Modules.Check(moduleEngine);
 Console.WriteLine($"modules: {modules}");
-if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}");
+var microtasks = Microtasks.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"microtasks: {microtasks}");
+if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}");
 return 1;
+
+// patches/clearscript/0005: a microtask checkpoint from inside a host call runs the queue then, not when the script returns.
+static unsafe class Microtasks
+{
+    public const string Expected = "1:1";
+
+    public static string Check(V8ScriptEngine engine, string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_PerformMicrotaskCheckpoint", out var export)) return "export missing";
+        var perform = (delegate* unmanaged[Stdcall]<int>)export;
+        engine.AddHostObject("checkpoint", new Func<int>(() => perform()));
+        return (string)engine.Evaluate("var flag = 0; Promise.resolve().then(() => { flag = 1; }); checkpoint() + ':' + flag");
+    }
+}
 
 // patches/clearscript/0004: an import's type attribute reaches the loader after the specifier ("\0type=text"), a text
 // module made of a JSON document is the text (a synthetic module, evaluated in its context), and a dynamic import of a

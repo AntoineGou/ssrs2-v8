@@ -1,0 +1,30 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 4e773532..1c80bd2f 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2451,9 +2451,25 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallFastCalls(const char* holder, int32_t count
+     return 1;
+ }
+ 
++// A microtask checkpoint of the current isolate (HTML's "perform a microtask checkpoint"): its microtask queue, which its
++// contexts share, run now, also from inside a host call (V8 runs it by itself only when the outermost script returns, and
++// SSRS2's frames run their parsers' scripts from inside the page's). 1 when run; 0 outside an isolate, or while
++// microtasks are already running.
++NATIVE_ENTRY_POINT(int) Ssrs2_PerformMicrotaskCheckpoint() noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || isolate->GetMicrotasksPolicy() == v8::MicrotasksPolicy::kScoped)
++    {
++        return 0;
++    }
++    isolate->PerformMicrotaskCheckpoint();
++    return 1;
++}
++
+ // (32-bit Windows decorates a __stdcall export's name, _Ssrs2_InstallDirectCalls@20: the plain names too, which a host
+ // looking the functions up by name finds on every platform)
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
++#pragma comment(linker, "/EXPORT:Ssrs2_PerformMicrotaskCheckpoint=_Ssrs2_PerformMicrotaskCheckpoint@0")
+ #endif
