@@ -82,7 +82,11 @@ as a browser's fetch completes (the microtasks of the importing script's task ru
 microtask); a module evaluated already, and every one without a scheduler, still in a microtask. And a dynamically
 imported module whose evaluation throws rejects the import alone: its evaluation's own promise is handled, where it was
 left a rejection without a handler (a page's `unhandledrejection` though it caught the import). `test/Smoke` installs a
-scheduler and checks both.
+scheduler and checks both. Then `0009-dynamic-import-marker.patch`: a dynamic import's specifier reaches the host's module loader
+ending with a NUL and `import()` (after 0004's type attribute), a static import's as before: ClearScript gives its
+loader the specifier alone, and HTML treats the two apart (every `import()` of a module with a parse error rejects with
+the one error its module record keeps, where a static graph reports the first parse error of its own). `test/Smoke`
+checks that `import()`'s specifiers are marked and a static import's is not.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

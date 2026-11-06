@@ -1,0 +1,25 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index 0d2125f3..47469c62 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -1491,10 +1491,19 @@ static v8::Local<v8::String> WithImportType(v8::Isolate* pIsolate, v8::Local<v8:
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2: a dynamic import's specifier told to the host as one, after its type attribute: a NUL and "import()" at its end
++// (ClearScript's module loader is given the specifier alone, a static import's and import()'s alike; HTML's module map
++// keeps a module's parse error, which every import() of it rejects with, where a static graph reports the first parse
++// error of its own). The host's loader reads it and takes it off.
++static v8::Local<v8::String> AsDynamicImport(v8::Isolate* pIsolate, v8::Local<v8::String> hSpecifier)
++{
++    return v8::String::Concat(pIsolate, hSpecifier, v8::String::NewFromUtf8Literal(pIsolate, "\0import()"));
++}
++
+ v8::MaybeLocal<v8::Promise> V8IsolateImpl::ModuleImportCallback(v8::Local<v8::Context> hContext, v8::Local<v8::Data> hHostDefinedOptions, v8::Local<v8::Value> hResourceName, v8::Local<v8::String> hSpecifier, v8::Local<v8::FixedArray> hImportAssertions)
+ {
+     auto pIsolate = v8::Isolate::GetCurrent();
+-    return GetInstanceFromIsolate(pIsolate)->ImportModule(hContext, hHostDefinedOptions, hResourceName, WithImportType(pIsolate, hContext, hSpecifier, hImportAssertions, 2), hImportAssertions);
++    return GetInstanceFromIsolate(pIsolate)->ImportModule(hContext, hHostDefinedOptions, hResourceName, AsDynamicImport(pIsolate, WithImportType(pIsolate, hContext, hSpecifier, hImportAssertions, 2)), hImportAssertions);
+ }
+ 
+ //-----------------------------------------------------------------------------

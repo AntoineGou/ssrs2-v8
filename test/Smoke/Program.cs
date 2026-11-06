@@ -40,9 +40,12 @@ static unsafe class ImportSchedulers
     sealed class Loader : Microsoft.ClearScript.DocumentLoader
     {
         public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
-            new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
+        {
+            if (specifier.EndsWith("\0import()", StringComparison.Ordinal)) specifier = specifier[..^"\0import()".Length];
+            return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
                 specifier.Contains("side", StringComparison.Ordinal) ? "globalThis.order.push('evaluated');" : "throw new Error('bad');");
+        }
 
         public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
             string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
@@ -129,15 +132,23 @@ static unsafe class Microtasks
 // script that asked (before after evaluated), not inside the call.
 static class Modules
 {
-    public const string Expected = "hello|loader saw ./t.txt type=text|bad module|before after evaluated";
+    public const string Expected = "hello|loader saw ./t.txt type=text|bad module|before after evaluated|import() ./bad.js ./side.js";
 
     sealed class Loader : Microsoft.ClearScript.DocumentLoader
     {
         public string Seen = "";
+        // (patches/clearscript/0009: the dynamic imports' specifiers, which end with a NUL and "import()", a static
+        // import's not)
+        public string Dynamic = "import()";
 
         public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
             string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
         {
+            if (specifier.EndsWith("\0import()", StringComparison.Ordinal))
+            {
+                specifier = specifier[..^"\0import()".Length];
+                Dynamic += " " + specifier;
+            }
             int marker = specifier.IndexOf("\0type=", StringComparison.Ordinal);
             if (marker >= 0)
             {
@@ -165,7 +176,7 @@ static class Modules
             "import t from './t.txt' with { type: 'text' }; globalThis.moduleText = t;"
             + " import('./bad.js').then(() => { globalThis.moduleError = 'resolved'; }, e => { globalThis.moduleError = e.message; });"
             + " globalThis.order = ['before']; import('./side.js'); globalThis.order.push('after');");
-        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((Microsoft.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}";
+        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((Microsoft.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}|{loader.Dynamic}";
     }
 }
 
