@@ -103,6 +103,10 @@ Actions builds each one (`.github/workflows/build.yml`) and loads it through Cle
 Each release has a zip per RID holding the library and its licences, `SHA256SUMS`, and GitHub's attestation of where it
 was built: `gh attestation verify ClearScriptV8.linux-x64.zip --repo AntoineGou/ssrs2-v8`.
 
+A tag ending in `-mac` (`v15.6.75.33-ssrs2.7-mac`) builds, tests and publishes `osx-arm64` alone, as a prerelease: a
+development round in about an hour and a half (a full release takes about two and a half, its slowest build osx-x64's).
+Packages take full releases only: tag the same commit without `-mac` when the round is done.
+
 ## Building
 
 ```

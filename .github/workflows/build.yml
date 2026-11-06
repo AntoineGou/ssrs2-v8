@@ -1,4 +1,6 @@
 # Builds ClearScriptV8 for eight RIDs, loads each on a machine that runs it, and on a tag publishes them as a release.
+# A tag ending in -mac (v15.6.75.33-ssrs2.7-mac) builds, tests and publishes osx-arm64 alone, as a prerelease: a quick
+# development round (about an hour and a half against two and a half); the package takes only full releases.
 name: Build
 
 on:
@@ -32,7 +34,7 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Selected
-        run: echo "SELECTED=${{ inputs.only == '' || startsWith(matrix.rid, inputs.only) }}" >> "$GITHUB_ENV"
+        run: echo "SELECTED=${{ endsWith(github.ref_name, '-mac') && matrix.rid == 'osx-arm64' || !endsWith(github.ref_name, '-mac') && (inputs.only == '' || startsWith(matrix.rid, inputs.only)) }}" >> "$GITHUB_ENV"
         shell: bash
       - uses: actions/checkout@v4
         if: env.SELECTED == 'true'
@@ -84,7 +86,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Selected
-        run: echo "SELECTED=${{ inputs.only == '' || startsWith(matrix.rid, inputs.only) }}" >> "$GITHUB_ENV"
+        run: echo "SELECTED=${{ endsWith(github.ref_name, '-mac') && matrix.rid == 'osx-arm64' || !endsWith(github.ref_name, '-mac') && (inputs.only == '' || startsWith(matrix.rid, inputs.only)) }}" >> "$GITHUB_ENV"
         shell: bash
       - uses: actions/checkout@v4
         if: env.SELECTED == 'true'
@@ -159,10 +161,19 @@ jobs:
           done
           (cd dist && sha256sum *.zip > SHA256SUMS)
           cat dist/SHA256SUMS
+          # (eight RIDs in a release, osx-arm64 alone in a -mac round)
+          want=8; [[ "$GITHUB_REF_NAME" == *-mac ]] && want=1
+          n=$(ls dist/*.zip | wc -l)
+          [[ "$n" -eq "$want" ]] || { echo "$n zips, not $want"; exit 1; }
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*.zip
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "ClearScriptV8 for eight RIDs, V8 15.6.75.33 with SSRS2's patch, ClearScript 7.5.1.1. Checksums in SHA256SUMS; build provenance attested by GitHub."
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-mac ]]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --prerelease --notes "ClearScriptV8 for osx-arm64 only, a development round: V8 15.6.75.33 with SSRS2's patches, ClearScript 7.5.1.1. Not for a package (a release has eight RIDs). Checksums in SHA256SUMS; build provenance attested by GitHub."
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "ClearScriptV8 for eight RIDs, V8 15.6.75.33 with SSRS2's patch, ClearScript 7.5.1.1. Checksums in SHA256SUMS; build provenance attested by GitHub."
+          fi
