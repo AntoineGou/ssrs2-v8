@@ -23,9 +23,62 @@ var microtasks = Microtasks.Check(engine, Directory.GetFiles(AppContext.BaseDire
 Console.WriteLine($"microtasks: {microtasks}");
 var realms = CreationContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"creation contexts: {realms}");
-if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}");
+var scheduled = ImportSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"import scheduler: {scheduled}");
+if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
+    && scheduled == ImportSchedulers.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}");
 return 1;
+
+// patches/clearscript/0008: with a scheduler installed, import() hands it each module not evaluated yet as a function and
+// the module's name, the module evaluated when the function is called (not in a microtask); a dynamically imported module
+// that throws rejects the import alone, its evaluation's own promise handled (no rejection without a handler is left).
+static unsafe class ImportSchedulers
+{
+    public const string Expected = "1:before after:2:true:before after evaluated:bad:0";
+
+    sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    {
+        public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+            new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+                specifier.Contains("side", StringComparison.Ordinal) ? "globalThis.order.push('evaluated');" : "throw new Error('bad');");
+
+        public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+            Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallImportScheduler", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+        int unhandled = 0;
+        engine.PromiseRejectionCallback = (kind, promise, value) =>
+        {
+            if (kind == V8PromiseRejectionEventKind.RejectedWithoutHandler) unhandled++;
+            else if (kind == V8PromiseRejectionEventKind.HandlerAddedAfterRejection) unhandled--;
+        };
+        engine.DocumentSettings.Loader = new Loader();
+        engine.DocumentSettings.AccessFlags = Microsoft.ClearScript.DocumentAccessFlags.EnableAllLoading;
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "importScheduler\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("globalThis.queued = []; const made = install(); ssrs2.importScheduler((run, name) => { queued.push([run, name]); }); made"));
+        engine.Execute(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///main2.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            "globalThis.order = ['before']; import('./side2.js'); import('./bad2.js').catch(e => { globalThis.caught = e.message; }); globalThis.order.push('after');");
+        var before = (string)engine.Evaluate("order.join(' ')");
+        var count = Convert.ToInt32(engine.Evaluate("queued.length"));
+        // (the module's resource name, its document's: the URL's path or the URL, by platform)
+        var name = ((string)engine.Evaluate("String(queued[0][1])")).EndsWith("side2.js", StringComparison.Ordinal) ? "true" : "false";
+        engine.Execute("queued.forEach(q => q[0]())");
+        engine.Execute("0");
+        return $"{installed}:{before}:{count}:{name}:{engine.Evaluate("order.join(' ')")}:{engine.Evaluate("String(globalThis.caught)")}:{unhandled}";
+    }
+}
 
 // patches/clearscript/0007: the creation context of an object of another context of the isolate, a revoked Proxy's too,
 // as its global object; undefined for a primitive.

@@ -75,7 +75,14 @@ that asked for it, as HTML's import() does (ClearScript evaluated it inside the 
 `Ssrs2_InstallCreationContext`, called from inside a host call, makes a function answering the global object of the
 context an object was created in, a revoked Proxy's too (WebIDL reports a callback's exceptions in its realm, and a
 script cannot ask a revoked Proxy anything: its every operation throws). `test/Smoke` asks it of objects and revoked
-Proxies of another context of the isolate.
+Proxies of another context of the isolate. Then `0008-dynamic-import-task.patch`: `Ssrs2_InstallImportScheduler`, called from inside a
+host call, makes a function the script gives its scheduler to: each `import()` of a module not evaluated yet is then
+handed to it as a function running the evaluation, with the module's resource name, and the host calls it a task later,
+as a browser's fetch completes (the microtasks of the importing script's task run first: 0006 evaluated it in a
+microtask); a module evaluated already, and every one without a scheduler, still in a microtask. And a dynamically
+imported module whose evaluation throws rejects the import alone: its evaluation's own promise is handled, where it was
+left a rejection without a handler (a page's `unhandledrejection` though it caught the import). `test/Smoke` installs a
+scheduler and checks both.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

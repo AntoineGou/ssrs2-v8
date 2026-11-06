@@ -1,0 +1,323 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 87d0b252..6f87728e 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -2029,6 +2029,143 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(v8::Local<v8::Data> hHos
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2: a dynamic import's module, had at the call, linked and evaluated later (V8ContextImpl::ImportModule).
++struct Ssrs2DeferredImport
++{
++    v8::Global<v8::Context> Context;
++    v8::Global<v8::Module> Module;
++    v8::Global<v8::Promise::Resolver> Resolver;
++    v8::Global<v8::Function> Runner;
++    bool Done = false;
++
++    // The context's import scheduler, a function of the host's (Ssrs2_InstallImportScheduler), kept on its global.
++    static v8::Local<v8::Private> SchedulerKey(v8::Isolate* pIsolate)
++    {
++        return v8::Private::ForApi(pIsolate, v8::String::NewFromUtf8Literal(pIsolate, "ssrs2.importScheduler"));
++    }
++
++    // The evaluation handed to the context's scheduler as a function it calls once: false where there is none.
++    static bool Schedule(v8::Isolate* pIsolate, v8::Local<v8::Context> hContext, Ssrs2DeferredImport* pDeferred, v8::Local<v8::Value> hName)
++    {
++        v8::Local<v8::Value> hScheduler;
++        if (!hContext->Global()->GetPrivate(hContext, SchedulerKey(pIsolate)).ToLocal(&hScheduler) || !hScheduler->IsFunction())
++        {
++            return false;
++        }
++        v8::Local<v8::Function> hRunner;
++        if (!v8::Function::New(hContext, [] (const v8::FunctionCallbackInfo<v8::Value>& info)
++            {
++                auto pDeferred = static_cast<Ssrs2DeferredImport*>(info.Data().As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
++                if (pDeferred->Done) return;
++                pDeferred->Done = true;
++                pDeferred->Run(info.GetIsolate());
++            }, v8::External::New(pIsolate, pDeferred, v8::kExternalPointerTypeTagDefault), 0, v8::ConstructorBehavior::kThrow).ToLocal(&hRunner))
++        {
++            return false;
++        }
++        // (freed with the function: called or never)
++        pDeferred->Runner.Reset(pIsolate, hRunner);
++        pDeferred->Runner.SetWeak(pDeferred, [] (const v8::WeakCallbackInfo<Ssrs2DeferredImport>& info)
++        {
++            auto pDeferred = info.GetParameter();
++            pDeferred->Runner.Reset();
++            delete pDeferred;
++        }, v8::WeakCallbackType::kParameter);
++        v8::TryCatch tryCatch(pIsolate);
++        v8::Local<v8::Value> args[] = { hRunner, hName };
++        if (hScheduler.As<v8::Function>()->Call(hContext, v8::Undefined(pIsolate), 2, args).IsEmpty())
++        {
++            // (a scheduler that threw: the function called in a microtask, as without one, kept alive until then)
++            struct Hold { v8::Global<v8::Function> Runner; };
++            auto pHold = new Hold();
++            pHold->Runner.Reset(pIsolate, hRunner);
++            pIsolate->EnqueueMicrotask([] (void* pvData)
++            {
++                std::unique_ptr<Hold> upHold(static_cast<Hold*>(pvData));
++                auto pIsolate = v8::Isolate::GetCurrent();
++                v8::HandleScope handleScope(pIsolate);
++                auto hRunner = upHold->Runner.Get(pIsolate);
++                v8::Local<v8::Context> hContext;
++                if (!hRunner->GetCreationContext(pIsolate).ToLocal(&hContext)) return;
++                v8::Context::Scope contextScope(hContext);
++                (void)hRunner->Call(hContext, v8::Undefined(pIsolate), 0, nullptr);
++            }, pHold);
++        }
++        return true;
++    }
++
++    // The module linked and evaluated, the import's promise settled by its evaluation. A module whose evaluation threw,
++    // now or before, rejects the import with its error; one whose evaluation is a promise (top-level await) settles it
++    // when it settles. The evaluation's own promise is the import's business: handled, so that its rejection is no
++    // unhandled one of the page's (the import's promise is the page's to handle).
++    void Run(v8::Isolate* pIsolate)
++    {
++        v8::HandleScope handleScope(pIsolate);
++        auto hContext = Context.Get(pIsolate);
++        auto hModule = Module.Get(pIsolate);
++        auto hResolver = Resolver.Get(pIsolate);
++        if (hContext.IsEmpty() || hModule.IsEmpty() || hResolver.IsEmpty()) return;
++        v8::Context::Scope contextScope(hContext);
++        v8::TryCatch tryCatch(pIsolate);
++        v8::Local<v8::Value> hEvaluation;
++        bool ok = true;
++        if (hModule->GetStatus() == v8::Module::kUninstantiated)
++        {
++            ok = hModule->InstantiateModule(hContext, V8IsolateImpl::ModuleResolveCallback).FromMaybe(false);
++        }
++        if (ok && hModule->GetStatus() == v8::Module::kInstantiated)
++        {
++            ok = hModule->Evaluate(hContext).ToLocal(&hEvaluation);
++        }
++        if (!ok)
++        {
++            if (tryCatch.HasCaught()) (void)hResolver->Reject(hContext, tryCatch.Exception());
++            return;
++        }
++        if (!hEvaluation.IsEmpty() && hEvaluation->IsPromise())
++        {
++            auto hEvaluationPromise = hEvaluation.As<v8::Promise>();
++            // (its rejection reported as handled: a handler of nothing, V8 telling the embedder a handler came)
++            v8::Local<v8::Function> hNothing;
++            if (v8::Function::New(hContext, [] (const v8::FunctionCallbackInfo<v8::Value>&) { }).ToLocal(&hNothing))
++            {
++                (void)hEvaluationPromise->Catch(hContext, hNothing);
++            }
++            hEvaluationPromise->MarkAsHandled();
++        }
++        if (hModule->GetStatus() == v8::Module::kErrored)
++        {
++            (void)hResolver->Reject(hContext, hModule->GetException());
++            return;
++        }
++        if (!hEvaluation.IsEmpty() && hEvaluation->IsPromise())
++        {
++            auto hEvaluationPromise = hEvaluation.As<v8::Promise>();
++            if (hEvaluationPromise->State() == v8::Promise::kRejected)
++            {
++                (void)hResolver->Reject(hContext, hEvaluationPromise->Result());
++                return;
++            }
++            if (hEvaluationPromise->State() == v8::Promise::kPending)
++            {
++                v8::Local<v8::Function> hAnswer;
++                v8::Local<v8::Promise> hThen;
++                if (v8::Function::New(hContext, [] (const v8::FunctionCallbackInfo<v8::Value>& info) { info.GetReturnValue().Set(info.Data()); }, hModule->GetModuleNamespace()).ToLocal(&hAnswer)
++                    && hEvaluationPromise->Then(hContext, hAnswer).ToLocal(&hThen))
++                {
++                    (void)hResolver->Resolve(hContext, hThen);
++                }
++                else if (tryCatch.HasCaught())
++                {
++                    (void)hResolver->Reject(hContext, tryCatch.Exception());
++                }
++                return;
++            }
++        }
++        (void)hResolver->Resolve(hContext, hModule->GetModuleNamespace());
++    }
++};
++
+ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(const V8DocumentInfo* pSourceDocumentInfo, v8::Local<v8::String> hSpecifier)
+ {
+     BEGIN_CONTEXT_SCOPE
+@@ -2046,77 +2183,35 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(const V8DocumentInfo* pS
+                 auto hModule = FROM_MAYBE(ResolveModule(hSpecifier, pSourceDocumentInfo));
+ 
+                 // SSRS2: the module is had now (its URL resolved, its source fetched and compiled, a blob URL read before a
+-                // revocation that follows the call), and linked and evaluated in a microtask, after the script that asked
+-                // for it (HTML's import() evaluates the module once fetched, not inside the call); the promise settles then.
+-                struct Deferred
+-                {
+-                    v8::Global<v8::Context> Context;
+-                    v8::Global<v8::Module> Module;
+-                    v8::Global<v8::Promise::Resolver> Resolver;
+-                };
++                // revocation that follows the call), and linked and evaluated later, after the script that asked for it
++                // (HTML's import() evaluates the module once fetched, not inside the call); the promise settles then. Where
++                // the host has installed an import scheduler in the context (Ssrs2_InstallImportScheduler), a module not
++                // evaluated yet is handed to it as a function running the evaluation, with the module's resource name, which
++                // it calls a task later as a fetch's completion comes in a browser (the microtasks of the script's task run
++                // first), or sooner; a module evaluated already (the module map's, no fetch) and every one without a
++                // scheduler in a microtask.
+                 auto pIsolate = v8::Isolate::GetCurrent();
+-                auto pDeferred = new Deferred();
++                auto pDeferred = new Ssrs2DeferredImport();
+                 pDeferred->Context.Reset(pIsolate, pIsolate->GetCurrentContext());
+                 pDeferred->Module.Reset(pIsolate, hModule);
+                 pDeferred->Resolver.Reset(pIsolate, hResolver);
+-                pIsolate->EnqueueMicrotask([] (void* pvData)
++                v8::Local<v8::Value> hName = v8::Undefined(pIsolate);
++                V8DocumentInfo moduleInfo;
++                if (TryGetCachedModuleInfo(hModule, moduleInfo))
+                 {
+-                    std::unique_ptr<Deferred> upDeferred(static_cast<Deferred*>(pvData));
+-                    auto pIsolate = v8::Isolate::GetCurrent();
+-                    v8::HandleScope handleScope(pIsolate);
+-                    auto hContext = upDeferred->Context.Get(pIsolate);
+-                    auto hModule = upDeferred->Module.Get(pIsolate);
+-                    auto hResolver = upDeferred->Resolver.Get(pIsolate);
+-                    v8::Context::Scope contextScope(hContext);
+-                    v8::TryCatch tryCatch(pIsolate);
+-                    v8::Local<v8::Value> hEvaluation;
+-                    bool ok = true;
+-                    if (hModule->GetStatus() == v8::Module::kUninstantiated)
+-                    {
+-                        ok = hModule->InstantiateModule(hContext, V8IsolateImpl::ModuleResolveCallback).FromMaybe(false);
+-                    }
+-                    if (ok && hModule->GetStatus() == v8::Module::kInstantiated)
+-                    {
+-                        ok = hModule->Evaluate(hContext).ToLocal(&hEvaluation);
+-                    }
+-                    if (!ok)
+-                    {
+-                        if (tryCatch.HasCaught()) (void)hResolver->Reject(hContext, tryCatch.Exception());
+-                        return;
+-                    }
+-                    // (a module whose evaluation threw, now or before, rejects the import with its error; one whose
+-                    // evaluation is a promise, top-level await, settles it when it settles)
+-                    if (hModule->GetStatus() == v8::Module::kErrored)
+-                    {
+-                        (void)hResolver->Reject(hContext, hModule->GetException());
+-                        return;
+-                    }
+-                    if (!hEvaluation.IsEmpty() && hEvaluation->IsPromise())
++                    v8::Local<v8::String> hNameString;
++                    if (CreateString(moduleInfo.GetResourceName()).ToLocal(&hNameString)) hName = hNameString;
++                }
++                auto status = hModule->GetStatus();
++                bool loaded = status == v8::Module::kEvaluated || status == v8::Module::kErrored;
++                if (loaded || !Ssrs2DeferredImport::Schedule(pIsolate, pIsolate->GetCurrentContext(), pDeferred, hName))
++                {
++                    pIsolate->EnqueueMicrotask([] (void* pvData)
+                     {
+-                        auto hEvaluationPromise = hEvaluation.As<v8::Promise>();
+-                        if (hEvaluationPromise->State() == v8::Promise::kRejected)
+-                        {
+-                            (void)hResolver->Reject(hContext, hEvaluationPromise->Result());
+-                            return;
+-                        }
+-                        if (hEvaluationPromise->State() == v8::Promise::kPending)
+-                        {
+-                            v8::Local<v8::Function> hAnswer;
+-                            v8::Local<v8::Promise> hThen;
+-                            if (v8::Function::New(hContext, [] (const v8::FunctionCallbackInfo<v8::Value>& info) { info.GetReturnValue().Set(info.Data()); }, hModule->GetModuleNamespace()).ToLocal(&hAnswer)
+-                                && hEvaluationPromise->Then(hContext, hAnswer).ToLocal(&hThen))
+-                            {
+-                                (void)hResolver->Resolve(hContext, hThen);
+-                            }
+-                            else if (tryCatch.HasCaught())
+-                            {
+-                                (void)hResolver->Reject(hContext, tryCatch.Exception());
+-                            }
+-                            return;
+-                        }
+-                    }
+-                    (void)hResolver->Resolve(hContext, hModule->GetModuleNamespace());
+-                }, pDeferred);
++                        std::unique_ptr<Ssrs2DeferredImport> upDeferred(static_cast<Ssrs2DeferredImport*>(pvData));
++                        upDeferred->Run(v8::Isolate::GetCurrent());
++                    }, pDeferred);
++                }
+                 return hResolver->GetPromise();
+ 
+             FROM_MAYBE_CATCH_CONSUME
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index d480bb0e..7eb82986 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2525,9 +2525,69 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallCreationContext(const char* holder, const c
+ 
+ // (32-bit Windows decorates a __stdcall export's name, _Ssrs2_InstallDirectCalls@20: the plain names too, which a host
+ // looking the functions up by name finds on every platform)
++// The context's import scheduler (V8ContextImpl::ImportModule): global[holder][name] made a function the script calls
++// with its scheduler, a function given each dynamic import's evaluation as a function to call a task later (as a
++// browser's fetch completes), kept on the context's global; without one the evaluation runs in a microtask. In a host call
++// only (the isolate entered, a context current); 0 otherwise.
++namespace Ssrs2ImportScheduler
++{
++    static void Install(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        auto key = v8::Private::ForApi(isolate, v8::String::NewFromUtf8Literal(isolate, "ssrs2.importScheduler"));
++        if (info.Length() >= 1 && info[0]->IsFunction())
++        {
++            (void)context->Global()->SetPrivate(context, key, info[0]);
++        }
++        else
++        {
++            (void)context->Global()->DeletePrivate(context, key);
++        }
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallImportScheduler(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    v8::Local<v8::Function> function;
++    if (!v8::Function::New(context, Ssrs2ImportScheduler::Install, v8::Local<v8::Value>(), 1, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++    {
++        return 0;
++    }
++    if (object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsNothing())
++    {
++        return 0;
++    }
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+ #pragma comment(linker, "/EXPORT:Ssrs2_PerformMicrotaskCheckpoint=_Ssrs2_PerformMicrotaskCheckpoint@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCreationContext=_Ssrs2_InstallCreationContext@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallImportScheduler=_Ssrs2_InstallImportScheduler@8")
+ #endif
