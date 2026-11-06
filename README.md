@@ -86,7 +86,11 @@ scheduler and checks both. Then `0009-dynamic-import-marker.patch`: a dynamic im
 ending with a NUL and `import()` (after 0004's type attribute), a static import's as before: ClearScript gives its
 loader the specifier alone, and HTML treats the two apart (every `import()` of a module with a parse error rejects with
 the one error its module record keeps, where a static graph reports the first parse error of its own). `test/Smoke`
-checks that `import()`'s specifiers are marked and a static import's is not.
+checks that `import()`'s specifiers are marked and a static import's is not. Then `0010-import-attribute-keys.patch`: an
+import's first attribute whose key is not `type` reaches the loader too, before the type: a NUL, `attr=` and the key
+(HTML supports the type attribute alone: a static import of another is its importing module's SyntaxError, an `import()`
+of one rejects with a TypeError); the loader reads it and takes it off. `test/Smoke` imports a module with one
+statically and another with `import()`.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

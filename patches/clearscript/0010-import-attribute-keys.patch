@@ -1,0 +1,61 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index 47469c62..bbf0e1b9 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -1465,7 +1465,12 @@ static v8::Local<v8::String> WithImportType(v8::Isolate* pIsolate, v8::Local<v8:
+         return hSpecifier;
+     }
+ 
++    // SSRS2 (0010): and the first attribute whose key is not "type" before it, a NUL, "attr=" and the key (HTML supports
++    // the type attribute alone: a static import of another is its importing module's SyntaxError, an import() of one
++    // rejects), which the host's loader reads and takes off too.
+     auto hType = v8::String::NewFromUtf8Literal(pIsolate, "type");
++    v8::Local<v8::String> hTypeValue;
++    v8::Local<v8::String> hUnsupportedKey;
+     for (int index = 0; index + 1 < hAttributes->Length(); index += stride)
+     {
+         auto hKey = hAttributes->Get(index);
+@@ -1477,16 +1482,39 @@ static v8::Local<v8::String> WithImportType(v8::Isolate* pIsolate, v8::Local<v8:
+ 
+         auto hKeyValue = hKey.As<v8::Value>();
+         auto hValueValue = hValue.As<v8::Value>();
+-        if (!hKeyValue->IsString() || !hValueValue->IsString() || !hKeyValue.As<v8::String>()->StringEquals(hType))
++        if (!hKeyValue->IsString())
+         {
+             continue;
+         }
+ 
+-        auto hMarker = v8::String::NewFromUtf8Literal(pIsolate, "\0type=");
+-        return v8::String::Concat(pIsolate, v8::String::Concat(pIsolate, hSpecifier, hMarker), hValueValue.As<v8::String>());
++        if (!hKeyValue.As<v8::String>()->StringEquals(hType))
++        {
++            if (hUnsupportedKey.IsEmpty())
++            {
++                hUnsupportedKey = hKeyValue.As<v8::String>();
++            }
++
++            continue;
++        }
++
++        if (hTypeValue.IsEmpty() && hValueValue->IsString())
++        {
++            hTypeValue = hValueValue.As<v8::String>();
++        }
++    }
++
++    auto hResult = hSpecifier;
++    if (!hUnsupportedKey.IsEmpty())
++    {
++        hResult = v8::String::Concat(pIsolate, v8::String::Concat(pIsolate, hResult, v8::String::NewFromUtf8Literal(pIsolate, "\0attr=")), hUnsupportedKey);
++    }
++
++    if (!hTypeValue.IsEmpty())
++    {
++        hResult = v8::String::Concat(pIsolate, v8::String::Concat(pIsolate, hResult, v8::String::NewFromUtf8Literal(pIsolate, "\0type=")), hTypeValue);
+     }
+ 
+-    return hSpecifier;
++    return hResult;
+ }
+ 
+ //-----------------------------------------------------------------------------

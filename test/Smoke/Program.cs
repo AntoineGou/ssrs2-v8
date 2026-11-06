@@ -129,10 +129,11 @@ static unsafe class Microtasks
 // patches/clearscript/0004: an import's type attribute reaches the loader after the specifier ("\0type=text"), a text
 // module made of a JSON document is the text (a synthetic module, evaluated in its context), and a dynamic import of a
 // module that throws rejects with its error; patches/clearscript/0006: a module import() asks for is evaluated after the
-// script that asked (before after evaluated), not inside the call.
+// script that asked (before after evaluated), not inside the call; patches/clearscript/0010: an attribute other than type
+// reaches the loader too ("\0attr=unknown"), a static import's and import()'s.
 static class Modules
 {
-    public const string Expected = "hello|loader saw ./t.txt type=text|bad module|before after evaluated|import() ./bad.js ./side.js";
+    public const string Expected = "hello|loader saw ./t.txt type=text|bad module|before after evaluated|import() ./bad.js ./side.js ./dyn.js|attr ./plain.js=unknown ./dyn.js=other";
 
     sealed class Loader : Microsoft.ClearScript.DocumentLoader
     {
@@ -140,15 +141,26 @@ static class Modules
         // (patches/clearscript/0009: the dynamic imports' specifiers, which end with a NUL and "import()", a static
         // import's not)
         public string Dynamic = "import()";
+        // (patches/clearscript/0010: an attribute other than type, its key after a NUL and "attr=", before the type)
+        public string Attributes = "attr";
 
         public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
             string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
         {
-            if (specifier.EndsWith("\0import()", StringComparison.Ordinal))
+            bool dynamic = specifier.EndsWith("\0import()", StringComparison.Ordinal);
+            if (dynamic) specifier = specifier[..^"\0import()".Length];
+            int attr = specifier.IndexOf("\0attr=", StringComparison.Ordinal);
+            if (attr >= 0)
             {
-                specifier = specifier[..^"\0import()".Length];
-                Dynamic += " " + specifier;
+                int end = specifier.IndexOf('\0', attr + 1);
+                if (end < 0) end = specifier.Length;
+                Attributes += $" {specifier[..attr]}={specifier[(attr + 6)..end]}";
+                specifier = specifier[..attr] + specifier[end..];
             }
+            if (dynamic) Dynamic += " " + specifier;
+            if (specifier is "./plain.js" or "./dyn.js")
+                return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+                    "export default 1;");
             int marker = specifier.IndexOf("\0type=", StringComparison.Ordinal);
             if (marker >= 0)
             {
@@ -173,10 +185,10 @@ static class Modules
         engine.DocumentSettings.Loader = loader;
         engine.DocumentSettings.AccessFlags = Microsoft.ClearScript.DocumentAccessFlags.EnableAllLoading;
         engine.Execute(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///main.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
-            "import t from './t.txt' with { type: 'text' }; globalThis.moduleText = t;"
+            "import t from './t.txt' with { type: 'text' }; import './plain.js' with { unknown: 'x' }; globalThis.moduleText = t;"
             + " import('./bad.js').then(() => { globalThis.moduleError = 'resolved'; }, e => { globalThis.moduleError = e.message; });"
-            + " globalThis.order = ['before']; import('./side.js'); globalThis.order.push('after');");
-        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((Microsoft.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}|{loader.Dynamic}";
+            + " globalThis.order = ['before']; import('./side.js'); globalThis.order.push('after'); import('./dyn.js', { with: { other: 'y' } });");
+        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((Microsoft.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}|{loader.Dynamic}|{loader.Attributes}";
     }
 }
 
