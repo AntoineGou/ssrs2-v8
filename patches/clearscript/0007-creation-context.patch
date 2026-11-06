@@ -1,0 +1,74 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 1c80bd2f..d480bb0e 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2463,6 +2463,63 @@
+         return 0;
+     }
+     isolate->PerformMicrotaskCheckpoint();
++    return 1;
++}
++
++// The context an object was created in, a revoked Proxy's too (WebIDL's realm of a callback the host calls, whose
++// exceptions are that realm's: a script cannot ask a revoked Proxy anything, its every operation throwing). The function
++// made, global[holder][name], answers the creation context's global object, undefined for a primitive or an object of no
++// context. In a host call only (the isolate entered, a context current); 0 otherwise.
++namespace Ssrs2CreationContext
++{
++    static void CreationGlobal(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        if (info.Length() < 1 || !info[0]->IsObject())
++        {
++            return;
++        }
++        v8::Local<v8::Context> creation;
++        if (info[0].As<v8::Object>()->GetCreationContext(info.GetIsolate()).ToLocal(&creation))
++        {
++            info.GetReturnValue().Set(creation->Global());
++        }
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallCreationContext(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    v8::Local<v8::Function> function;
++    if (!v8::Function::New(context, Ssrs2CreationContext::CreationGlobal, v8::Local<v8::Value>(), 1, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++    {
++        return 0;
++    }
++    if (object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsNothing())
++    {
++        return 0;
++    }
+     return 1;
+ }
+ 
+@@ -2472,4 +2529,5 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+ #pragma comment(linker, "/EXPORT:Ssrs2_PerformMicrotaskCheckpoint=_Ssrs2_PerformMicrotaskCheckpoint@0")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallCreationContext=_Ssrs2_InstallCreationContext@8")
+ #endif

@@ -21,9 +21,39 @@ var modules = Modules.Check(moduleEngine);
 Console.WriteLine($"modules: {modules}");
 var microtasks = Microtasks.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"microtasks: {microtasks}");
-if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}");
+var realms = CreationContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"creation contexts: {realms}");
+if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}");
 return 1;
+
+// patches/clearscript/0007: the creation context of an object of another context of the isolate, a revoked Proxy's too,
+// as its global object; undefined for a primitive.
+static unsafe class CreationContexts
+{
+    public const string Expected = "1:true:true:true:true:undefined";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallCreationContext", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var runtime = new V8Runtime();
+        using var a = runtime.CreateScriptEngine();
+        using var b = runtime.CreateScriptEngine();
+        a.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "creationGlobal\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(a.Evaluate("install()"));
+        a.Script.other = b.Evaluate("globalThis");
+        a.Script.plain = b.Evaluate("({})");
+        // (made by a function of the other context called here: a revoked Proxy does not cross .NET)
+        a.Script.makeRevoked = b.Evaluate("callable => { const r = Proxy.revocable(callable ? () => {} : {}, {}); r.revoke(); return r.proxy; }");
+        return installed + ":" + a.Evaluate("[ssrs2.creationGlobal(plain) === other, ssrs2.creationGlobal(makeRevoked(true)) === other, " +
+            "ssrs2.creationGlobal(makeRevoked(false)) === other, ssrs2.creationGlobal({}) === globalThis, String(ssrs2.creationGlobal(1))].join(':')");
+    }
+}
 
 // patches/clearscript/0005: a microtask checkpoint from inside a host call runs the queue then, not when the script returns.
 static unsafe class Microtasks

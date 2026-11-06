@@ -71,7 +71,11 @@ and SSRS2's frames run their parsers' scripts from inside the page's); 0 outside
 `0006-dynamic-import-deferred.patch`: `import()` has its module now (the specifier resolved, the source fetched and
 compiled, so a blob URL revoked after the call still loads) and links and evaluates it in a microtask, after the script
 that asked for it, as HTML's import() does (ClearScript evaluated it inside the call: the importing script's code after
-`import()` ran after the module's). `test/Smoke` checks the order.
+`import()` ran after the module's). `test/Smoke` checks the order. Then `0007-creation-context.patch`:
+`Ssrs2_InstallCreationContext`, called from inside a host call, makes a function answering the global object of the
+context an object was created in, a revoked Proxy's too (WebIDL reports a callback's exceptions in its realm, and a
+script cannot ask a revoked Proxy anything: its every operation throws). `test/Smoke` asks it of objects and revoked
+Proxies of another context of the isolate.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
