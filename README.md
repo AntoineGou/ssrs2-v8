@@ -95,7 +95,14 @@ statically and another with `import()`. Then `0011-heap-limit-on-expansion.patch
 memory and the script is terminated (the heap expanded that once, for V8 to unwind it), as ClearScript's heap watch does
 under its termination policy. That watch runs from a timer through the .NET thread pool, which a busy host starves: a
 script grew its heap to 12 GB past a 96 MB limit in 8 s while the timer waited. `test/Smoke` runs a script past a small
-limit while the pool's threads are held, and checks it is stopped.
+limit while the pool's threads are held, and checks it is stopped. Then `0012-kept-referrers.patch`: a dynamic import's referrer is found by
+the live script that made its code once ClearScript's script cache (1,024 scripts) has dropped that script's entry: each
+script holder keeps its document info, counted, while it lives, and the import callback looks there after the caches. In
+an isolate kept for many documents, the host's own script compiled once at its start (SSRS2's DOM, which compiles event
+handlers and string timers) fell out of the cache, and an `import()` in their code, outside a script's execution, failed
+with "Invalid module load request": a test passed or failed by how many documents its isolate had run before.
+`test/Smoke` runs 1,100 scripts after the host's, then calls its function importing a module, and checks the loader is
+asked with the host's document.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

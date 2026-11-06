@@ -1,0 +1,117 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 6f87728e..6dc989a1 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -2016,7 +2016,9 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(v8::Local<v8::Data> hHos
+             if (!hUniqueId.IsEmpty())
+             {
+                 auto uniqueId = hUniqueId->Uint64Value();
+-                if (TryGetCachedScriptInfo(uniqueId, sourceDocumentInfo) || TryGetCachedModuleInfo(uniqueId, sourceDocumentInfo))
++                // SSRS2 (0012): or a live script holder's, once the cache has dropped it
++                if (TryGetCachedScriptInfo(uniqueId, sourceDocumentInfo) || TryGetCachedModuleInfo(uniqueId, sourceDocumentInfo)
++                    || m_spIsolateImpl->Ssrs2TryGetKeptScriptInfo(uniqueId, sourceDocumentInfo))
+                 {
+                     pSourceDocumentInfo = &sourceDocumentInfo;
+                 }
+diff --git a/ClearScriptV8/V8IsolateImpl.h b/ClearScriptV8/V8IsolateImpl.h
+index d842de3d..9be5ae1c 100644
+--- a/ClearScriptV8/V8IsolateImpl.h
++++ b/ClearScriptV8/V8IsolateImpl.h
+@@ -418,6 +418,37 @@ public:
+         END_MUTEX_SCOPE
+     }
+ 
++    // SSRS2 (0012): the document info of each script a live script holder keeps, by its unique id (counted: a holder's
++    // clones keep it too), which a dynamic import's referrer is found by once the script cache has dropped it. The cache
++    // is bounded (ClearScript's MaxCacheSize, 1024 scripts): in an isolate kept for many documents, a script compiled
++    // early and kept (the host's own, which compiles event handlers and string timers) fell out of it, and an import()
++    // in their code failed with "Invalid module load request" outside a script's execution scope.
++    void Ssrs2KeepScriptInfo(const V8DocumentInfo& documentInfo)
++    {
++        BEGIN_MUTEX_SCOPE(m_Ssrs2KeptScriptInfosMutex)
++            auto& entry = m_Ssrs2KeptScriptInfos[documentInfo.GetUniqueId()];
++            if (entry.first++ == 0) entry.second = documentInfo;
++        END_MUTEX_SCOPE
++    }
++
++    void Ssrs2ReleaseScriptInfo(uint64_t uniqueId)
++    {
++        BEGIN_MUTEX_SCOPE(m_Ssrs2KeptScriptInfosMutex)
++            auto it = m_Ssrs2KeptScriptInfos.find(uniqueId);
++            if ((it != m_Ssrs2KeptScriptInfos.end()) && (--it->second.first == 0)) m_Ssrs2KeptScriptInfos.erase(it);
++        END_MUTEX_SCOPE
++    }
++
++    bool Ssrs2TryGetKeptScriptInfo(uint64_t uniqueId, V8DocumentInfo& documentInfo)
++    {
++        BEGIN_MUTEX_SCOPE(m_Ssrs2KeptScriptInfosMutex)
++            auto it = m_Ssrs2KeptScriptInfos.find(uniqueId);
++            if (it == m_Ssrs2KeptScriptInfos.end()) return false;
++            documentInfo = it->second.second;
++            return true;
++        END_MUTEX_SCOPE
++    }
++
+     bool IsExecutionTerminating()
+     {
+         BEGIN_MUTEX_SCOPE(m_TerminateExecutionMutex)
+@@ -682,6 +713,8 @@ private:
+     size_t m_StackWatchLevel;
+     size_t* m_pStackLimit;
+     SimpleMutex m_TerminateExecutionMutex;
++    SimpleMutex m_Ssrs2KeptScriptInfosMutex;
++    std::unordered_map<uint64_t, std::pair<size_t, V8DocumentInfo>> m_Ssrs2KeptScriptInfos;
+     bool m_IsExecutionTerminating;
+     ExecutionScope* m_pExecutionScope;
+     const V8DocumentInfo* m_pDocumentInfo;
+diff --git a/ClearScriptV8/V8ScriptHolderImpl.cpp b/ClearScriptV8/V8ScriptHolderImpl.cpp
+index a11e72f2..402319c8 100644
+--- a/ClearScriptV8/V8ScriptHolderImpl.cpp
++++ b/ClearScriptV8/V8ScriptHolderImpl.cpp
+@@ -13,6 +13,12 @@ V8ScriptHolderImpl::V8ScriptHolderImpl(const SharedPtr<V8WeakContextBinding>& sp
+     m_DocumentInfo(documentInfo),
+     m_CodeDigest(codeDigest)
+ {
++    // SSRS2 (0012): its document info kept while it lives, for the import()s of its code
++    SharedPtr<V8IsolateImpl> spIsolateImpl;
++    if (m_spBinding->TryGetIsolateImpl(spIsolateImpl))
++    {
++        spIsolateImpl->Ssrs2KeepScriptInfo(m_DocumentInfo);
++    }
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -24,6 +30,12 @@ V8ScriptHolderImpl::V8ScriptHolderImpl(const SharedPtr<V8WeakContextBinding>& sp
+     m_CodeDigest(codeDigest),
+     m_Code(std::move(code))
+ {
++    // SSRS2 (0012): its document info kept while it lives, for the import()s of its code
++    SharedPtr<V8IsolateImpl> spIsolateImpl;
++    if (m_spBinding->TryGetIsolateImpl(spIsolateImpl))
++    {
++        spIsolateImpl->Ssrs2KeepScriptInfo(m_DocumentInfo);
++    }
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -36,6 +48,12 @@ V8ScriptHolderImpl::V8ScriptHolderImpl(const SharedPtr<V8WeakContextBinding>& sp
+     m_Code(code),
+     m_CacheBytes(cacheBytes)
+ {
++    // SSRS2 (0012): its document info kept while it lives, for the import()s of its code
++    SharedPtr<V8IsolateImpl> spIsolateImpl;
++    if (m_spBinding->TryGetIsolateImpl(spIsolateImpl))
++    {
++        spIsolateImpl->Ssrs2KeepScriptInfo(m_DocumentInfo);
++    }
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -107,6 +125,7 @@ V8ScriptHolderImpl::~V8ScriptHolderImpl()
+     SharedPtr<V8IsolateImpl> spIsolateImpl;
+     if (m_spBinding->TryGetIsolateImpl(spIsolateImpl))
+     {
++        spIsolateImpl->Ssrs2ReleaseScriptInfo(m_DocumentInfo.GetUniqueId());
+         spIsolateImpl->ReleaseV8Script(m_pvScript);
+     }
+ }

@@ -27,10 +27,48 @@ var scheduled = ImportSchedulers.Check(Directory.GetFiles(AppContext.BaseDirecto
 Console.WriteLine($"import scheduler: {scheduled}");
 var heap = HeapLimits.Check();
 Console.WriteLine($"heap limit: {heap}");
+var referrer = KeptReferrers.Check();
+Console.WriteLine($"kept referrer: {referrer}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
-    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}");
+    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}");
 return 1;
+
+// patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
+// script's execution) finds its referrer after the script cache has dropped that script's entry (1,100 scripts run since):
+// the loader is asked, with the script's document; without the patch the import failed with "Invalid module load request".
+static class KeptReferrers
+{
+    public const string Expected = "host.js ./m.js";
+
+    sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    {
+        public string Seen = "";
+        public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
+        {
+            if (specifier.EndsWith("\0import()", StringComparison.Ordinal)) specifier = specifier[..^"\0import()".Length];
+            Seen = $"{sourceInfo?.Name} {specifier}";
+            return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///m.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard }, "export default 1;");
+        }
+
+        public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+            Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
+    }
+
+    public static string Check()
+    {
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+        var loader = new Loader();
+        engine.DocumentSettings.Loader = loader;
+        using var host = engine.Compile(new Microsoft.ClearScript.DocumentInfo("host.js"), "globalThis.go = () => Function(\"return import('./m.js')\")();");
+        engine.Execute(host);
+        for (int i = 0; i < 1100; i++) engine.Execute(new Microsoft.ClearScript.DocumentInfo("s" + i + ".js"), i + ";");
+        try { engine.Invoke("go"); } catch (Exception e) { return "error " + e.Message; }
+        return loader.Seen.Length > 0 ? loader.Seen : "not asked";
+    }
+}
 
 // patches/clearscript/0011: a script past the runtime's soft heap limit (MaxHeapSize) is stopped while the .NET thread pool,
 // which ClearScript's heap watch timer runs on, is blocked: the near-heap-limit expansion checks the limit on the script's
