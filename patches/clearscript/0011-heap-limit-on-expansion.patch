@@ -1,0 +1,37 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index bbf0e1b9..b880f942 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -2444,11 +2444,29 @@ size_t V8IsolateImpl::HeapExpansionCallback(void* pvData, size_t currentLimit, s
+ 
+     if (pvData)
+     {
+-        auto multiplier = static_cast<const V8IsolateImpl*>(pvData)->m_HeapExpansionMultiplier;
++        auto pIsolateImpl = static_cast<V8IsolateImpl*>(pvData);
++        auto multiplier = pIsolateImpl->m_HeapExpansionMultiplier;
+         if (multiplier > 1.0)
+         {
+-            auto newLimit = static_cast<size_t>(static_cast<double>(currentLimit) * multiplier);
+-            return std::max(newLimit, currentLimit + minBump);
++            auto newLimit = std::max(static_cast<size_t>(static_cast<double>(currentLimit) * multiplier), currentLimit + minBump);
++
++            // SSRS2 (0011): the soft limit (MaxHeapSize) checked here too, on the execution thread inside V8's
++            // collection: its own check runs from the heap watch timer through the host's thread pool, which a busy host
++            // starves (a script grew to 12 GB past a 96 MB limit in 8 s while the timer waited). Its total heap past the
++            // soft limit (the timer's own measure), the isolate is out of memory and its execution terminated, as the
++            // timer's check does under the termination policy; the heap is still expanded this once, so that V8 can
++            // unwind the script. (V8 asks too when an allocation outside the heap fails, a huge ArrayBuffer: its heap
++            // small, nothing is stopped, and the script sees its RangeError.)
++            auto maxHeapSize = pIsolateImpl->m_MaxHeapSize.load();
++            v8::HeapStatistics heapStatistics;
++            if ((maxHeapSize > 0) && !pIsolateImpl->m_DisableHeapSizeViolationInterrupt
++                && (pIsolateImpl->m_upIsolate->GetHeapStatistics(&heapStatistics), heapStatistics.total_heap_size() > maxHeapSize))
++            {
++                pIsolateImpl->m_IsOutOfMemory = true;
++                pIsolateImpl->TerminateExecution(false);
++            }
++
++            return newLimit;
+         }
+     }
+ 

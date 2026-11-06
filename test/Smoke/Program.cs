@@ -25,10 +25,49 @@ var realms = CreationContexts.Check(Directory.GetFiles(AppContext.BaseDirectory,
 Console.WriteLine($"creation contexts: {realms}");
 var scheduled = ImportSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"import scheduler: {scheduled}");
+var heap = HeapLimits.Check();
+Console.WriteLine($"heap limit: {heap}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
-    && scheduled == ImportSchedulers.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}");
+    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}");
 return 1;
+
+// patches/clearscript/0011: a script past the runtime's soft heap limit (MaxHeapSize) is stopped while the .NET thread pool,
+// which ClearScript's heap watch timer runs on, is blocked: the near-heap-limit expansion checks the limit on the script's
+// own thread (without it, the script ran on and its heap grew to 12 GB in 8 s).
+static class HeapLimits
+{
+    public const string Expected = "stopped";
+
+    static volatile bool s_released;
+
+    public static string Check()
+    {
+        // (the pool's threads held, polling a flag: a wait the pool does not see as blocking, so no thread is added for it
+        // until its starvation rule adds one each half second or so, behind the items queued before the timer's)
+        ThreadPool.GetMinThreads(out int min, out _);
+        for (int k = 0; k < 8 * Math.Max(min, Environment.ProcessorCount); k++) ThreadPool.QueueUserWorkItem(_ => { while (!s_released) Thread.Sleep(20); });
+        Thread.Sleep(200);
+        try
+        {
+            using var runtime = new V8Runtime("heap", new V8RuntimeConstraints { MaxOldSpaceSize = 64, MaxNewSpaceSize = 16, HeapExpansionMultiplier = 1.5 });
+            runtime.MaxHeapSize = (UIntPtr)(96UL << 20);
+            runtime.HeapSizeSampleInterval = TimeSpan.FromMilliseconds(10);
+            using var engine = runtime.CreateScriptEngine();
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            string outcome;
+            try
+            {
+                engine.Execute("var keep = []; var t0 = Date.now(); while (Date.now() - t0 < 10000) keep.push(new Array(100000).fill(keep.length));");
+                outcome = "not stopped";
+            }
+            catch (Microsoft.ClearScript.ScriptInterruptedException) { outcome = "stopped"; }
+            catch (Microsoft.ClearScript.ScriptEngineException e) { outcome = e.Message.Contains("memory limit", StringComparison.Ordinal) ? "stopped" : "error " + e.Message; }
+            return outcome == "stopped" && started.Elapsed > TimeSpan.FromSeconds(2) ? $"stopped after {started.Elapsed.TotalSeconds:0.0} s" : outcome;
+        }
+        finally { s_released = true; }
+    }
+}
 
 // patches/clearscript/0008: with a scheduler installed, import() hands it each module not evaluated yet as a function and
 // the module's name, the module evaluated when the function is called (not in a microtask); a dynamically imported module

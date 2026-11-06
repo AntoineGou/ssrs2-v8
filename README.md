@@ -90,7 +90,12 @@ checks that `import()`'s specifiers are marked and a static import's is not. The
 import's first attribute whose key is not `type` reaches the loader too, before the type: a NUL, `attr=` and the key
 (HTML supports the type attribute alone: a static import of another is its importing module's SyntaxError, an `import()`
 of one rejects with a TypeError); the loader reads it and takes it off. `test/Smoke` imports a module with one
-statically and another with `import()`.
+statically and another with `import()`. Then `0011-heap-limit-on-expansion.patch`: the runtime's soft heap limit
+(`MaxHeapSize`) is checked in V8's near-heap-limit expansion too, on the script's own thread: past it, the isolate is out of
+memory and the script is terminated (the heap expanded that once, for V8 to unwind it), as ClearScript's heap watch does
+under its termination policy. That watch runs from a timer through the .NET thread pool, which a busy host starves: a
+script grew its heap to 12 GB past a 96 MB limit in 8 s while the timer waited. `test/Smoke` runs a script past a small
+limit while the pool's threads are held, and checks it is stopped.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
