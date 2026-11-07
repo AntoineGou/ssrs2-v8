@@ -31,9 +31,11 @@ var referrer = KeptReferrers.Check();
 Console.WriteLine($"kept referrer: {referrer}");
 var codeLike = CodeLikes.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"code-like: {codeLike}");
+var undetectable = Undetectables.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"undetectable: {undetectable}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
-    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}");
+    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -183,6 +185,31 @@ static unsafe class CodeLikes
             "const make = text => { const o = new ssrs2.codeLike(); Object.setPrototypeOf(o, Script.prototype); o.text = text; return o; };" +
             "const plain = new Script(); plain.text = '1';" +
             "[eval(make('6 * 7')), new Function(make('return 7'))(), make('x') instanceof Script, typeof eval(plain)].join(':')");
+    }
+}
+
+// patches/clearscript/0014: an object of make(target, prototype) is undetectable (typeof "undefined", falsy, == null, not
+// === undefined) yet callable as target, its indices target's and enumerated by target's length, its other names its
+// prototype's (here target, a callable Proxy, as HTML's document.all is made of one).
+static unsafe class Undetectables
+{
+    public const string Expected = "1:undefined:true:true:false:b:42:0,1:all";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallUndetectable", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "makeUndetectable\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        return installed + ":" + engine.Evaluate("const t = new Proxy(n => n * 2, { get: (f, k) => k === 'length' ? 2 : k === '0' ? 'a' : k === '1' ? 'b' : k === 'name' ? 'all' : undefined," +
+            " has: (f, k) => k === '0' || k === '1' || k === 'length' });" +
+            "const u = ssrs2.makeUndetectable(t, t);" +
+            "[typeof u, !u, u == null, u === undefined, u[1], u(21), Object.keys(u).join(','), u.name].join(':')");
     }
 }
 

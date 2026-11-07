@@ -108,7 +108,14 @@ checks): `eval` of one, and the `Function` constructor, compile its text (its `t
 object unevaluated. An instance keeps the brand when the script gives it another prototype (V8 reads it from its map's
 constructor), so the host makes Trusted Types' `TrustedScript` of it, as Chrome's is code-like: a page's
 `eval(policy.createScript(code))` ran nothing. `test/Smoke` evaluates instances with another prototype through both, and
-a plain object with the same `toString` through `eval`, which returns it.
+a plain object with the same `toString` through `eval`, which returns it. Then `0014-undetectable.patch`: `Ssrs2_InstallUndetectable`, called from inside a host call, makes a
+function `make(target, prototype)` whose objects V8 takes as undetectable (V8's `ObjectTemplate::MarkAsUndetectable`,
+HTML's `[[IsHTMLDDA]]`): `typeof` answers `"undefined"`, they are falsy and `== null`, yet callable as `target` (a
+call-as-function handler) with `target`'s indices (an indexed interceptor, enumerated by `target.length`) and every other
+name their prototype's: the host gives its callable Proxy as both, and makes HTML's `document.all` of it, as Chrome's is
+(`typeof document.all` was `"function"`). No named interceptor: ClearScript's own `typeof` answers `"object"` for an object
+with one before it looks at undetectable. `test/Smoke` checks `typeof`, the comparisons, an index, a call, the keys and a
+name read through the prototype.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

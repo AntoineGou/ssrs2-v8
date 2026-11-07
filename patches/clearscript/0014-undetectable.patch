@@ -1,0 +1,149 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index ae9be76..d4964c5 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2309,6 +2309,7 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallDirectCalls(const char* holder, int32_t cou
+ #include "v8-fast-api-calls.h"
+ #include <string>
+ #include <unordered_map>
++#include <vector>
+ 
+ namespace Ssrs2FastCalls
+ {
+@@ -2628,6 +2629,130 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallCodeLike(const char* holder, const char* na
+     return 1;
+ }
+ 
++// An object V8 takes as undetectable (v8::ObjectTemplate::MarkAsUndetectable, the [[IsHTMLDDA]] of HTML's document.all,
++// TC39 Annex B.3.6): typeof answers "undefined", it is falsy and == null, yet it is callable and its properties are read.
++// globalThis[holder][name] is a function make(target[, prototype]) returning a new such object: an index it is asked
++// for that target has is target's (target's get answers), every other property its prototype's (give target itself as
++// the prototype for its names: a named interceptor would make typeof "object", which ClearScript's typeof answers for an
++// object with one before it looks at undetectable); a call is target's call with an undefined receiver; its indices are
++// 0 to target.length less one. 1 when made, 0 outside a context.
++namespace Ssrs2Undetectable
++{
++    static v8::Intercepted IndexedGetter(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        auto target = info.Data().As<v8::Object>();
++        auto has = target->Has(context, index);
++        if (has.IsNothing()) return v8::Intercepted::kYes;
++        if (!has.FromJust()) return v8::Intercepted::kNo;
++        v8::Local<v8::Value> value;
++        if (target->Get(context, index).ToLocal(&value)) info.GetReturnValue().Set(value);
++        return v8::Intercepted::kYes;
++    }
++
++    static v8::Intercepted IndexedQuery(uint32_t index, const v8::PropertyCallbackInfo<v8::Integer>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        auto has = info.Data().As<v8::Object>()->Has(context, index);
++        if (has.IsNothing()) return v8::Intercepted::kYes;
++        if (!has.FromJust()) return v8::Intercepted::kNo;
++        info.GetReturnValue().Set(static_cast<int32_t>(v8::None));
++        return v8::Intercepted::kYes;
++    }
++
++    static void IndexedEnumerator(const v8::PropertyCallbackInfo<v8::Array>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        auto target = info.Data().As<v8::Object>();
++        v8::Local<v8::Value> length;
++        uint32_t count = 0;
++        if (target->Get(context, v8::String::NewFromUtf8Literal(isolate, "length")).ToLocal(&length) && length->IsNumber())
++        {
++            auto n = length.As<v8::Number>()->Value();
++            count = n > 0 && n < 4294967295.0 ? static_cast<uint32_t>(n) : 0;
++        }
++        auto indices = v8::Array::New(isolate, static_cast<int>(count));
++        for (uint32_t i = 0; i < count; i++)
++        {
++            if (indices->Set(context, i, v8::Integer::NewFromUnsigned(isolate, i)).IsNothing()) return;
++        }
++        info.GetReturnValue().Set(indices);
++    }
++
++    static void Call(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        std::vector<v8::Local<v8::Value>> args;
++        for (int i = 0; i < info.Length(); i++) args.push_back(info[i]);
++        v8::Local<v8::Value> result;
++        if (info.Data().As<v8::Object>()->CallAsFunction(context, v8::Undefined(isolate), static_cast<int>(args.size()), args.data()).ToLocal(&result))
++        {
++            info.GetReturnValue().Set(result);
++        }
++    }
++
++    static void Make(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        if (info.Length() < 1 || !info[0]->IsObject())
++        {
++            isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "make(target): target is not an object")));
++            return;
++        }
++        auto target = info[0].As<v8::Object>();
++        auto objectTemplate = v8::ObjectTemplate::New(isolate);
++        objectTemplate->MarkAsUndetectable();
++        objectTemplate->SetCallAsFunctionHandler(Call, target);
++        objectTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(IndexedGetter, nullptr, IndexedQuery, nullptr, IndexedEnumerator, target));
++        v8::Local<v8::Object> object;
++        if (!objectTemplate->NewInstance(context).ToLocal(&object)) return;
++        if (info.Length() > 1 && info[1]->IsObject() && object->SetPrototype(context, info[1]).IsNothing()) return;
++        info.GetReturnValue().Set(object);
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallUndetectable(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    v8::Local<v8::Function> make;
++    if (!v8::FunctionTemplate::New(isolate, Ssrs2Undetectable::Make)->GetFunction(context).ToLocal(&make))
++    {
++        return 0;
++    }
++    if (object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), make).IsNothing())
++    {
++        return 0;
++    }
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -2635,4 +2760,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallCodeLike(const char* holder, const char* na
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCreationContext=_Ssrs2_InstallCreationContext@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallImportScheduler=_Ssrs2_InstallImportScheduler@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeLike=_Ssrs2_InstallCodeLike@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallUndetectable=_Ssrs2_InstallUndetectable@8")
+ #endif
