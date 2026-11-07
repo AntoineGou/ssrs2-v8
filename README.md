@@ -14,7 +14,14 @@ same output byte for byte.
 V8, in order (`patches/v8`): `0001-clearscript-7.5.1.1-port.patch`, ClearScript 7.5.1.1's own V8 changes ported to
 15.6 (its host objects, interrupts, ICU data from memory...), then `0002-ssrs2.patch`, SSRS2's, below, then
 `0003-windows-layouts.patch`, V8 15.6's object layouts made to agree with its Torque layouts under Microsoft's C++
-library and layout rules (a configuration Chrome does not build: pointers uncompressed, the system's C++ library):
+library and layout rules (a configuration Chrome does not build: pointers uncompressed, the system's C++ library),
+then `0004-eval-cache-by-context.patch`: V8's eval cache is keyed by the native context too (its id, which V8 gives
+each context for the embedder's metrics, `Isolate::GetOrRegisterRecorderContextId`, holding the context weakly).
+Indirect eval and the Function constructor are keyed by the context's closure, whose SharedFunctionInfo every context
+shares, so a context got the code an earlier one had compiled from the same text, its script's eval origin (which
+dynamic import's referrer and the stack read) the earlier context's: an `import()` in a later document's `new Function`
+resolved against another document's base. A page calling `new Function` in a loop keeps hitting: the key gains one
+number, compared first. SSRS2's own changes (`0002`):
 
 - Local time is UTC once the embedder gives V8 its ICU data (a server prints in UTC), and a date's fields are worked out
   without a time zone.

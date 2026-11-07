@@ -1,0 +1,143 @@
+--- a/src/objects/compilation-cache-table.h
++++ b/src/objects/compilation-cache-table.h
+@@ -33,7 +33,8 @@
+ 
+   static inline uint32_t EvalHash(Tagged<String> source,
+                                   Tagged<SharedFunctionInfo> shared,
+-                                  LanguageMode language_mode, int position);
++                                  LanguageMode language_mode, int position,
++                                  int context_id);
+ 
+   static inline uint32_t HashForObject(ReadOnlyRoots roots,
+                                        Tagged<Object> object);
+--- a/src/objects/compilation-cache-table-inl.h
++++ b/src/objects/compilation-cache-table-inl.h
+@@ -113,8 +113,10 @@
+ uint32_t CompilationCacheShape::EvalHash(Tagged<String> source,
+                                          Tagged<SharedFunctionInfo> shared,
+                                          LanguageMode language_mode,
+-                                         int position) {
+-  uint32_t hash = source->EnsureHash();
++                                         int position, int context_id) {
++  // SSRS2: the native context's id (Isolate::GetOrRegisterRecorderContextId), so that entries of contexts compiling
++  // the same text do not crowd one chain.
++  uint32_t hash = source->EnsureHash() ^ (static_cast<uint32_t>(context_id) * 0x9E3779B1u);
+   if (shared->HasSourceCode()) {
+     // Instead of using the SharedFunctionInfo pointer in the hash
+     // code computation, we use a combination of the hash of the
+@@ -160,15 +162,16 @@
+   // Eval: See EvalCacheKey::ToHandle for the encoding.
+   Tagged<FixedArray> val = Cast<FixedArray>(object);
+   DCHECK_EQ(val->map(), roots.fixed_cow_array_map());
+-  DCHECK_EQ(4u, val->ulength().value());
++  DCHECK_EQ(5u, val->ulength().value());
+   Tagged<String> source = Cast<String>(val->get(1));
+   int language_unchecked = Smi::ToInt(val->get(2));
+   DCHECK(is_valid_language_mode(language_unchecked));
+   LanguageMode language_mode = static_cast<LanguageMode>(language_unchecked);
+   int position = Smi::ToInt(val->get(3));
+   Tagged<Object> shared = val->get(0);
++  int context_id = Smi::ToInt(val->get(4));
+   return EvalHash(source, Cast<SharedFunctionInfo>(shared), language_mode,
+-                  position);
++                  position, context_id);
+ }
+ 
+ InfoCellPair::InfoCellPair(Isolate* isolate, Tagged<SharedFunctionInfo> shared,
+--- a/src/objects/compilation-cache-table.cc
++++ b/src/objects/compilation-cache-table.cc
+@@ -114,19 +114,25 @@
+   // * When positive, position is the position in the source where eval is
+   //   called. When negative, position is the negation of the position in the
+   //   dynamic function's effective source where the ')' ends the parameters.
++  // * SSRS2: context_id is the native context's (Isolate::GetOrRegisterRecorderContextId: unique, the context itself
++  //   held weakly). Indirect eval and dynamic functions are keyed by the native context's closure, whose
++  //   SharedFunctionInfo every native context shares: a context got code another had compiled from the same text, its
++  //   script's eval origin (dynamic import's referrer, the stack's eval origin) the other context's.
+   EvalCacheKey(DirectHandle<String> source,
+                DirectHandle<SharedFunctionInfo> shared,
+-               LanguageMode language_mode, int position)
+-      : HashTableKey(CompilationCacheShape::EvalHash(*source, *shared,
+-                                                     language_mode, position)),
++               LanguageMode language_mode, int position, int context_id)
++      : HashTableKey(CompilationCacheShape::EvalHash(
++            *source, *shared, language_mode, position, context_id)),
+         source_(source),
+         shared_(shared),
+         language_mode_(language_mode),
+-        position_(position) {}
++        position_(position),
++        context_id_(context_id) {}
+ 
+   bool IsMatch(Tagged<Object> other) override {
+     DisallowGarbageCollection no_gc;
+     Tagged<FixedArray> other_array = Cast<FixedArray>(other);
++    if (Smi::ToInt(other_array->get(4)) != context_id_) return false;
+     DCHECK(IsSharedFunctionInfo(other_array->get(0)));
+     if (*shared_ != other_array->get(0)) return false;
+     int language_unchecked = Smi::ToInt(other_array->get(2));
+@@ -140,11 +146,12 @@
+   }
+ 
+   DirectHandle<Object> AsHandle(Isolate* isolate) {
+-    DirectHandle<FixedArray> array = isolate->factory()->NewFixedArray(4);
++    DirectHandle<FixedArray> array = isolate->factory()->NewFixedArray(5);
+     array->set(0, *shared_);
+     array->set(1, *source_);
+     array->set(2, Smi::FromEnum(language_mode_));
+     array->set(3, Smi::FromInt(position_));
++    array->set(4, Smi::FromInt(context_id_));
+     array->set_map(isolate, ReadOnlyRoots(isolate).fixed_cow_array_map());
+     return array;
+   }
+@@ -154,8 +161,16 @@
+   DirectHandle<SharedFunctionInfo> shared_;
+   LanguageMode language_mode_;
+   int position_;
++  int context_id_;
+ };
+ 
++// SSRS2: the native context's id for the eval cache's key (0 while a snapshot is made: no ids then).
++int EvalContextId(Isolate* isolate, DirectHandle<NativeContext> native_context) {
++  isolate->GetOrRegisterRecorderContextId(native_context);
++  Tagged<Object> id = native_context->recorder_context_id();
++  return IsSmi(id) ? Smi::ToInt(id) : 0;
++}
++
+ // RegExpKey carries the source and flags of a regular expression as key.
+ class RegExpKey : public HashTableKey {
+  public:
+@@ -436,7 +451,8 @@
+   Isolate* isolate = Isolate::Current();
+   src = String::Flatten(isolate, src);
+ 
+-  EvalCacheKey key(src, outer_info, language_mode, position);
++  EvalCacheKey key(src, outer_info, language_mode, position,
++                   EvalContextId(isolate, native_context));
+   InternalIndex entry = table->FindEntry(isolate, &key);
+   if (entry.is_not_found()) return empty_result;
+ 
+@@ -535,7 +551,10 @@
+   Isolate* isolate = Isolate::Current();
+   src = String::Flatten(isolate, src);
+ 
+-  EvalCacheKey key(src, outer_info, language_mode, position);
++  DirectHandle<NativeContext> native_context(js_function->native_context(),
++                                             isolate);
++  EvalCacheKey key(src, outer_info, language_mode, position,
++                   EvalContextId(isolate, native_context));
+   InternalIndex entry = table->FindEntry(isolate, &key);
+   if (entry.is_not_found()) return;
+ 
+@@ -551,8 +570,10 @@
+     DirectHandle<JSFunction> js_function, int position) {
+   Isolate* isolate = Isolate::Current();
+   src = String::Flatten(isolate, src);
++  DirectHandle<NativeContext> native_context(js_function->native_context(),
++                                             isolate);
+   EvalCacheKey key(src, outer_info, js_function->shared()->language_mode(),
+-                   position);
++                   position, EvalContextId(isolate, native_context));
+ 
+   // Create a dummy entry to mark that this key has already been inserted once.
+   cache = EnsureCapacity(isolate, cache);

@@ -37,9 +37,12 @@ var noReferrer = NoReferrers.Check(Directory.GetFiles(AppContext.BaseDirectory, 
 Console.WriteLine($"no referrer: {noReferrer}");
 var incumbent = Incumbents.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"incumbent: {incumbent}");
+var evalCallers = EvalCallers.Check();
+Console.WriteLine($"eval callers: {evalCallers}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
-    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}");
+    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
+    && evalCallers == EvalCallers.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -78,12 +81,14 @@ static class KeptReferrers
     }
 }
 
-// patches/clearscript/0015: V8's eval cache, keyed by the text and the context's empty function, gives the second engine
-// the eval code the first compiled, whose referrer (a.js, its holder disposed, out of the script cache after 1,100 scripts)
-// the library no longer knows: the loader is asked with the host's stand-in (Ssrs2_SetNoReferrerName), not failed.
+// patches/clearscript/0015: the host's stand-in for a referrer the library no longer knows (Ssrs2_SetNoReferrerName). It
+// was reached by V8's eval cache, keyed by the text and the context's empty function, handing the second engine the eval
+// code the first compiled, whose referrer (a.js, gone) the library no longer knew. Since patches/v8/0004 the cache is keyed
+// by the native context too: the second engine compiles its own code and its import names b.js, the stand-in left as a
+// backstop for code whose referrer is gone.
 static unsafe class NoReferrers
 {
-    public const string Expected = "a.js ./m.js|noref ./m.js";
+    public const string Expected = "a.js ./m.js|b.js ./m.js";
 
     public static string Check(string library)
     {
@@ -110,6 +115,41 @@ static unsafe class NoReferrers
         using (var script = b.Compile(new Microsoft.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
         try { b.Invoke("go"); } catch (Exception e) { return first + "|error " + e.Message; }
         return first + "|" + (second.Seen.Length > 0 ? second.Seen : "not asked");
+    }
+}
+
+// patches/v8/0004: V8's eval cache keyed by the native context too (indirect eval and the Function constructor were keyed
+// by the context's closure, which every context shares): two engines of one runtime, both alive, run the same text from
+// their own scripts and each import names its own script (0016 and before: the second named a.js); the first, asked
+// again, still its own.
+static class EvalCallers
+{
+    public const string Expected = "a.js ./m.js,a.js ./m.js|b.js ./m.js,b.js ./m.js|a.js ./m.js,a.js ./m.js";
+
+    public static string Check()
+    {
+        using var runtime = new V8Runtime();
+        const string code = "globalThis.go = () => { Function(\"return import('./m.js')\")(); return 0; };"
+            + "globalThis.ev = () => { (0, eval)(\"import('./m.js')\"); return 0; };";
+        string Run(V8ScriptEngine engine, KeptReferrers.Loader loader)
+        {
+            try { engine.Invoke("go"); } catch (Exception e) { return "error " + e.Message; }
+            var function = loader.Seen;
+            try { engine.Invoke("ev"); } catch (Exception e) { return "error " + e.Message; }
+            return function + "," + loader.Seen;
+        }
+        using var a = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+        var la = new KeptReferrers.Loader();
+        a.DocumentSettings.Loader = la;
+        using (var script = a.Compile(new Microsoft.ClearScript.DocumentInfo("a.js"), code)) a.Execute(script);
+        using var b = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+        var lb = new KeptReferrers.Loader();
+        b.DocumentSettings.Loader = lb;
+        using (var script = b.Compile(new Microsoft.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
+        var first = Run(a, la);
+        var second = Run(b, lb);
+        var again = Run(a, la);
+        return first + "|" + second + "|" + again;
     }
 }
 
