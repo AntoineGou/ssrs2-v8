@@ -1,0 +1,60 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 7eb8298..ae9be76 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2584,10 +2584,55 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallImportScheduler(const char* holder, const c
+     return 1;
+ }
+ 
++// A constructor whose instances V8 takes as code (v8::ObjectTemplate::SetCodeLike, TC39's dynamic code brand checks): eval
++// of such an object, and the Function constructor, compile its text (its toString) where V8 otherwise returns an object
++// unevaluated. An instance keeps the brand when the script gives it another prototype (V8 reads it from the map's
++// constructor), so a host's own class (Trusted Types' TrustedScript) can be made of it. globalThis[holder][name] made the
++// constructor, from inside a host call: 1 when made, 0 outside a context.
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallCodeLike(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    auto constructorTemplate = v8::FunctionTemplate::New(isolate);
++    constructorTemplate->InstanceTemplate()->SetCodeLike();
++    v8::Local<v8::Function> constructor;
++    if (!constructorTemplate->GetFunction(context).ToLocal(&constructor))
++    {
++        return 0;
++    }
++    if (object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), constructor).IsNothing())
++    {
++        return 0;
++    }
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+ #pragma comment(linker, "/EXPORT:Ssrs2_PerformMicrotaskCheckpoint=_Ssrs2_PerformMicrotaskCheckpoint@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCreationContext=_Ssrs2_InstallCreationContext@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallImportScheduler=_Ssrs2_InstallImportScheduler@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeLike=_Ssrs2_InstallCodeLike@8")
+ #endif

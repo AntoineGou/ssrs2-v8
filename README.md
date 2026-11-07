@@ -102,7 +102,13 @@ an isolate kept for many documents, the host's own script compiled once at its s
 handlers and string timers) fell out of the cache, and an `import()` in their code, outside a script's execution, failed
 with "Invalid module load request": a test passed or failed by how many documents its isolate had run before.
 `test/Smoke` runs 1,100 scripts after the host's, then calls its function importing a module, and checks the loader is
-asked with the host's document.
+asked with the host's document. Then `0013-code-like.patch`: `Ssrs2_InstallCodeLike`, called from inside a host call,
+makes a constructor whose instances V8 takes as code (V8's `ObjectTemplate::SetCodeLike`, TC39's dynamic code brand
+checks): `eval` of one, and the `Function` constructor, compile its text (its `toString`), where V8 otherwise returns an
+object unevaluated. An instance keeps the brand when the script gives it another prototype (V8 reads it from its map's
+constructor), so the host makes Trusted Types' `TrustedScript` of it, as Chrome's is code-like: a page's
+`eval(policy.createScript(code))` ran nothing. `test/Smoke` evaluates instances with another prototype through both, and
+a plain object with the same `toString` through `eval`, which returns it.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
