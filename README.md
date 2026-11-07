@@ -115,7 +115,15 @@ call-as-function handler) with `target`'s indices (an indexed interceptor, enume
 name their prototype's: the host gives its callable Proxy as both, and makes HTML's `document.all` of it, as Chrome's is
 (`typeof document.all` was `"function"`). No named interceptor: ClearScript's own `typeof` answers `"object"` for an object
 with one before it looks at undetectable. `test/Smoke` checks `typeof`, the comparisons, an index, a call, the keys and a
-name read through the prototype.
+name read through the prototype. Then `0015-no-referrer.patch`: `Ssrs2_SetNoReferrerName` names a script the host keeps
+(a live holder: 0012's kept document infos) as its stand-in for "no referrer". A dynamic import whose host-defined options
+name a script the context no longer knows is loaded with that script's document info, rather than failing with "Invalid
+module load request". V8's eval cache is keyed by the text and the outer function, which for an indirect `eval` and the
+`Function` constructor is the context's empty function, shared by every context: in an isolate kept for many documents,
+a later document's identical `eval` text got the code compiled for an earlier one, whose referrer named that document's
+script, gone by then; the host's loader resolves the stand-in as HTML's import with no active script (the settings
+object's base). `test/Smoke` makes a second engine of one runtime run the first's `eval` text after its script's holder is
+disposed and 1,100 scripts have filled the cache, and checks the loader is asked with the stand-in.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

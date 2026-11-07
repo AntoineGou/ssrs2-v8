@@ -1,0 +1,112 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.h b/ClearScriptV8/V8IsolateImpl.h
+index 9be5ae1..4aac8a2 100644
+--- a/ClearScriptV8/V8IsolateImpl.h
++++ b/ClearScriptV8/V8IsolateImpl.h
+@@ -449,6 +449,23 @@ public:
+         END_MUTEX_SCOPE
+     }
+ 
++    // SSRS2 (0015): the document info of the script a live holder keeps under this resource name (the host's stand-in
++    // for "no referrer", Ssrs2_SetNoReferrerName), whatever its unique id.
++    bool Ssrs2TryGetKeptScriptInfoByName(const StdString& resourceName, V8DocumentInfo& documentInfo)
++    {
++        BEGIN_MUTEX_SCOPE(m_Ssrs2KeptScriptInfosMutex)
++            for (const auto& kept : m_Ssrs2KeptScriptInfos)
++            {
++                if (kept.second.second.GetResourceName() == resourceName)
++                {
++                    documentInfo = kept.second.second;
++                    return true;
++                }
++            }
++            return false;
++        END_MUTEX_SCOPE
++    }
++
+     bool IsExecutionTerminating()
+     {
+         BEGIN_MUTEX_SCOPE(m_TerminateExecutionMutex)
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 6dc989a..40b43fe 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -1,8 +1,32 @@
++#include <mutex>
++#include <string>
+ // Copyright (c) Microsoft Corporation. All rights reserved.
+ // Licensed under the MIT license.
+ 
+ #include "ClearScriptV8Native.h"
+ 
++// SSRS2 (0015): the resource name of the host's stand-in script for "no referrer" (V8SplitProxyNative.cpp's
++// Ssrs2_SetNoReferrerName sets it), for every isolate.
++namespace Ssrs2NoReferrer
++{
++    static std::mutex s_Mutex;
++    static std::string s_Name;
++
++    void Set(const char* name)
++    {
++        std::lock_guard<std::mutex> lock(s_Mutex);
++        s_Name = name != nullptr ? name : "";
++    }
++
++    bool Get(StdString& name)
++    {
++        std::lock_guard<std::mutex> lock(s_Mutex);
++        if (s_Name.empty()) return false;
++        name = StdString(s_Name);
++        return true;
++    }
++}
++
+ //-----------------------------------------------------------------------------
+ // support for v8::Maybe and v8::MaybeLocal
+ //-----------------------------------------------------------------------------
+@@ -2026,6 +2050,19 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(v8::Local<v8::Data> hHos
+         }
+     }
+ 
++    // SSRS2 (0015): a referrer the context no longer knows (V8's eval cache, keyed by the text and the empty function, gives
++    // eval and Function code compiled for an earlier document, whose host-defined options name that document's script):
++    // the host's stand-in for no referrer (Ssrs2_SetNoReferrerName), whose loader resolves the specifier as HTML's import
++    // with no active script, against the running task's document, rather than "Invalid module load request"
++    if ((pSourceDocumentInfo == nullptr) && !hHostDefinedOptions.IsEmpty() && (hHostDefinedOptions.As<v8::PrimitiveArray>()->Length() > 0))
++    {
++        StdString noReferrer;
++        if (Ssrs2NoReferrer::Get(noReferrer) && m_spIsolateImpl->Ssrs2TryGetKeptScriptInfoByName(noReferrer, sourceDocumentInfo))
++        {
++            pSourceDocumentInfo = &sourceDocumentInfo;
++        }
++    }
++
+     return ImportModule(pSourceDocumentInfo, hSpecifier);
+ }
+ 
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index d4964c5..5ed01e7 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2753,6 +2753,16 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallUndetectable(const char* holder, const char
+     return 1;
+ }
+ 
++// The resource name of the host's stand-in script for "no referrer" (0015): a dynamic import whose referrer the context no
++// longer knows is loaded with the document info of the script a live holder keeps under this name (the host's loader
++// resolves it against the running task's document). Every isolate's; null or empty: none, the import fails as before.
++namespace Ssrs2NoReferrer { void Set(const char* name); }
++NATIVE_ENTRY_POINT(int) Ssrs2_SetNoReferrerName(const char* name) noexcept
++{
++    Ssrs2NoReferrer::Set(name);
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -2761,4 +2771,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallUndetectable(const char* holder, const char
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallImportScheduler=_Ssrs2_InstallImportScheduler@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeLike=_Ssrs2_InstallCodeLike@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallUndetectable=_Ssrs2_InstallUndetectable@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetNoReferrerName=_Ssrs2_SetNoReferrerName@4")
+ #endif

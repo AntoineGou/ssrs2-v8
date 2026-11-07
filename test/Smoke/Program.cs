@@ -33,9 +33,11 @@ var codeLike = CodeLikes.Check(Directory.GetFiles(AppContext.BaseDirectory, "Cle
 Console.WriteLine($"code-like: {codeLike}");
 var undetectable = Undetectables.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"undetectable: {undetectable}");
+var noReferrer = NoReferrers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"no referrer: {noReferrer}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
-    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}");
+    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -45,7 +47,7 @@ static class KeptReferrers
 {
     public const string Expected = "host.js ./m.js";
 
-    sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    internal sealed class Loader : Microsoft.ClearScript.DocumentLoader
     {
         public string Seen = "";
         public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
@@ -71,6 +73,41 @@ static class KeptReferrers
         for (int i = 0; i < 1100; i++) engine.Execute(new Microsoft.ClearScript.DocumentInfo("s" + i + ".js"), i + ";");
         try { engine.Invoke("go"); } catch (Exception e) { return "error " + e.Message; }
         return loader.Seen.Length > 0 ? loader.Seen : "not asked";
+    }
+}
+
+// patches/clearscript/0015: V8's eval cache, keyed by the text and the context's empty function, gives the second engine
+// the eval code the first compiled, whose referrer (a.js, its holder disposed, out of the script cache after 1,100 scripts)
+// the library no longer knows: the loader is asked with the host's stand-in (Ssrs2_SetNoReferrerName), not failed.
+static unsafe class NoReferrers
+{
+    public const string Expected = "a.js ./m.js|noref ./m.js";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_SetNoReferrerName", out var export)) return "export missing";
+        var set = (delegate* unmanaged[Stdcall]<byte*, int>)export;
+        using var runtime = new V8Runtime();
+        using var stand = runtime.Compile(new Microsoft.ClearScript.DocumentInfo("noref"), "0");
+        fixed (byte* name = "noref\0"u8) set(name);
+        const string code = "globalThis.go = () => (0, eval)(\"import('./m.js')\");";
+        string first;
+        using (var a = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports))
+        {
+            var loader = new KeptReferrers.Loader();
+            a.DocumentSettings.Loader = loader;
+            using (var script = a.Compile(new Microsoft.ClearScript.DocumentInfo("a.js"), code)) a.Execute(script);
+            try { a.Invoke("go"); } catch (Exception e) { return "error " + e.Message; }
+            first = loader.Seen;
+        }
+        using var b = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+        var second = new KeptReferrers.Loader();
+        b.DocumentSettings.Loader = second;
+        for (int i = 0; i < 1100; i++) b.Execute(new Microsoft.ClearScript.DocumentInfo("t" + i + ".js"), i + ";");
+        using (var script = b.Compile(new Microsoft.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
+        try { b.Invoke("go"); } catch (Exception e) { return first + "|error " + e.Message; }
+        return first + "|" + (second.Seen.Length > 0 ? second.Seen : "not asked");
     }
 }
 
