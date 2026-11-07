@@ -1,0 +1,104 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 5ed01e7..78f36d8 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2763,6 +2763,93 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SetNoReferrerName(const char* name) noexcept
+     return 1;
+ }
+ 
++// A function that tells the function it wraps who called it (0016): withIncumbent(f) makes a native function W; W(...args)
++// called with this calls f with this, the global of the incumbent context (v8::Isolate::GetIncumbentContext: the context of
++// the most recent script function on the stack, the one calling W, W being native) first and W's arguments after, and
++// returns what f returns. A host whose windows are seen through one view a context (frames' windows) installs W as an
++// accessor, f giving the value as the calling context sees it (HTML's WindowProxy, one object every realm sees).
++// globalThis[holder][name] made withIncumbent, from inside a host call: 1 when made, 0 outside a context.
++static void Ssrs2IncumbentCall(const v8::FunctionCallbackInfo<v8::Value>& info)
++{
++    auto isolate = info.GetIsolate();
++    auto data = info.Data();
++    if (data.IsEmpty() || !data->IsFunction())
++    {
++        return;
++    }
++    auto context = isolate->GetCurrentContext();
++    v8::Local<v8::Value> incumbent = v8::Null(isolate);
++    auto incumbentContext = isolate->GetIncumbentContext();
++    if (!incumbentContext.IsEmpty())
++    {
++        incumbent = incumbentContext->Global();
++    }
++    std::vector<v8::Local<v8::Value>> args;
++    args.reserve(static_cast<size_t>(info.Length()) + 1);
++    args.push_back(incumbent);
++    for (int i = 0; i < info.Length(); i++)
++    {
++        args.push_back(info[i]);
++    }
++    v8::Local<v8::Value> result;
++    if (data.As<v8::Function>()->Call(context, info.This(), static_cast<int>(args.size()), args.data()).ToLocal(&result))
++    {
++        info.GetReturnValue().Set(result);
++    }
++}
++
++static void Ssrs2WithIncumbent(const v8::FunctionCallbackInfo<v8::Value>& info)
++{
++    auto isolate = info.GetIsolate();
++    if (info.Length() < 1 || !info[0]->IsFunction())
++    {
++        isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8(isolate, "withIncumbent takes a function").ToLocalChecked()));
++        return;
++    }
++    v8::Local<v8::Function> wrapper;
++    if (v8::Function::New(isolate->GetCurrentContext(), Ssrs2IncumbentCall, info[0], 0, v8::ConstructorBehavior::kThrow).ToLocal(&wrapper))
++    {
++        info.GetReturnValue().Set(wrapper);
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallIncumbent(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    v8::Local<v8::Object> object;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        object = existing.As<v8::Object>();
++    }
++    else
++    {
++        object = v8::Object::New(isolate);
++        if (global->Set(context, key, object).IsNothing())
++        {
++            return 0;
++        }
++    }
++    v8::Local<v8::Function> withIncumbent;
++    if (!v8::Function::New(context, Ssrs2WithIncumbent).ToLocal(&withIncumbent))
++    {
++        return 0;
++    }
++    if (object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), withIncumbent).IsNothing())
++    {
++        return 0;
++    }
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -2772,4 +2859,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SetNoReferrerName(const char* name) noexcept
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeLike=_Ssrs2_InstallCodeLike@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallUndetectable=_Ssrs2_InstallUndetectable@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetNoReferrerName=_Ssrs2_SetNoReferrerName@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallIncumbent=_Ssrs2_InstallIncumbent@8")
+ #endif

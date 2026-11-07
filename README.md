@@ -123,7 +123,16 @@ module load request". V8's eval cache is keyed by the text and the outer functio
 a later document's identical `eval` text got the code compiled for an earlier one, whose referrer named that document's
 script, gone by then; the host's loader resolves the stand-in as HTML's import with no active script (the settings
 object's base). `test/Smoke` makes a second engine of one runtime run the first's `eval` text after its script's holder is
-disposed and 1,100 scripts have filled the cache, and checks the loader is asked with the stand-in.
+disposed and 1,100 scripts have filled the cache, and checks the loader is asked with the stand-in. Then
+`0016-incumbent.patch`: `Ssrs2_InstallIncumbent`, called from inside a host call, makes a function `withIncumbent(f)`
+whose native wrapper `W`, called with a `this` and arguments, calls `f` with that `this`, the global of the incumbent
+context (V8's `Isolate::GetIncumbentContext`: the context of the script function calling `W`, `W` being native) and
+`W`'s arguments, and returns what `f` returns. The host keeps one context a frame and sees other frames' windows through
+a view each context makes (HTML's WindowProxy is one object every realm holds): its window accessors (a frame's
+`contentWindow`, an event's `target`) are made of `W`, `f` giving the window as the calling context sees it. Before, a
+window read through another context's accessor was that context's view, or its own global, which V8's access checks
+refuse another context. `test/Smoke` calls a wrapper directly and as an accessor and checks the global, the `this` and
+the arguments `f` was given.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

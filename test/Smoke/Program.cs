@@ -35,9 +35,11 @@ var undetectable = Undetectables.Check(Directory.GetFiles(AppContext.BaseDirecto
 Console.WriteLine($"undetectable: {undetectable}");
 var noReferrer = NoReferrers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"no referrer: {noReferrer}");
+var incumbent = Incumbents.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"incumbent: {incumbent}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
-    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}");
+    && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -409,5 +411,31 @@ static unsafe class HostCalls
         }));
         if (!(bool)engine.Evaluate("install()")) return "not installed";
         return (string)engine.Evaluate("var s = 0; for (var i = 0; i < 100000; i++) s = (s + calls.add(i, 1)) | 0; s + ' ' + calls.echo('héllo', 2.5, true)");
+    }
+}
+
+// patches/clearscript/0016: withIncumbent(f)'s wrapper calls f with its this, the calling context's global and its own
+// arguments, called directly and as an accessor; a function that is not one is refused.
+static unsafe class Incumbents
+{
+    public const string Expected = "1:true:7:a,b:true:3:TypeError";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallIncumbent", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "withIncumbent\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        return installed + ":" + engine.Evaluate(
+            "const w = ssrs2.withIncumbent(function (g, ...rest) { return [g === globalThis, this.v, rest.join(',')]; });" +
+            "const o = { v: 7 }; const direct = w.call(o, 'a', 'b');" +
+            "const p = { v: 3 }; Object.defineProperty(p, 'seen', { get: ssrs2.withIncumbent(function (g) { return [g === globalThis, this.v]; }) });" +
+            "let refused = 'none'; try { ssrs2.withIncumbent(1); } catch (e) { refused = e.name; }" +
+            "[...direct, ...p.seen, refused].join(':')");
     }
 }
