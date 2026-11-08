@@ -146,7 +146,16 @@ still run: an asynchronous WebAssembly compile it began finishes in a task V8 po
 compile's promise in that context and runs its reactions there. A host function they called read the freed context
 (SSRS2's WPT run of the `wasm` folder ended on a lock of a freed mutex, or SIGSEGV, at 6 renders at once); it now finds
 no context and does nothing, as with no data. `Ssrs2_ContextLinks` (1) tells a host the library has it. `test/Smoke`
-disposes an engine while such a compile runs and checks the reactions ran and the host function was not called.
+disposes an engine while such a compile runs and checks the reactions ran and the host function was not called. Then
+`0018-wasm-memory-limit.patch`: the runtime's soft heap limit (`MaxHeapSize`) counts, besides the heap, the memory V8
+accounts for outside it other than ArrayBuffers' (which `MaxArrayBufferAllocation` bounds): WebAssembly memories and
+compiled modules, external strings. It is checked where it was (the heap watch timer, 0011's heap expansion) and after
+each collection, which memory growing outside the heap brings about. A WebAssembly memory is 4 GB at most
+(`--wasm_max_mem_pages=65536`, Chrome's and V8's limit for a 32-bit memory; a 64-bit one could be 16 GB). Before, a
+page's WebAssembly memories were bounded by nothing: six of 1 GB filled grew SSRS2's process by 6 GB, a 64-bit one of
+8 GB by 8; SSRS2 now stops such a page's scripts at its limit, with its note, after 1.1 GB and 0.1 GB.
+`Ssrs2_WasmMemoryLimit` (1) tells a host the library has it. `test/Smoke` fills four memories of 128 MB under a 256 MB
+limit and checks the script is stopped, and that a 64-bit memory of 8 GB is refused.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

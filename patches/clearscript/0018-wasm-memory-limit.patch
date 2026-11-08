@@ -1,0 +1,154 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index b880f942..f20488d3 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "ClearScriptV8Native.h"
+ #include <cstdlib>
++#include "v8-external-memory-accounter.h" // SSRS2 (0018)
+ 
+ //-----------------------------------------------------------------------------
+ // V8Platform
+@@ -108,6 +109,11 @@ void V8Platform::EnsureInitialized()
+ 
+     #endif // V8_MAJOR_VERSION < 15
+ 
++        // SSRS2 (0018): a WebAssembly memory of 4 GB at most (65,536 pages, Chrome's for a 32-bit memory and V8's own; a
++        // 64-bit one could be 16 GB): one allocation the soft limit cannot stop before a script touches it, as the soft
++        // limit is checked between steps of the script (Ssrs2CountedSize).
++        flagStrings.push_back("--wasm_max_mem_pages=65536");
++
+         if ((defaultStackSize > 0) && (defaultStackSize <= INT_MAX))
+         {
+             flagStrings.push_back("--stack_size=" + std::to_string(defaultStackSize));
+@@ -535,6 +541,7 @@ V8IsolateImpl::V8IsolateImpl(const StdString& name, const v8::ResourceConstraint
+         v8::Isolate::Initialize(m_upIsolate.get(), params);
+ 
+         m_upIsolate->AddNearHeapLimitCallback(HeapExpansionCallback, this);
++        m_upIsolate->AddGCEpilogueCallback(Ssrs2GCEpilogue, this);
+         m_upIsolate->AddBeforeCallEnteredCallback(OnBeforeCallEntered);
+ 
+         BEGIN_ISOLATE_SCOPE
+@@ -1767,6 +1774,7 @@ V8IsolateImpl::~V8IsolateImpl()
+ 
+     m_upIsolate->RemoveBeforeCallEnteredCallback(OnBeforeCallEntered);
+     m_upIsolate->RemoveNearHeapLimitCallback(HeapExpansionCallback, 0);
++    m_upIsolate->RemoveGCEpilogueCallback(Ssrs2GCEpilogue, this);
+ 
+     m_upIsolate.reset();
+ }
+@@ -2211,7 +2219,7 @@ void V8IsolateImpl::CheckHeapSize(const std::optional<size_t>& optMaxHeapSize, b
+         // is the total heap size over the limit?
+         v8::HeapStatistics heapStatistics;
+         GetHeapStatistics(heapStatistics);
+-        if (heapStatistics.total_heap_size() > maxHeapSize)
++        if (Ssrs2CountedSize(heapStatistics) > maxHeapSize)
+         {
+             // yes; collect garbage
+             ClearCachesForTesting();
+@@ -2219,7 +2227,7 @@ void V8IsolateImpl::CheckHeapSize(const std::optional<size_t>& optMaxHeapSize, b
+ 
+             // is the total heap size still over the limit?
+             GetHeapStatistics(heapStatistics);
+-            if (heapStatistics.total_heap_size() > maxHeapSize)
++            if (Ssrs2CountedSize(heapStatistics) > maxHeapSize)
+             {
+                 // yes; the isolate is out of memory; act based on policy
+                 if (m_DisableHeapSizeViolationInterrupt)
+@@ -2438,6 +2446,49 @@ void V8IsolateImpl::FlushContext(V8ContextImpl& contextImpl)
+ 
+ //-----------------------------------------------------------------------------
+ 
++size_t V8IsolateImpl::Ssrs2CountedSize(v8::HeapStatistics& heapStatistics)
++{
++    // SSRS2 (0018): what the soft limit (MaxHeapSize) counts: the heap, and the memory V8 accounts for outside it other
++    // than ArrayBuffers' (which MaxArrayBufferAllocation bounds on its own): WebAssembly memories, compiled WebAssembly
++    // modules, external strings. A page's WebAssembly memories were bounded by nothing (six of 1 GB, or one 64-bit one
++    // of 8 GB, filled: the process's memory grew by as much, and several such renders at once ended it).
++    auto external = v8::ExternalMemoryAccounter::GetTotalAmountOfExternalAllocatedMemoryForTesting(m_upIsolate.get());
++    auto buffers = static_cast<int64_t>(heapStatistics.external_memory());
++    return heapStatistics.total_heap_size() + ((external > buffers) ? static_cast<size_t>(external - buffers) : 0);
++}
++
++//-----------------------------------------------------------------------------
++
++void V8IsolateImpl::Ssrs2GCEpilogue(v8::Isolate* pIsolate, v8::GCType /*type*/, v8::GCCallbackFlags /*flags*/, void* pvData)
++{
++    // SSRS2 (0018): the soft limit checked after each collection too, on the execution thread: memory outside the heap
++    // (a WebAssembly memory) makes V8 collect as it grows, while the heap watch timer, run through the host's thread
++    // pool, may wait (0011). Past the limit, the isolate is out of memory and its execution terminated, as the timer's
++    // check does under the termination policy. Cheap when nothing large is outside the heap: the external total first.
++    auto pIsolateImpl = static_cast<V8IsolateImpl*>(pvData);
++    auto maxHeapSize = pIsolateImpl->m_MaxHeapSize.load();
++    if ((maxHeapSize == 0) || pIsolateImpl->m_DisableHeapSizeViolationInterrupt || pIsolateImpl->m_IsOutOfMemory)
++    {
++        return;
++    }
++
++    auto external = v8::ExternalMemoryAccounter::GetTotalAmountOfExternalAllocatedMemoryForTesting(pIsolate);
++    if ((external <= 0) || (static_cast<size_t>(external) < maxHeapSize / 4))
++    {
++        return;
++    }
++
++    v8::HeapStatistics heapStatistics;
++    pIsolate->GetHeapStatistics(&heapStatistics);
++    if (pIsolateImpl->Ssrs2CountedSize(heapStatistics) > maxHeapSize)
++    {
++        pIsolateImpl->m_IsOutOfMemory = true;
++        pIsolateImpl->TerminateExecution(false);
++    }
++}
++
++//-----------------------------------------------------------------------------
++
+ size_t V8IsolateImpl::HeapExpansionCallback(void* pvData, size_t currentLimit, size_t /*initialLimit*/)
+ {
+     const size_t minBump = 1024 * 1024;
+@@ -2460,7 +2511,7 @@ size_t V8IsolateImpl::HeapExpansionCallback(void* pvData, size_t currentLimit, s
+             auto maxHeapSize = pIsolateImpl->m_MaxHeapSize.load();
+             v8::HeapStatistics heapStatistics;
+             if ((maxHeapSize > 0) && !pIsolateImpl->m_DisableHeapSizeViolationInterrupt
+-                && (pIsolateImpl->m_upIsolate->GetHeapStatistics(&heapStatistics), heapStatistics.total_heap_size() > maxHeapSize))
++                && (pIsolateImpl->m_upIsolate->GetHeapStatistics(&heapStatistics), pIsolateImpl->Ssrs2CountedSize(heapStatistics) > maxHeapSize))
+             {
+                 pIsolateImpl->m_IsOutOfMemory = true;
+                 pIsolateImpl->TerminateExecution(false);
+diff --git a/ClearScriptV8/V8IsolateImpl.h b/ClearScriptV8/V8IsolateImpl.h
+index 4aac8a2e..7d6e77c0 100644
+--- a/ClearScriptV8/V8IsolateImpl.h
++++ b/ClearScriptV8/V8IsolateImpl.h
+@@ -694,6 +694,8 @@ private:
+     void FlushContext(V8ContextImpl& contextImpl);
+ 
+     static size_t HeapExpansionCallback(void* pvData, size_t currentLimit, size_t initialLimit);
++    size_t Ssrs2CountedSize(v8::HeapStatistics& heapStatistics);
++    static void Ssrs2GCEpilogue(v8::Isolate* pIsolate, v8::GCType type, v8::GCCallbackFlags flags, void* pvData);
+ 
+     StdString m_Name;
+     UniqueDisposePtr<v8::Isolate> m_upIsolate;
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 59c399d4..d725cac3 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2857,6 +2857,13 @@ NATIVE_ENTRY_POINT(int) Ssrs2_ContextLinks() noexcept
+     return 1;
+ }
+ 
++// The soft heap limit counts WebAssembly memories and modules (0018, V8IsolateImpl::Ssrs2CountedSize), and a WebAssembly
++// memory is 4 GB at most: 1. A host asks it to know that a page's WebAssembly memories stop its scripts at the limit.
++NATIVE_ENTRY_POINT(int) Ssrs2_WasmMemoryLimit() noexcept
++{
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -2868,4 +2875,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_ContextLinks() noexcept
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetNoReferrerName=_Ssrs2_SetNoReferrerName@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallIncumbent=_Ssrs2_InstallIncumbent@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_ContextLinks=_Ssrs2_ContextLinks@0")
++#pragma comment(linker, "/EXPORT:Ssrs2_WasmMemoryLimit=_Ssrs2_WasmMemoryLimit@0")
+ #endif

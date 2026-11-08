@@ -41,10 +41,12 @@ var evalCallers = EvalCallers.Check();
 Console.WriteLine($"eval callers: {evalCallers}");
 var links = ContextLinks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"context links: {links}");
+var wasmMemory = WasmMemoryLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"wasm memory limit: {wasmMemory}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
-    && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}");
+    && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -517,5 +519,34 @@ static class ContextLinks
         for (var i = 0; i < 500 && Convert.ToInt32(b.Evaluate("Atomics.load(ran, 0)")) == 0; i++) Thread.Sleep(10);
         var state = Convert.ToInt32(b.Evaluate("Atomics.load(ran, 0)"));
         return "export:" + (state == 1 ? "ran" : "state " + state) + ":" + calls;
+    }
+}
+
+// patches/clearscript/0018: the soft heap limit (MaxHeapSize) counts WebAssembly memories, outside V8's heap: four of
+// 128 MB filled under a 256 MB limit stop the script (it then runs 300 ms, past the heap watch timer's 10 ms; without the
+// patch it ends normally); and a memory is 4 GB at most (a 64-bit one of 8 GB is refused with a RangeError).
+static class WasmMemoryLimits
+{
+    public const string Expected = "export:ScriptEngineException:RangeError";
+
+    public static string Check(string library)
+    {
+        if (!NativeLibrary.TryGetExport(NativeLibrary.Load(library), "Ssrs2_WasmMemoryLimit", out _)) return "export missing";
+        string stopped;
+        using (var runtime = new V8Runtime())
+        {
+            runtime.MaxHeapSize = (UIntPtr)(256UL << 20);
+            runtime.HeapSizeSampleInterval = TimeSpan.FromMilliseconds(10);
+            using var engine = runtime.CreateScriptEngine();
+            try
+            {
+                engine.Execute("globalThis.ms = []; for (let i = 0; i < 4; i++) { const m = new WebAssembly.Memory({ initial: 2048 }); new Uint8Array(m.buffer).fill(1); ms.push(m); } const t = Date.now(); while (Date.now() - t < 300);");
+                stopped = "not stopped";
+            }
+            catch (Exception e) { stopped = e.GetType().Name; }
+        }
+        using var other = new V8ScriptEngine();
+        var refused = (string)other.Evaluate("try { new WebAssembly.Memory({ initial: 131072n, address: 'i64' }); 'made' } catch (e) { e.name }");
+        return "export:" + stopped + ":" + refused;
     }
 }
