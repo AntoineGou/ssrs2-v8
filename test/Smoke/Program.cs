@@ -43,10 +43,17 @@ var links = ContextLinks.Check(Directory.GetFiles(AppContext.BaseDirectory, "Cle
 Console.WriteLine($"context links: {links}");
 var wasmMemory = WasmMemoryLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"wasm memory limit: {wasmMemory}");
+var codeGen = CodeGenChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"code generation check: {codeGen}");
+var entry = EntryContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"entry context: {entry}");
+var immutable = ImmutableGlobals.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"immutable global prototype: {immutable}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
-    && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}");
+    && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
+    && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -548,5 +555,82 @@ static class WasmMemoryLimits
         using var other = new V8ScriptEngine();
         var refused = (string)other.Evaluate("try { new WebAssembly.Memory({ initial: 131072n, address: 'i64' }); 'made' } catch (e) { e.name }");
         return "export:" + stopped + ":" + refused;
+    }
+}
+
+// patches/clearscript/0019: a context given a check of code made from strings: a direct eval keeps its scope, a string the
+// check refuses is an EvalError with the message given (eval's and the Function constructor's), a value other than a
+// string is eval's own answer; the check removed, strings compile again unchecked.
+static unsafe class CodeGenChecks
+{
+    public const string Expected = "1:2:EvalError refused:3:EvalError refused:5:NOPE";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallCodeGenCheck", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "setCheck\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        return installed + ":" + engine.Evaluate(
+            "ssrs2.setCheck((s, codeLike) => typeof s === 'string' && s.includes('NOPE') ? null : undefined, 'refused');" +
+            "const e = f => { try { return String(f()); } catch (x) { return x.name + (x.message === 'refused' ? ' refused' : ''); } };" +
+            "const r = [(function () { let l = 1; eval('l = 2'); return l; })(), e(() => eval('\"NOPE\"')), new Function('return 3')(), e(() => new Function('NOPE')), eval(5)];" +
+            "ssrs2.setCheck(null); r.push(eval('\"NOPE\"')); r.join(':')");
+    }
+}
+
+// patches/clearscript/0020: entryGlobal() is null in a script the host runs, and in a promise job the global of the job's
+// context: here the context of the function the job calls, another engine's of the same runtime.
+static unsafe class EntryContexts
+{
+    public const string Expected = "1:true:false:true";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallEntryContext", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var runtime = new V8Runtime();
+        using var a = runtime.CreateScriptEngine();
+        using var b = runtime.CreateScriptEngine();
+        Func<int> installer = () => { fixed (byte* holder = "ssrs2\0"u8, name = "entryGlobal\0"u8) return install(holder, name); };
+        a.AddHostObject("install", installer);
+        b.AddHostObject("install", installer);
+        var installed = Convert.ToInt32(a.Evaluate("install()")) & Convert.ToInt32(b.Evaluate("install()"));
+        b.Execute("globalThis.seen = []; globalThis.job = () => seen.push(ssrs2.entryGlobal() === globalThis);");
+        a.Script.job = b.Script.job;
+        a.Execute("globalThis.outside = ssrs2.entryGlobal() === null; Promise.resolve().then(job); Promise.resolve().then(() => { globalThis.own = ssrs2.entryGlobal() === globalThis; });");
+        return installed + ":" + a.Evaluate("String(outside)") + ":" + a.Evaluate("String(own === undefined ? 'none' : !own)") + ":" + b.Evaluate("seen.join()");
+    }
+}
+
+// patches/clearscript/0021: a context made while Ssrs2_SetImmutableGlobalPrototype(1) is set has a global whose prototype
+// cannot be changed (Reflect.setPrototypeOf false, Object.setPrototypeOf a TypeError, the same prototype accepted); one
+// made after (0) an ordinary global.
+static unsafe class ImmutableGlobals
+{
+    public const string Expected = "1:false:TypeError:true:true";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_SetImmutableGlobalPrototype", out var export)) return "export missing";
+        var set = (delegate* unmanaged[Stdcall]<int, int>)export;
+        using var runtime = new V8Runtime();
+        var on = set(1);
+        V8ScriptEngine immutable;
+        try { immutable = runtime.CreateScriptEngine(); } finally { set(0); }
+        using (immutable)
+        using (var ordinary = runtime.CreateScriptEngine())
+        {
+            return on + ":" + immutable.Evaluate(
+                "const p = Object.getPrototypeOf(globalThis); let t; try { Object.setPrototypeOf(globalThis, {}); t = 'none'; } catch (e) { t = e.name; }" +
+                "[Reflect.setPrototypeOf(globalThis, {}), t, Reflect.setPrototypeOf(globalThis, p)].join(':')") + ":" + ordinary.Evaluate("String(Reflect.setPrototypeOf(globalThis, {}))");
+        }
     }
 }

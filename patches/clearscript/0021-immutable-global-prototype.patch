@@ -1,0 +1,86 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 0ebdf80..79cc2d4 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -407,6 +407,9 @@ V8ContextImpl::V8ContextImpl(V8IsolateImpl* pIsolateImpl, const StdString& name)
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2 (0021): see V8ContextImpl.h.
++thread_local bool g_Ssrs2ImmutableGlobalPrototype = false;
++
+ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvEngine, const StdString& name, const Options& options):
+     m_Name(name),
+     m_pvEngine(pvEngine),
+@@ -433,7 +436,15 @@ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvE
+     BEGIN_ISOLATE_SCOPE
+     FROM_MAYBE_TRY
+ 
+-        if (::HasFlag(options.Flags, Flags::DisableGlobalMembers))
++        // SSRS2 (0021): a global whose prototype cannot be changed, where the host asked it (WebIDL's [Global] objects:
++        // their [[SetPrototypeOf]] an immutable prototype exotic object's). Its prototype is the one V8 makes with it.
++        if (::HasFlag(options.Flags, Flags::DisableGlobalMembers) && g_Ssrs2ImmutableGlobalPrototype)
++        {
++            auto hGlobalTemplate = CreateObjectTemplate();
++            hGlobalTemplate->SetImmutableProto();
++            m_hContext = CreatePersistent(CreateContext(nullptr, hGlobalTemplate));
++        }
++        else if (::HasFlag(options.Flags, Flags::DisableGlobalMembers))
+         {
+             m_hContext = CreatePersistent(CreateContext());
+         }
+@@ -441,6 +452,10 @@ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvE
+         {
+             auto hGlobalTemplate = CreateObjectTemplate();
+             hGlobalTemplate->SetInternalFieldCount(1);
++            if (g_Ssrs2ImmutableGlobalPrototype)
++            {
++                hGlobalTemplate->SetImmutableProto();
++            }
+             hGlobalTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(GetGlobalProperty, SetGlobalProperty, QueryGlobalProperty, DeleteGlobalProperty, GetGlobalPropertyNames, v8::Local<v8::Value>(), v8::PropertyHandlerFlags::kNonMasking));
+             hGlobalTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(GetGlobalProperty, SetGlobalProperty, QueryGlobalProperty, DeleteGlobalProperty, GetGlobalPropertyIndices));
+ 
+diff --git a/ClearScriptV8/V8ContextImpl.h b/ClearScriptV8/V8ContextImpl.h
+index f59251f..5d067eb 100644
+--- a/ClearScriptV8/V8ContextImpl.h
++++ b/ClearScriptV8/V8ContextImpl.h
+@@ -9,6 +9,10 @@
+ 
+ class V8WeakContextBinding;
+ 
++// SSRS2 (0021): the contexts this thread makes while it is set have a global object with an immutable prototype
++// (Ssrs2_SetImmutableGlobalPrototype).
++extern thread_local bool g_Ssrs2ImmutableGlobalPrototype;
++
+ //-----------------------------------------------------------------------------
+ // V8ContextImpl
+ //-----------------------------------------------------------------------------
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 1200260..e8b239e 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3057,6 +3057,18 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallEntryContext(const char* holder, const char
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 
++// The global's prototype immutable (0021): Ssrs2_SetImmutableGlobalPrototype(1) makes the contexts this thread creates
++// next have a global object whose prototype cannot be changed (v8::ObjectTemplate::SetImmutableProto on the global's
++// template: Object.setPrototypeOf throws a TypeError, Reflect.setPrototypeOf answers false, setting it to the prototype
++// it has excepted), (0) ordinary ones again. WebIDL's [Global] objects are immutable prototype exotic objects (§3.7.1);
++// the global's prototype is the object V8 makes with it, which a host takes as its global's interface prototype
++// (Window.prototype) rather than setting another. 1 (the library has it).
++NATIVE_ENTRY_POINT(int) Ssrs2_SetImmutableGlobalPrototype(int on) noexcept
++{
++    g_Ssrs2ImmutableGlobalPrototype = on != 0;
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -3071,4 +3083,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallEntryContext(const char* holder, const char
+ #pragma comment(linker, "/EXPORT:Ssrs2_WasmMemoryLimit=_Ssrs2_WasmMemoryLimit@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeGenCheck=_Ssrs2_InstallCodeGenCheck@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallEntryContext=_Ssrs2_InstallEntryContext@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetImmutableGlobalPrototype=_Ssrs2_SetImmutableGlobalPrototype@4")
+ #endif
