@@ -21,7 +21,13 @@ Indirect eval and the Function constructor are keyed by the context's closure, w
 shares, so a context got the code an earlier one had compiled from the same text, its script's eval origin (which
 dynamic import's referrer and the stack read) the earlier context's: an `import()` in a later document's `new Function`
 resolved against another document's base. A page calling `new Function` in a loop keeps hitting: the key gains one
-number, compared first. SSRS2's own changes (`0002`):
+number, compared first. Then `0005-immutable-proto-undetectable-typeof.patch`: `v8::ssrs2::SetImmutableProto(object)`
+(`include/v8-ssrs2.h`, a header of its own so that only `api.cc` is compiled again) makes an existing object's prototype
+immutable, its map copied with V8's immutable prototype bit and migrated as a prototype's map change is
+(`ObjectTemplate::SetImmutableProto` gives only a template's new objects the bit: WebIDL's global prototype chain is
+linked by a host's scripts after the context exists); and `typeof` answers "undefined" for an undetectable object that has
+a named interceptor (ClearScript's `typeof` answered "object" for any object with one before it looked at undetectable,
+as `Object::TypeOf` does not). SSRS2's own changes (`0002`):
 
 - Local time is UTC once the embedder gives V8 its ICU data (a server prints in UTC), and a date's fields are worked out
   without a time zone.
@@ -173,8 +179,18 @@ after the host's call returned. Then `0021-immutable-global-prototype.patch`: wh
 `Ssrs2_SetImmutableGlobalPrototype(1)` set, the contexts it makes have a global whose prototype cannot be changed
 (`ObjectTemplate::SetImmutableProto` on the global's template), WebIDL's `[Global]` objects being immutable prototype
 exotic objects; the global's prototype is then the object V8 makes with it, which a host takes as its global's
-interface prototype. `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
-`entryGlobal()` in a job calling another context's function, and a global made immutable beside an ordinary one.
+interface prototype. Then `0022-immutable-prototype.patch`: `Ssrs2_InstallImmutablePrototype` makes
+`setImmutablePrototype(object)`, V8's `0005` from a script: WebIDL's immutable prototype exotic objects, a `[Global]`'s
+whole prototype chain (Window.prototype, EventTarget.prototype), whose methods can still be added. Then
+`0023-interceptors.patch`: `Ssrs2_InstallInterceptors` makes `interceptorFactory(handler, flags)`, which returns
+`make(prototype)`: objects of one template whose indexed and string-named properties the handler's traps answer through
+V8's interceptors (get, set, has, deleteProperty, defineProperty, getOwnPropertyDescriptor, ownKeys; a trap missing or
+answering undefined leaves the request to V8's ordinary lookup), undetectable and callable with flags 4. WebIDL's legacy
+platform objects answer `[[DefineOwnProperty]]` of a non-configurable value as their setter does, which a Proxy's
+invariants forbid (a select's indices, a DOMStringMap's names), and HTML's document.all has HTMLAllCollection.prototype
+as its prototype with its names and indices resolved. `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+`entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
+non-configurable value and an undetectable one.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

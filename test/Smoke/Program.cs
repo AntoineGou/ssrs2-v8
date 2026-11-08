@@ -49,11 +49,16 @@ var entry = EntryContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "Cl
 Console.WriteLine($"entry context: {entry}");
 var immutable = ImmutableGlobals.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"immutable global prototype: {immutable}");
+var immutablePrototype = ImmutablePrototypes.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"immutable prototype: {immutablePrototype}");
+var interceptors = InterceptorObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"interceptors: {interceptors}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
-    && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}");
+    && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
+    && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -634,3 +639,61 @@ static unsafe class ImmutableGlobals
         }
     }
 }
+
+// patches/clearscript/0022 with patches/v8/0005: setImmutablePrototype(object) locks an existing object's prototype, one
+// already other objects' prototype too (Reflect.setPrototypeOf false, Object.setPrototypeOf a TypeError, the same one
+// accepted, a property still added and found through the chain); a revoked Proxy answers false.
+static unsafe class ImmutablePrototypes
+{
+    public const string Expected = "1:true:false:TypeError:true:7:false";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallImmutablePrototype", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "setImmutablePrototype\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        return installed + ":" + engine.Evaluate("class A { m() { return 1; } } class B extends A {} const b = new B(); b.m(); const p = A.prototype; const was = Object.getPrototypeOf(p);" +
+            "const r = [ssrs2.setImmutablePrototype(p), Reflect.setPrototypeOf(p, {})]; try { Object.setPrototypeOf(p, null); r.push('none'); } catch (e) { r.push(e.name); }" +
+            "r.push(Reflect.setPrototypeOf(p, was)); p.n = () => 7; r.push(b.n());" +
+            "const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); r.push(ssrs2.setImmutablePrototype(proxy)); r.join(':')");
+    }
+}
+
+// patches/clearscript/0023 with patches/v8/0005: an object of interceptorFactory(handler, flags)(prototype) answers its
+// indices and names through the handler's traps: a non-configurable value defined (the definer's, the property still
+// configurable, as no Proxy may), an accessor refused, its keys listed, an unhandled name its prototype's; with flags 4 it
+// is undetectable (typeof "undefined" though it has a named interceptor) and callable.
+static unsafe class InterceptorObjects
+{
+    public const string Expected = "1:true:TypeError:x:true:0,1,a:proto:undefined:true:6";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallInterceptors", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "interceptorFactory\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        return installed + ":" + engine.Evaluate("const store = new Map(); const h = {" +
+            " get: (o, k) => store.has(String(k)) ? store.get(String(k)) : undefined, has: (o, k) => store.has(String(k)) || undefined," +
+            " defineProperty: (o, k, d) => 'get' in d || 'set' in d ? false : (store.set(String(k), d.value), true)," +
+            " getOwnPropertyDescriptor: (o, k) => store.has(String(k)) ? { value: store.get(String(k)), writable: true, enumerable: true, configurable: true } : undefined," +
+            " ownKeys: (o, indexed) => [...store.keys()].filter(k => /^[0-9]+$/.test(k) === indexed).map(k => indexed ? Number(k) : k), call: (a, b) => a * b };" +
+            "const proto = { inherited: 'proto' }; const o = ssrs2.interceptorFactory(h, 3)(proto); const r = [Object.getPrototypeOf(o) === proto];" +
+            "try { Object.defineProperty(o, 'a', { get() {} }); r.push('none'); } catch (e) { r.push(e.name); }" +
+            "Object.defineProperty(o, 'a', { value: 'x', configurable: false }); o[0] = 1; Object.defineProperty(o, 1, { value: 2 });" +
+            "r.push(o.a, Object.getOwnPropertyDescriptor(o, 'a').configurable, Object.keys(o).join(), o.inherited);" +
+            "const u = ssrs2.interceptorFactory(h, 7)(proto); r.push(typeof u, u == null, u(2, 3)); r.join(':')");
+    }
+}
+

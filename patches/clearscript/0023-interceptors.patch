@@ -1,0 +1,249 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index ba9e55e..9d11627 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3108,6 +3108,238 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallImmutablePrototype(const char* holder, cons
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 
++// Interceptor objects (0023): interceptorFactory(handler, flags) returns make(prototype), which makes an object whose indexed
++// (flags 1) and string-named (flags 2) properties a script's handler answers through V8's interceptors
++// (v8::ObjectTemplate::SetHandler), its prototype the one given. WebIDL's legacy platform objects (indexed and named
++// getters and setters: a select's options, a DOMStringMap, HTMLAllCollection) answer their [[DefineOwnProperty]] and
++// [[GetOwnProperty]] as no Proxy may: a Proxy's invariants refuse a non-configurable descriptor its target does not have
++// (Object.defineProperty(element.dataset, "foo", { value: "x", configurable: false }) must define a configurable "foo").
++// Each trap is the handler's function of that name, called with the handler as receiver and the object holding the
++// interceptor first: get(object, key), set(object, key, value), has(object, key), deleteProperty(object, key),
++// defineProperty(object, key, descriptor), getOwnPropertyDescriptor(object, key), ownKeys(object, indexed); a key is a
++// number for an index, a string for a name (symbols are never intercepted). A missing trap, or a trap answering
++// undefined, leaves the request to V8's ordinary lookup (the object's own properties, then its prototype's); otherwise:
++// get's answer is the value; set's, deleteProperty's and defineProperty's whether it succeeded (false a TypeError in
++// strict code and from Object.defineProperty, as V8 has it); has's true (an ordinary property) or the attributes as a
++// number (v8::PropertyAttribute: 1 read-only, 2 not enumerable, 4 not configurable), false as undefined;
++// getOwnPropertyDescriptor's a descriptor object; ownKeys's the indices or names, in order. flags 4 makes the objects
++// undetectable (v8::ObjectTemplate::MarkAsUndetectable, HTML's [[IsHTMLDDA]]: typeof "undefined", falsy, == null, with
++// V8's 0005 though they have a named interceptor) and callable: a call is the handler's call(...arguments). One
++// template a factory: its objects share their maps. globalThis[holder][name] made interceptorFactory, from inside a host
++// call: 1 when made, 0 outside a context.
++namespace Ssrs2Interceptors
++{
++    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4 };
++
++    static v8::Local<v8::Value> Key(v8::Isolate*, v8::Local<v8::Name> name) { return name; }
++    static v8::Local<v8::Value> Key(v8::Isolate* isolate, uint32_t index) { return v8::Integer::NewFromUnsigned(isolate, index); }
++
++    // The handler's trap called: -1 an exception (the request handled: V8 throws it), 0 no trap, 1 its answer in result.
++    template <typename T>
++    static int Invoke(const v8::PropertyCallbackInfo<T>& info, const char* name, int argc, v8::Local<v8::Value>* argv, v8::Local<v8::Value>& result)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        auto handler = info.Data().template As<v8::Object>();
++        v8::Local<v8::Value> trap;
++        if (!handler->Get(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked()).ToLocal(&trap)) return -1;
++        if (!trap->IsFunction()) return 0;
++        if (!trap.As<v8::Function>()->Call(context, handler, argc, argv).ToLocal(&result)) return -1;
++        return 1;
++    }
++
++    template <typename K>
++    static v8::Intercepted Get(K key, const v8::PropertyCallbackInfo<v8::Value>& info)
++    {
++        v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key) };
++        v8::Local<v8::Value> result;
++        int r = Invoke(info, "get", 2, argv, result);
++        if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
++        if (r > 0) info.GetReturnValue().Set(result);
++        return v8::Intercepted::kYes;
++    }
++
++    template <typename K>
++    static v8::Intercepted Set(K key, v8::Local<v8::Value> value, const v8::PropertyCallbackInfo<v8::Boolean>& info)
++    {
++        v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key), value };
++        v8::Local<v8::Value> result;
++        int r = Invoke(info, "set", 3, argv, result);
++        if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
++        if (r > 0) info.GetReturnValue().Set(result->BooleanValue(info.GetIsolate()));
++        return v8::Intercepted::kYes;
++    }
++
++    template <typename K>
++    static v8::Intercepted Query(K key, const v8::PropertyCallbackInfo<v8::Integer>& info)
++    {
++        auto isolate = info.GetIsolate();
++        v8::Local<v8::Value> argv[] = { info.Holder(), Key(isolate, key) };
++        v8::Local<v8::Value> result;
++        int r = Invoke(info, "has", 2, argv, result);
++        if (r == 0 || (r > 0 && (result->IsUndefined() || result->IsFalse()))) return v8::Intercepted::kNo;
++        if (r > 0)
++        {
++            int32_t attributes = v8::None;
++            if (result->IsNumber()) attributes = result->Int32Value(isolate->GetCurrentContext()).FromMaybe(0) & (v8::ReadOnly | v8::DontEnum | v8::DontDelete);
++            info.GetReturnValue().Set(attributes);
++        }
++        return v8::Intercepted::kYes;
++    }
++
++    template <typename K>
++    static v8::Intercepted Delete(K key, const v8::PropertyCallbackInfo<v8::Boolean>& info)
++    {
++        v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key) };
++        v8::Local<v8::Value> result;
++        int r = Invoke(info, "deleteProperty", 2, argv, result);
++        if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
++        if (r > 0) info.GetReturnValue().Set(result->BooleanValue(info.GetIsolate()));
++        return v8::Intercepted::kYes;
++    }
++
++    // A descriptor as a script's object: only the fields it has (ToPropertyDescriptor's inverse).
++    static bool DescriptorObject(v8::Isolate* isolate, v8::Local<v8::Context> context, const v8::PropertyDescriptor& desc, v8::Local<v8::Object>& object)
++    {
++        object = v8::Object::New(isolate);
++        auto put = [&](const char* name, v8::Local<v8::Value> value)
++        {
++            return object->CreateDataProperty(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), value).IsJust();
++        };
++        if (desc.has_value() && !put("value", desc.value())) return false;
++        if (desc.has_writable() && !put("writable", v8::Boolean::New(isolate, desc.writable()))) return false;
++        if (desc.has_get() && !put("get", desc.get())) return false;
++        if (desc.has_set() && !put("set", desc.set())) return false;
++        if (desc.has_enumerable() && !put("enumerable", v8::Boolean::New(isolate, desc.enumerable()))) return false;
++        if (desc.has_configurable() && !put("configurable", v8::Boolean::New(isolate, desc.configurable()))) return false;
++        return true;
++    }
++
++    template <typename K>
++    static v8::Intercepted Define(K key, const v8::PropertyDescriptor& desc, const v8::PropertyCallbackInfo<v8::Boolean>& info)
++    {
++        auto isolate = info.GetIsolate();
++        v8::Local<v8::Object> descriptor;
++        if (!DescriptorObject(isolate, isolate->GetCurrentContext(), desc, descriptor)) return v8::Intercepted::kYes;
++        v8::Local<v8::Value> argv[] = { info.Holder(), Key(isolate, key), descriptor };
++        v8::Local<v8::Value> result;
++        int r = Invoke(info, "defineProperty", 3, argv, result);
++        if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
++        if (r > 0) info.GetReturnValue().Set(result->BooleanValue(isolate));
++        return v8::Intercepted::kYes;
++    }
++
++    template <typename K>
++    static v8::Intercepted Descriptor(K key, const v8::PropertyCallbackInfo<v8::Value>& info)
++    {
++        v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key) };
++        v8::Local<v8::Value> result;
++        int r = Invoke(info, "getOwnPropertyDescriptor", 2, argv, result);
++        if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
++        if (r > 0) info.GetReturnValue().Set(result);
++        return v8::Intercepted::kYes;
++    }
++
++    template <bool Indexed>
++    static void Keys(const v8::PropertyCallbackInfo<v8::Array>& info)
++    {
++        auto isolate = info.GetIsolate();
++        v8::Local<v8::Value> argv[] = { info.Holder(), v8::Boolean::New(isolate, Indexed) };
++        v8::Local<v8::Value> result;
++        if (Invoke(info, "ownKeys", 2, argv, result) > 0 && result->IsArray()) info.GetReturnValue().Set(result.As<v8::Array>());
++    }
++
++    static void Call(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        auto handler = info.Data().As<v8::Object>();
++        v8::Local<v8::Value> trap;
++        if (!handler->Get(context, v8::String::NewFromUtf8Literal(isolate, "call")).ToLocal(&trap)) return;
++        if (!trap->IsFunction())
++        {
++            isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "The object is not callable")));
++            return;
++        }
++        std::vector<v8::Local<v8::Value>> args;
++        for (int i = 0; i < info.Length(); i++) args.push_back(info[i]);
++        v8::Local<v8::Value> result;
++        if (trap.As<v8::Function>()->Call(context, handler, static_cast<int>(args.size()), args.data()).ToLocal(&result))
++        {
++            info.GetReturnValue().Set(result);
++        }
++    }
++
++    // make(prototype): a new object of the factory's template, its prototype the one given (an object or null).
++    static void Make(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        v8::Local<v8::Object> object;
++        if (!info.Data().As<v8::Function>()->NewInstance(context).ToLocal(&object)) return;
++        if (info.Length() > 0 && (info[0]->IsObject() || info[0]->IsNull()) && object->SetPrototype(context, info[0]).IsNothing()) return;
++        info.GetReturnValue().Set(object);
++    }
++
++    static void Factory(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        if (info.Length() < 1 || !info[0]->IsObject())
++        {
++            isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "interceptorFactory(handler, flags): handler is not an object")));
++            return;
++        }
++        auto handler = info[0].As<v8::Object>();
++        int32_t flags = 0;
++        if (info.Length() > 1 && !info[1]->Int32Value(context).To(&flags)) return;
++        auto functionTemplate = v8::FunctionTemplate::New(isolate);
++        auto instanceTemplate = functionTemplate->InstanceTemplate();
++        if (flags & kIndexed)
++        {
++            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(Get<uint32_t>, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
++                Keys<true>, Define<uint32_t>, Descriptor<uint32_t>, handler));
++        }
++        if (flags & kNamed)
++        {
++            instanceTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(Get<v8::Local<v8::Name>>, Set<v8::Local<v8::Name>>, Query<v8::Local<v8::Name>>,
++                Delete<v8::Local<v8::Name>>, Keys<false>, Define<v8::Local<v8::Name>>, Descriptor<v8::Local<v8::Name>>, handler,
++                v8::PropertyHandlerFlags::kOnlyInterceptStrings));
++        }
++        if (flags & kUndetectable)
++        {
++            instanceTemplate->MarkAsUndetectable();
++            instanceTemplate->SetCallAsFunctionHandler(Call, handler);
++        }
++        v8::Local<v8::Function> constructor;
++        v8::Local<v8::Function> make;
++        if (!functionTemplate->GetFunction(context).ToLocal(&constructor)
++            || !v8::Function::New(context, Make, constructor, 1, v8::ConstructorBehavior::kThrow).ToLocal(&make))
++        {
++            return;
++        }
++        info.GetReturnValue().Set(make);
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallInterceptors(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    v8::Local<v8::Function> function;
++    if (object.IsEmpty() || !v8::Function::New(context, Ssrs2Interceptors::Factory, v8::Local<v8::Value>(), 2, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++    {
++        return 0;
++    }
++    return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -3124,4 +3356,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallImmutablePrototype(const char* holder, cons
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallEntryContext=_Ssrs2_InstallEntryContext@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetImmutableGlobalPrototype=_Ssrs2_SetImmutableGlobalPrototype@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallImmutablePrototype=_Ssrs2_InstallImmutablePrototype@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallInterceptors=_Ssrs2_InstallInterceptors@8")
+ #endif
