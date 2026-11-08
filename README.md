@@ -155,7 +155,26 @@ each collection, which memory growing outside the heap brings about. A WebAssemb
 page's WebAssembly memories were bounded by nothing: six of 1 GB filled grew SSRS2's process by 6 GB, a 64-bit one of
 8 GB by 8; SSRS2 now stops such a page's scripts at its limit, with its note, after 1.1 GB and 0.1 GB.
 `Ssrs2_WasmMemoryLimit` (1) tells a host the library has it. `test/Smoke` fills four memories of 128 MB under a 256 MB
-limit and checks the script is stopped, and that a 64-bit memory of 8 GB is refused.
+limit and checks the script is stopped, and that a 64-bit memory of 8 GB is refused. Then
+`0019-code-generation-check.patch`: `Ssrs2_InstallCodeGenCheck` makes a function, `setCodeGenCheck(check, message)`, that
+gives a context a check of code made from strings. V8's modify-code-generation callback (the overload with
+`is_code_like`), installed on the isolate the first time, calls the check of the compiling context with the value and
+whether it is code-like: eval's argument (V8 gives it as not code-like; the callback reads the brand), a Function
+constructor's source text, code-like when all its arguments were, and each of its arguments that is an object. The
+check answers undefined (as given), a text (compiled in its place: a code-like object's own text) or a refusal, V8's
+EvalError with the message given. Giving a check turns code generation from strings off on the context, so that V8
+asks it for every string; a context without a check answers as V8 does without the callback. A host enforcing HTML's
+Content-Security-Policy and Trusted Types on eval keeps V8's own eval and Function constructors: a direct eval of a
+TrustedScript keeps its scope, where a host replacing eval made every eval indirect. Then `0020-entry-context.patch`:
+`Ssrs2_InstallEntryContext` makes `entryGlobal()`, which answers while V8 runs its microtasks the global of the context
+it runs the job in, or of one entered since (`Isolate::GetEnteredOrMicrotaskContext`), and null outside them: HTML's
+entry settings object of a promise job is its callback's realm, which a host cannot know otherwise, V8 running the job
+after the host's call returned. Then `0021-immutable-global-prototype.patch`: while a thread has
+`Ssrs2_SetImmutableGlobalPrototype(1)` set, the contexts it makes have a global whose prototype cannot be changed
+(`ObjectTemplate::SetImmutableProto` on the global's template), WebIDL's `[Global]` objects being immutable prototype
+exotic objects; the global's prototype is then the object V8 makes with it, which a host takes as its global's
+interface prototype. `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+`entryGlobal()` in a job calling another context's function, and a global made immutable beside an ordinary one.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

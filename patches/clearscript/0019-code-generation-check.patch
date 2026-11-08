@@ -1,0 +1,169 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index d725cac..cbb6ef5 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2864,6 +2864,158 @@ NATIVE_ENTRY_POINT(int) Ssrs2_WasmMemoryLimit() noexcept
+     return 1;
+ }
+ 
++// globalThis[holder], made an object where it is none (0019, 0020): the object a host's functions are installed on, or empty.
++static v8::Local<v8::Object> Ssrs2Holder(v8::Isolate* isolate, v8::Local<v8::Context> context, const char* holder)
++{
++    auto global = context->Global();
++    auto key = v8::String::NewFromUtf8(isolate, holder).ToLocalChecked();
++    v8::Local<v8::Value> existing;
++    if (global->Get(context, key).ToLocal(&existing) && existing->IsObject())
++    {
++        return existing.As<v8::Object>();
++    }
++    auto object = v8::Object::New(isolate);
++    if (global->Set(context, key, object).IsNothing())
++    {
++        return v8::Local<v8::Object>();
++    }
++    return object;
++}
++
++// A context's check of code made from strings (0019): V8's modify-code-generation callback (the overload with is_code_like),
++// installed on the isolate the first time a context is given a check, calls the check of the context compiling, a script
++// function kept in the context's embedder data, with the value and whether V8 takes it as code: eval's argument (a string,
++// a code-like object, any other value; V8 gives eval's as not code-like, the callback reads its brand), the Function
++// constructors' source text ("(function anonymous(...\n) {\n...\n})",
++// code-like when all their arguments were) and each of their arguments that is an object. The check answers undefined
++// for "as given" (an object other than a code-like one then left as it is: eval returns it, the Function constructors
++// convert it to a string), a string for the text compiled in its place (a code-like object's own text), anything else
++// for a refusal: V8's EvalError, with the message the context was given. V8 calls the callback for a string only where
++// the context does not allow code generation from strings, which giving a check turns off. A context without a check
++// answers as V8 does without the callback: its strings compiled where it allows them, a code-like object as its
++// string. With a check, eval and the Function constructors stay V8's own, a direct eval keeping its scope (HTML's
++// Content-Security-Policy and Trusted Types checks, run by the host's script, where the host replaced eval before).
++static const int kSsrs2CodeGenCheckIndex = 3;
++
++static v8::ModifyCodeGenerationFromStringsResult Ssrs2CodeGenCallback(v8::Local<v8::Context> context, v8::Local<v8::Value> source, bool isCodeLike)
++{
++    v8::ModifyCodeGenerationFromStringsResult result;
++    auto isolate = v8::Isolate::GetCurrent();
++    // (eval's argument comes with is_code_like false, V8 leaving its brand to the embedder: read here)
++    if (!isCodeLike && source->IsObject() && source.As<v8::Object>()->IsCodeLike(isolate))
++    {
++        isCodeLike = true;
++    }
++    v8::Local<v8::Data> check;
++    if (context->GetNumberOfEmbedderDataFields() > kSsrs2CodeGenCheckIndex)
++    {
++        check = context->GetEmbedderDataV2(kSsrs2CodeGenCheckIndex);
++    }
++    if (check.IsEmpty() || !check->IsValue() || !check.As<v8::Value>()->IsFunction())
++    {
++        if (source->IsString())
++        {
++            result.codegen_allowed = context->IsCodeGenerationFromStringsAllowed();
++            if (result.codegen_allowed)
++            {
++                result.modified_source = source.As<v8::String>();
++            }
++        }
++        else
++        {
++            result.codegen_allowed = true;
++            if (isCodeLike && context->IsCodeGenerationFromStringsAllowed())
++            {
++                v8::TryCatch tryCatch(isolate);
++                v8::Local<v8::String> text;
++                if (source->ToString(context).ToLocal(&text))
++                {
++                    result.modified_source = text;
++                }
++            }
++        }
++        return result;
++    }
++    v8::TryCatch tryCatch(isolate);
++    v8::Local<v8::Value> args[] = { source, v8::Boolean::New(isolate, isCodeLike) };
++    v8::Local<v8::Value> answer;
++    if (!check.As<v8::Function>()->Call(context, v8::Undefined(isolate), 2, args).ToLocal(&answer))
++    {
++        result.codegen_allowed = false;
++        return result;
++    }
++    if (answer->IsUndefined())
++    {
++        result.codegen_allowed = true;
++        if (source->IsString())
++        {
++            result.modified_source = source.As<v8::String>();
++        }
++    }
++    else if (answer->IsString())
++    {
++        result.codegen_allowed = true;
++        result.modified_source = answer.As<v8::String>();
++    }
++    else
++    {
++        result.codegen_allowed = false;
++    }
++    return result;
++}
++
++// setCodeGenCheck(check[, message]): check a function, the context's check (code generation from strings turned off,
++// the callback installed on the isolate), message the EvalError's of a refusal; check null or undefined, none (code
++// generation from strings turned on again).
++static void Ssrs2SetCodeGenCheck(const v8::FunctionCallbackInfo<v8::Value>& info)
++{
++    auto isolate = info.GetIsolate();
++    auto context = isolate->GetCurrentContext();
++    if (info.Length() > 0 && info[0]->IsFunction())
++    {
++        isolate->SetModifyCodeGenerationFromStringsCallback(Ssrs2CodeGenCallback);
++        context->SetEmbedderDataV2(kSsrs2CodeGenCheckIndex, info[0]);
++        if (info.Length() > 1 && info[1]->IsString())
++        {
++            context->SetErrorMessageForCodeGenerationFromStrings(info[1].As<v8::String>());
++        }
++        context->AllowCodeGenerationFromStrings(false);
++        info.GetReturnValue().Set(true);
++    }
++    else if (info.Length() == 0 || info[0]->IsNullOrUndefined())
++    {
++        if (context->GetNumberOfEmbedderDataFields() > kSsrs2CodeGenCheckIndex)
++        {
++            context->SetEmbedderDataV2(kSsrs2CodeGenCheckIndex, v8::Undefined(isolate));
++        }
++        context->AllowCodeGenerationFromStrings(true);
++        info.GetReturnValue().Set(true);
++    }
++    else
++    {
++        isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8(isolate, "setCodeGenCheck takes a function or null").ToLocalChecked()));
++    }
++}
++
++// globalThis[holder][name] made setCodeGenCheck, from inside a host call: 1 when made, 0 outside a context.
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallCodeGenCheck(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    v8::Local<v8::Function> function;
++    if (object.IsEmpty() || !v8::Function::New(context, Ssrs2SetCodeGenCheck, v8::Local<v8::Value>(), 2, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++    {
++        return 0;
++    }
++    return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -2876,4 +3028,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_WasmMemoryLimit() noexcept
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallIncumbent=_Ssrs2_InstallIncumbent@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_ContextLinks=_Ssrs2_ContextLinks@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_WasmMemoryLimit=_Ssrs2_WasmMemoryLimit@0")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeGenCheck=_Ssrs2_InstallCodeGenCheck@8")
+ #endif
