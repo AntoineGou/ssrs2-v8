@@ -1,0 +1,77 @@
+--- a/include/v8-ssrs2.h
++++ b/include/v8-ssrs2.h
+@@ -21,6 +21,21 @@
+  */
+ V8_EXPORT bool SetImmutableProto(Local<Object> object);
+ 
++/**
++ * SSRS2: while on (for the calling thread), a prototype object whose properties change is left in dictionary mode
++ * rather than made fast again after each change, as V8 does once inline caches used it (each time linear in its
++ * properties: redefining a used prototype's n accessors one by one, WebIDL's shapes applied to a host's classes, took
++ * n * n). Only how fast its properties are found changes; turn it off, then OptimizePrototype each object changed.
++ */
++V8_EXPORT void SetPrototypeSetupMode(bool on);
++
++/**
++ * SSRS2: makes an object changed in setup mode fast again, once: a prototype V8 keeps fast (inline caches used it) as
++ * V8 does, any other object in dictionary mode too (redefining an accessor normalized it). True when it has fast
++ * properties now; false when it is not an ordinary object (a global, a proxy) or has too many properties.
++ */
++V8_EXPORT bool OptimizePrototype(Local<Object> object);
++
+ }  // namespace ssrs2
+ }  // namespace v8
+ 
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11518,6 +11518,30 @@
+   EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
+   auto stack_trace = i_isolate->GetDetailedStackTrace(js_obj);
+   return Utils::StackTraceToLocal(stack_trace);
++}
++
++namespace internal {
++namespace ssrs2 {
++extern thread_local bool keep_prototypes_slow;
++}  // namespace ssrs2
++}  // namespace internal
++
++void ssrs2::SetPrototypeSetupMode(bool on) { i::ssrs2::keep_prototypes_slow = on; }
++
++bool ssrs2::OptimizePrototype(Local<Object> object) {
++  auto obj = Utils::OpenDirectHandle(*object);
++  if (!i::IsJSObject(*obj) || i::IsJSGlobalObject(*obj)) return false;
++  auto js_obj = i::Cast<i::JSObject>(obj);
++  if (js_obj->HasFastProperties()) return true;
++  // A prototype inline caches used made fast as V8 makes it (OptimizeAsPrototype); any other object changed in setup
++  // mode too (redefining an accessor normalizes its holder): a dictionary holds the same members in about twice the
++  // memory, which every window's prototypes kept.
++  if (js_obj->map()->is_prototype_map() && js_obj->map()->should_be_fast_prototype_map()) {
++    i::JSObject::ReoptimizeIfPrototype(js_obj);
++  } else {
++    i::JSObject::MigrateSlowToFast(js_obj, 0, "ssrs2::OptimizePrototype");
++  }
++  return js_obj->HasFastProperties();
+ }
+ 
+ bool ssrs2::SetImmutableProto(Local<Object> object) {
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -5188,9 +5188,17 @@
+   DCHECK_IMPLIES(should_be_dictionary, object->map()->is_dictionary_map());
+ #endif
+ }
++
++// SSRS2: while a host reshapes many prototypes' members (v8::ssrs2::SetPrototypeSetupMode), a prototype changed is not
++// made fast again after each change (MigrateSlowToFast is linear in its properties: a prototype of n accessors redefined
++// one by one took n * n), only once, when the host asks (v8::ssrs2::OptimizePrototype).
++namespace ssrs2 {
++thread_local bool keep_prototypes_slow = false;
++}  // namespace ssrs2
+ 
+ // static
+ void JSObject::ReoptimizeIfPrototype(DirectHandle<JSObject> object) {
++  if (ssrs2::keep_prototypes_slow) return;
+   {
+     Tagged<Map> map = object->map();
+     if (!map->is_prototype_map()) return;
