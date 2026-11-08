@@ -1,0 +1,58 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index cbb6ef5..1200260 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3016,6 +3016,47 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallCodeGenCheck(const char* holder, const char
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 
++// The context a promise job runs in (0020): entryGlobal() answers, while V8 runs its microtasks, the global of the context
++// V8 runs the job in, or of one entered since (v8::Isolate::GetEnteredOrMicrotaskContext: a job's context is its callback's
++// realm), and null outside them. V8 runs a job after the host call that queued it returned, where the host no longer
++// knows which window's script runs: HTML's entry settings object of a promise job is its callback's realm (§8.1.7.3,
++// HostEnqueuePromiseJob), which the host reads here. globalThis[holder][name] made entryGlobal, from inside a host
++// call: 1 when made, 0 outside a context.
++static void Ssrs2EntryGlobal(const v8::FunctionCallbackInfo<v8::Value>& info)
++{
++    auto isolate = info.GetIsolate();
++    if (!v8::MicrotasksScope::IsRunningMicrotasks(isolate))
++    {
++        info.GetReturnValue().SetNull();
++        return;
++    }
++    auto entered = isolate->GetEnteredOrMicrotaskContext();
++    if (entered.IsEmpty())
++    {
++        info.GetReturnValue().SetNull();
++        return;
++    }
++    info.GetReturnValue().Set(entered->Global());
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallEntryContext(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    v8::Local<v8::Function> function;
++    if (object.IsEmpty() || !v8::Function::New(context, Ssrs2EntryGlobal, v8::Local<v8::Value>(), 0, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++    {
++        return 0;
++    }
++    return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -3029,4 +3070,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallCodeGenCheck(const char* holder, const char
+ #pragma comment(linker, "/EXPORT:Ssrs2_ContextLinks=_Ssrs2_ContextLinks@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_WasmMemoryLimit=_Ssrs2_WasmMemoryLimit@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeGenCheck=_Ssrs2_InstallCodeGenCheck@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallEntryContext=_Ssrs2_InstallEntryContext@8")
+ #endif
