@@ -1,0 +1,56 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index e8b239e..ba9e55e 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3069,6 +3069,45 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SetImmutableGlobalPrototype(int on) noexcept
+     return 1;
+ }
+ 
++// Immutable prototypes on existing objects (0022, with V8's 0005, v8::ssrs2::SetImmutableProto): setImmutablePrototype(object)
++// makes object's [[SetPrototypeOf]] refuse any prototype other than the one it has (Object.setPrototypeOf and __proto__
++// throw a TypeError, Reflect.setPrototypeOf answers false), properties still added and changed: WebIDL's immutable
++// prototype exotic objects (§3.7.1), a [Global]'s whole prototype chain (Window.prototype, its named properties object,
++// EventTarget.prototype), which a host's scripts link after V8 made the context, where ObjectTemplate::SetImmutableProto
++// only gives a template's new objects the bit. It answers true when object's prototype is immutable, false when object is
++// no ordinary object (a proxy). globalThis[holder][name] made setImmutablePrototype, from inside a host call: 1 when made, 0
++// outside a context.
++#include "v8-ssrs2.h"
++
++static void Ssrs2SetImmutablePrototype(const v8::FunctionCallbackInfo<v8::Value>& info)
++{
++    auto isolate = info.GetIsolate();
++    if (info.Length() < 1 || !info[0]->IsObject())
++    {
++        isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "setImmutablePrototype(object): object is not an object")));
++        return;
++    }
++    info.GetReturnValue().Set(v8::ssrs2::SetImmutableProto(info[0].As<v8::Object>()));
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallImmutablePrototype(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    v8::Local<v8::Function> function;
++    if (object.IsEmpty() || !v8::Function::New(context, Ssrs2SetImmutablePrototype, v8::Local<v8::Value>(), 1, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++    {
++        return 0;
++    }
++    return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -3084,4 +3123,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SetImmutableGlobalPrototype(int on) noexcept
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallCodeGenCheck=_Ssrs2_InstallCodeGenCheck@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallEntryContext=_Ssrs2_InstallEntryContext@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetImmutableGlobalPrototype=_Ssrs2_SetImmutableGlobalPrototype@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallImmutablePrototype=_Ssrs2_InstallImmutablePrototype@8")
+ #endif
