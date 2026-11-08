@@ -1,0 +1,74 @@
+--- /dev/null
++++ b/include/v8-ssrs2.h
+@@ -0,0 +1,27 @@
++// Copyright 2026 SSRS2. Use of this source code is governed by a BSD-style license that can be found in V8's LICENSE file.
++
++#ifndef INCLUDE_V8_SSRS2_H_
++#define INCLUDE_V8_SSRS2_H_
++
++#include "v8-local-handle.h"  // NOLINT(build/include_directory)
++#include "v8config.h"         // NOLINT(build/include_directory)
++
++namespace v8 {
++
++class Object;
++
++namespace ssrs2 {
++
++/**
++ * SSRS2: makes an existing object's prototype immutable (V8's immutable prototype map bit, which
++ * ObjectTemplate::SetImmutableProto gives a template's new objects only): its [[SetPrototypeOf]] then refuses any other
++ * prototype (WebIDL's immutable prototype exotic objects: a global's prototype chain, Window.prototype, its named
++ * properties object, EventTarget.prototype). Properties can still be added and changed. False when object is not an
++ * ordinary JS object (a proxy, an API object of another kind); true when it was or is now.
++ */
++V8_EXPORT bool SetImmutableProto(Local<Object> object);
++
++}  // namespace ssrs2
++}  // namespace v8
++
++#endif  // INCLUDE_V8_SSRS2_H_
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -34,6 +34,7 @@
+ #include "include/v8-unwinder-state.h"
+ #include "include/v8-util.h"
+ #include "include/v8-wasm.h"
++#include "include/v8-ssrs2.h"
+ #include "src/api/api-arguments.h"
+ #include "src/api/api-inl.h"
+ #include "src/api/api-natives.h"
+@@ -11517,6 +11518,21 @@
+   EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
+   auto stack_trace = i_isolate->GetDetailedStackTrace(js_obj);
+   return Utils::StackTraceToLocal(stack_trace);
++}
++
++bool ssrs2::SetImmutableProto(Local<Object> object) {
++  auto obj = Utils::OpenDirectHandle(*object);
++  if (!i::IsJSObject(*obj)) return false;
++  auto js_obj = i::Cast<i::JSObject>(obj);
++  i::Isolate* i_isolate = i::Isolate::Current();
++  i::DirectHandle<i::Map> map(js_obj->map(), i_isolate);
++  if (map->is_immutable_proto()) return true;
++  // As JSObject::SetImmutableProto, its map copied with the bit set, but migrated as a prototype's map change is (an
++  // object already some maps' prototype: their prototype chains' validity cells invalidated), not only set.
++  i::DirectHandle<i::Map> new_map =
++      i::Map::TransitionToImmutableProto(i_isolate, map);
++  i::JSObject::MigrateToMap(i_isolate, js_obj, new_map);
++  return true;
+ }
+ 
+ Maybe<bool> Exception::CaptureStackTrace(Local<Context> context,
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -18637,6 +18637,9 @@
+   GotoIf(InstanceTypeEqual(instance_type, ODDBALL_TYPE), &if_oddball);
+ 
+   Label resume_default(this);
++  // SSRS2: an undetectable object is "undefined" though it has a named interceptor (HTML's document.all, its names
++  // resolved by one), as Object::TypeOf answers it.
++  GotoIf(IsSetWord32<Map::Bits1::IsUndetectableBit>(LoadMapBitField(map)), &return_undefined);
+   GotoIfNot(Word32And(LoadMapBitField(map), Int32Constant(Map::Bits1::HasNamedInterceptorBit::kMask)), &resume_default);
+   Branch(IsSetWord32<Map::Bits1::IsHostDelegateBit>(LoadMapBitField(map)), &return_function, &return_object);
+   BIND(&resume_default);
