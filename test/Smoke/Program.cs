@@ -53,12 +53,17 @@ var immutablePrototype = ImmutablePrototypes.Check(Directory.GetFiles(AppContext
 Console.WriteLine($"immutable prototype: {immutablePrototype}");
 var interceptors = InterceptorObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"interceptors: {interceptors}");
+var prototypeSetup = PrototypeSetups.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"prototype setup: {prototypeSetup}");
+var scriptIds = FunctionScriptIds.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"function script id: {scriptIds}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
-    && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}");
+    && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
+    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -697,3 +702,52 @@ static unsafe class InterceptorObjects
     }
 }
 
+// patches/clearscript/0024 with patches/v8/0006: between prototypeSetup(true) and prototypeSetup(false, objects) a used
+// prototype's accessors are redefined (enumerable, as WebIDL's shapes make them), the prototype then made fast again (the
+// count answered), its getters still found through an instance and through a subclass's.
+static unsafe class PrototypeSetups
+{
+    public const string Expected = "1:2:true:true:41:7";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallPrototypeSetup", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "prototypeSetup\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        return installed + ":" + engine.Evaluate("let src = 'class A {'; for (let i = 0; i < 50; i++) src += `get p${i}() { return ${i}; } m${i}() { return ${i}; }`;" +
+            "const A = new Function(src + '} return A;')(); class B extends A {} const a = new A(), b = new B(); let s = 0; for (let i = 0; i < 3; i++) s += a.p3 + b.p4 + a.m5();" +
+            "ssrs2.prototypeSetup(true); for (const k of Object.getOwnPropertyNames(A.prototype)) { if (k === 'constructor') continue; const d = Object.getOwnPropertyDescriptor(A.prototype, k);" +
+            " Object.defineProperty(A.prototype, k, d.get ? { get: d.get, enumerable: true, configurable: true } : { value: d.value, writable: true, enumerable: true, configurable: true }); }" +
+            "const made = ssrs2.prototypeSetup(false, [A.prototype, A]);" +
+            "[made, Object.keys(A.prototype).length === 100, Object.getOwnPropertyDescriptor(A.prototype, 'p9').enumerable, a.p41, b.m7()].join(':')");
+    }
+}
+
+// patches/clearscript/0024: functionScriptId(f) answers the id of f's script: two functions of one script the same, a
+// function of another script another, -1 for a bound function and for a value that is no function.
+static unsafe class FunctionScriptIds
+{
+    public const string Expected = "1:true:true:true:-1:-1";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallFunctionScriptId", out var export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<int>(() =>
+        {
+            fixed (byte* holder = "ssrs2\0"u8, name = "functionScriptId\0"u8) return install(holder, name);
+        }));
+        var installed = Convert.ToInt32(engine.Evaluate("install()"));
+        engine.Execute("globalThis.f = function f() {}; globalThis.g = () => 1;");
+        return installed + ":" + engine.Evaluate("const id = ssrs2.functionScriptId; function h() {}" +
+            "[id(f) > 0, id(f) === id(g), id(h) !== id(f), id(f.bind(null)), id(42)].join(':')");
+    }
+}

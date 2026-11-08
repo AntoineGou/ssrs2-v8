@@ -27,7 +27,12 @@ immutable, its map copied with V8's immutable prototype bit and migrated as a pr
 (`ObjectTemplate::SetImmutableProto` gives only a template's new objects the bit: WebIDL's global prototype chain is
 linked by a host's scripts after the context exists); and `typeof` answers "undefined" for an undetectable object that has
 a named interceptor (ClearScript's `typeof` answered "object" for any object with one before it looked at undetectable,
-as `Object::TypeOf` does not). SSRS2's own changes (`0002`):
+as `Object::TypeOf` does not). Then `0006-prototype-setup.patch`: `v8::ssrs2::SetPrototypeSetupMode(on)` (for the calling
+thread) leaves a prototype whose properties change in dictionary mode rather than making it fast again after each
+change, as V8 does once inline caches used it (`JSObject::ReoptimizeIfPrototype`, linear in its properties each time: a
+host redefining every member of its used prototypes, WebIDL's shapes, took n * n), and `v8::ssrs2::OptimizePrototype(object)`
+makes an object changed so fast again, once (a prototype V8 keeps fast as V8 does, any other dictionary-mode object too:
+a dictionary holds the same members in about twice the memory). Only how fast properties are found changes. SSRS2's own changes (`0002`):
 
 - Local time is UTC once the embedder gives V8 its ICU data (a server prints in UTC), and a date's fields are worked out
   without a time zone.
@@ -188,9 +193,15 @@ V8's interceptors (get, set, has, deleteProperty, defineProperty, getOwnProperty
 answering undefined leaves the request to V8's ordinary lookup), undetectable and callable with flags 4. WebIDL's legacy
 platform objects answer `[[DefineOwnProperty]]` of a non-configurable value as their setter does, which a Proxy's
 invariants forbid (a select's indices, a DOMStringMap's names), and HTML's document.all has HTMLAllCollection.prototype
-as its prototype with its names and indices resolved. `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+as its prototype with its names and indices resolved. Then `0024-prototype-setup-function-script-id.patch`:
+`Ssrs2_InstallPrototypeSetup` makes `prototypeSetup(on, objects)`, V8's `0006` from a script (`prototypeSetup(true)`, the
+members redefined, `prototypeSetup(false, [the objects changed])`: a document's and each frame's WebIDL shapes, 25 ms and
+about 1 MB a window before), and `Ssrs2_InstallFunctionScriptId` makes `functionScriptId(f)`, the id of the script f was
+compiled from (`Function::ScriptId`, -1 for none): a host prints its own functions as built-ins by their script, without
+a set of them per context. `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
 `entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
-non-configurable value and an undetectable one.
+non-configurable value and an undetectable one, a used prototype's accessors redefined in setup mode and found again, and
+two functions' script ids.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`
