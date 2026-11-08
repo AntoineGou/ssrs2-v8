@@ -139,7 +139,14 @@ a view each context makes (HTML's WindowProxy is one object every realm holds): 
 `contentWindow`, an event's `target`) are made of `W`, `f` giving the window as the calling context sees it. Before, a
 window read through another context's accessor was that context's view, or its own global, which V8's access checks
 refuse another context. `test/Smoke` calls a wrapper directly and as an accessor and checks the global, the `this` and
-the arguments `f` was given.
+the arguments `f` was given. Then `0017-context-links.patch`: a context's host callbacks (its host objects' interceptors
+and functions, `performance.now`...) are given a link to the context as their data, not the context itself; the link is
+emptied when the context is torn down and freed when V8 collects the data holding it. A disposed engine's script can
+still run: an asynchronous WebAssembly compile it began finishes in a task V8 posts for the isolate, which resolves the
+compile's promise in that context and runs its reactions there. A host function they called read the freed context
+(SSRS2's WPT run of the `wasm` folder ended on a lock of a freed mutex, or SIGSEGV, at 6 renders at once); it now finds
+no context and does nothing, as with no data. `Ssrs2_ContextLinks` (1) tells a host the library has it. `test/Smoke`
+disposes an engine while such a compile runs and checks the reactions ran and the host function was not called.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

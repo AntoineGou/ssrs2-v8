@@ -39,10 +39,12 @@ var incumbent = Incumbents.Check(Directory.GetFiles(AppContext.BaseDirectory, "C
 Console.WriteLine($"incumbent: {incumbent}");
 var evalCallers = EvalCallers.Check();
 Console.WriteLine($"eval callers: {evalCallers}");
+var links = ContextLinks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"context links: {links}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
-    && evalCallers == EvalCallers.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}");
+    && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -477,5 +479,43 @@ static unsafe class Incumbents
             "const p = { v: 3 }; Object.defineProperty(p, 'seen', { get: ssrs2.withIncumbent(function (g) { return [g === globalThis, this.v]; }) });" +
             "let refused = 'none'; try { ssrs2.withIncumbent(1); } catch (e) { refused = e.name; }" +
             "[...direct, ...p.seen, refused].join(':')");
+    }
+}
+
+// patches/clearscript/0017: a disposed engine's script still runs when an asynchronous WebAssembly compile it began
+// finishes (a task V8 posts for the isolate resolves its promise in the engine's context); a host function called from the
+// promise's reactions finds no context and does nothing. Without the patch it read the freed context (a crash, or a call).
+// The reactions mark shared memory another engine of the runtime reads, to know they ran.
+static class ContextLinks
+{
+    public const string Expected = "export:ran:1";
+
+    public static string Check(string library)
+    {
+        if (!NativeLibrary.TryGetExport(NativeLibrary.Load(library), "Ssrs2_ContextLinks", out _)) return "export missing";
+        using var runtime = new V8Runtime();
+        using var b = runtime.CreateScriptEngine();
+        b.Execute("globalThis.ran = new Int32Array(new SharedArrayBuffer(4));");
+        var a = runtime.CreateScriptEngine();
+        var calls = 0;
+        a.AddHostObject("note", new Action(() => Interlocked.Increment(ref calls)));
+        a.Script.ran = b.Script.ran;
+        a.Execute("note();");
+        // one function of a million (i32.const 0, drop): its compile outlasts the dispose
+        a.Execute(
+            "const n = 1000000, body = 3 * n + 2;" +
+            "const leb = v => { const out = []; do { let b = v & 127; v >>>= 7; if (v) b |= 128; out.push(b); } while (v); return out; };" +
+            "const head = [0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10];" +
+            "const sizes = [...leb(body + leb(body).length + 1), 1, ...leb(body), 0];" +
+            "const bytes = new Uint8Array(head.length + sizes.length + body - 1);" +
+            "bytes.set(head); bytes.set(sizes, head.length);" +
+            "let k = head.length + sizes.length;" +
+            "for (let i = 0; i < n; i++) { bytes[k++] = 0x41; bytes[k++] = 0; bytes[k++] = 0x1a; }" +
+            "bytes[k] = 0x0b;" +
+            "WebAssembly.compile(bytes).then(() => { Atomics.store(ran, 0, 1); note(); }, () => Atomics.store(ran, 0, 2));");
+        a.Dispose();
+        for (var i = 0; i < 500 && Convert.ToInt32(b.Evaluate("Atomics.load(ran, 0)")) == 0; i++) Thread.Sleep(10);
+        var state = Convert.ToInt32(b.Evaluate("Atomics.load(ran, 0)"));
+        return "export:" + (state == 1 ? "ran" : "state " + state) + ":" + calls;
     }
 }

@@ -1,0 +1,131 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 40b43fed..0ebdf802 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -258,8 +258,9 @@ inline V8ContextImpl* GetContextImplFromHolder(const TInfo& info)
+ template <typename TInfo>
+ inline V8ContextImpl* GetContextImplFromData(const TInfo& info)
+ {
+-    auto hContextImpl = ::ValueAsExternal(info.Data());
+-    return !hContextImpl.IsEmpty() ? static_cast<V8ContextImpl*>(hContextImpl->Value(v8::kExternalPointerTypeTagDefault)) : nullptr;
++    // SSRS2 (0017): the callbacks' data is the context's link, emptied at teardown (see V8ContextImpl::Ssrs2Link).
++    auto hLink = ::ValueAsExternal(info.Data());
++    return !hLink.IsEmpty() ? static_cast<V8ContextImpl::Ssrs2Link*>(hLink->Value(v8::kExternalPointerTypeTagDefault))->pContextImpl : nullptr;
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -416,7 +417,8 @@ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvE
+     m_ChangedTimerResolution(false),
+     m_pvV8ObjectCache(nullptr),
+     m_PromiseHookEnabled(false),
+-    m_PromiseRejectionCallbackEnabled(false)
++    m_PromiseRejectionCallbackEnabled(false),
++    m_pSsrs2Link(nullptr)
+ {
+     VerifyNotOutOfMemory();
+ 
+@@ -458,7 +460,10 @@ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvE
+             throw FromMaybeFailure();
+         }
+ 
+-        auto hContextImpl = CreateExternal(this);
++        // SSRS2 (0017): the host callbacks' data is a link to this context, not the context: see Ssrs2Link.
++        m_pSsrs2Link = new Ssrs2Link { this };
++        auto hContextImpl = CreateExternal(m_pSsrs2Link);
++        MakeWeak(CreatePersistent(hContextImpl), m_pSsrs2Link, static_cast<void*>(nullptr), DisposeSsrs2Link);
+         auto globalFlags = V8IsolateImpl::GetGlobalFlags();
+ 
+         v8::Local<v8::FunctionTemplate> hGetHostObjectIteratorFunction;
+@@ -2472,6 +2477,13 @@ void V8ContextImpl::Teardown()
+ 
+     m_spIsolateImpl->RemoveContext(this);
+ 
++    // SSRS2 (0017): this context's functions, still callable from its script, find no context from here on.
++    if (m_pSsrs2Link != nullptr)
++    {
++        m_pSsrs2Link->pContextImpl = nullptr;
++        m_pSsrs2Link = nullptr;
++    }
++
+     if (m_pvV8ObjectCache != nullptr)
+     {
+         std::vector<void*> v8ObjectPtrs;
+@@ -4453,6 +4465,17 @@ void V8ContextImpl::GetPromiseResultCallback(const v8::FunctionCallbackInfo<v8::
+ 
+ //-----------------------------------------------------------------------------
+ 
++void V8ContextImpl::DisposeSsrs2Link(v8::Isolate* pIsolate, Persistent<v8::External>* phLink, Ssrs2Link* pLink, void* pvUnused)
++{
++    IGNORE_UNUSED(pIsolate);
++    IGNORE_UNUSED(pvUnused);
++
++    delete pLink;
++    phLink->Dispose();
++}
++
++//-----------------------------------------------------------------------------
++
+ void V8ContextImpl::DisposeWeakHandle(v8::Isolate* pIsolate, Persistent<v8::Object>* phObject, HostObjectHolder* pHolder, void* pvV8ObjectCache)
+ {
+     IGNORE_UNUSED(pIsolate);
+diff --git a/ClearScriptV8/V8ContextImpl.h b/ClearScriptV8/V8ContextImpl.h
+index 04716022..f59251f6 100644
+--- a/ClearScriptV8/V8ContextImpl.h
++++ b/ClearScriptV8/V8ContextImpl.h
+@@ -19,6 +19,16 @@ class V8ContextImpl final: public V8Context
+ 
+ public:
+ 
++    // SSRS2 (0017): what the context's host callbacks are given as their data. A context's functions and host objects
++    // outlive its teardown when its script still runs: a task V8 posted for the isolate (an asynchronous WebAssembly
++    // compile's result, its promise's reactions) after the engine was disposed called a host function, whose data was the
++    // freed context (a crash on a freed mutex, WPT's wasm folder at 6 jobs). The link is emptied at teardown, and freed
++    // when V8 collects the data that holds it (a weak handle): a callback then finds no context, as with no data.
++    struct Ssrs2Link final
++    {
++        V8ContextImpl* pContextImpl;
++    };
++
+     V8ContextImpl(V8IsolateImpl* pIsolateImpl, const StdString& name);
+     V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvEngine, const StdString& name, const Options& options);
+     static size_t GetInstanceCount();
+@@ -511,6 +521,7 @@ private:
+     v8::MaybeLocal<v8::Promise> PopulateSyntheticModule(v8::Local<v8::Module> hModule);
+ 
+     static void DisposeWeakHandle(v8::Isolate* pIsolate, Persistent<v8::Object>* phObject, HostObjectHolder* pHolder, void* pvV8ObjectCache);
++    static void DisposeSsrs2Link(v8::Isolate* pIsolate, Persistent<v8::External>* phLink, Ssrs2Link* pLink, void* pvUnused);
+ 
+     bool TryGetCachedModuleInfo(uint64_t uniqueId, V8DocumentInfo& documentInfo);
+     bool TryGetCachedModuleInfo(v8::Local<v8::Module> hModule, V8DocumentInfo& documentInfo);
+@@ -584,6 +595,7 @@ private:
+     double m_RelativeTimeOrigin;
+     std::atomic<bool> m_PromiseHookEnabled;
+     std::atomic<bool> m_PromiseRejectionCallbackEnabled;
++    Ssrs2Link* m_pSsrs2Link;
+ };
+ 
+ //-----------------------------------------------------------------------------
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 78f36d8c..59c399d4 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2850,6 +2850,13 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallIncumbent(const char* holder, const char* n
+     return 1;
+ }
+ 
++// The host callbacks find their context through a link emptied at its teardown (0017, V8ContextImpl::Ssrs2Link): 1. A host
++// asks it to know that a disposed engine's script, still run by a task V8 posted, calls none of its host functions.
++NATIVE_ENTRY_POINT(int) Ssrs2_ContextLinks() noexcept
++{
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -2860,4 +2867,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallIncumbent(const char* holder, const char* n
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallUndetectable=_Ssrs2_InstallUndetectable@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetNoReferrerName=_Ssrs2_SetNoReferrerName@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallIncumbent=_Ssrs2_InstallIncumbent@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_ContextLinks=_Ssrs2_ContextLinks@0")
+ #endif
