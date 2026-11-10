@@ -674,9 +674,11 @@ static unsafe class ImmutablePrototypes
 // indices and names through the handler's traps: a non-configurable value defined (the definer's, the property still
 // configurable, as no Proxy may), an accessor refused, its keys listed, an unhandled name its prototype's; with flags 4 it
 // is undetectable (typeof "undefined" though it has a named interceptor) and callable.
+// patches/clearscript/0025: with flags 8 the named interceptor is non-masking, asked only for a name neither the object
+// nor its prototype chain has (a document's named properties); the factory says so (nonMasking).
 static unsafe class InterceptorObjects
 {
-    public const string Expected = "1:true:TypeError:x:true:0,1,a:proto:undefined:true:6";
+    public const string Expected = "1:true:TypeError:x:true:0,1,a:proto:undefined:true:6:true:1:proto:n::named,missing";
 
     public static string Check(string library)
     {
@@ -698,7 +700,10 @@ static unsafe class InterceptorObjects
             "try { Object.defineProperty(o, 'a', { get() {} }); r.push('none'); } catch (e) { r.push(e.name); }" +
             "Object.defineProperty(o, 'a', { value: 'x', configurable: false }); o[0] = 1; Object.defineProperty(o, 1, { value: 2 });" +
             "r.push(o.a, Object.getOwnPropertyDescriptor(o, 'a').configurable, Object.keys(o).join(), o.inherited);" +
-            "const u = ssrs2.interceptorFactory(h, 7)(proto); r.push(typeof u, u == null, u(2, 3)); r.join(':')");
+            "const u = ssrs2.interceptorFactory(h, 7)(proto); r.push(typeof u, u == null, u(2, 3));" +
+            // (0025, flags 8: the named interceptor asked only for a name the object and its prototype chain lack)
+            "const asked = []; const nm = ssrs2.interceptorFactory({ get: (o, k) => (asked.push(k), k === 'named' ? 'n' : undefined) }, 10)(proto); nm.own = 1;" +
+            "r.push(ssrs2.interceptorFactory.nonMasking, nm.own, nm.inherited, nm.named, nm.missing, asked.join()); r.join(':')");
     }
 }
 

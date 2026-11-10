@@ -198,10 +198,13 @@ as its prototype with its names and indices resolved. Then `0024-prototype-setup
 members redefined, `prototypeSetup(false, [the objects changed])`: a document's and each frame's WebIDL shapes, 25 ms and
 about 1 MB a window before), and `Ssrs2_InstallFunctionScriptId` makes `functionScriptId(f)`, the id of the script f was
 compiled from (`Function::ScriptId`, -1 for none): a host prints its own functions as built-ins by their script, without
-a set of them per context. `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+a set of them per context. Then `0025-non-masking-interceptors.patch`: `interceptorFactory`'s flags 8 makes the named
+interceptor non-masking (`v8::PropertyHandlerFlags::kNonMasking`: asked only for a name neither the object nor its
+prototype chain has, a document's named properties; its own and inherited members are then read as an ordinary
+object's), and the factory says it takes the flag (`interceptorFactory.nonMasking`). `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
 `entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
-non-configurable value and an undetectable one, a used prototype's accessors redefined in setup mode and found again, and
-two functions' script ids.
+non-configurable value and an undetectable one and a non-masking one asked for the missing names alone, a used
+prototype's accessors redefined in setup mode and found again, and two functions' script ids.
 
 V8 is built with ClearScript's settings and `v8_disallow_js_in_api_interrupts_is_checked=false` (ClearScript runs V8's
 nestable tasks and its own calls from its interrupt callback). Apart from local time, the changes keep the language's answers: `test/Smoke`

@@ -1,0 +1,36 @@
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3129,7 +3129,7 @@
+ // call: 1 when made, 0 outside a context.
+ namespace Ssrs2Interceptors
+ {
+-    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4 };
++    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4, kNonMasking = 8 };
+ 
+     static v8::Local<v8::Value> Key(v8::Isolate*, v8::Local<v8::Name> name) { return name; }
+     static v8::Local<v8::Value> Key(v8::Isolate* isolate, uint32_t index) { return v8::Integer::NewFromUnsigned(isolate, index); }
+@@ -3304,7 +3304,11 @@
+         {
+             instanceTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(Get<v8::Local<v8::Name>>, Set<v8::Local<v8::Name>>, Query<v8::Local<v8::Name>>,
+                 Delete<v8::Local<v8::Name>>, Keys<false>, Define<v8::Local<v8::Name>>, Descriptor<v8::Local<v8::Name>>, handler,
+-                v8::PropertyHandlerFlags::kOnlyInterceptStrings));
++                // (0025, flags 8: the named interceptor asked only for a name neither the object nor its prototype chain
++                // has, v8::PropertyHandlerFlags::kNonMasking: a document's named properties, found after its own and its
++                // interfaces' members, which are then read at an ordinary object's speed)
++                (flags & kNonMasking) ? static_cast<v8::PropertyHandlerFlags>(static_cast<int>(v8::PropertyHandlerFlags::kOnlyInterceptStrings)
++                    | static_cast<int>(v8::PropertyHandlerFlags::kNonMasking)) : v8::PropertyHandlerFlags::kOnlyInterceptStrings));
+         }
+         if (flags & kUndetectable)
+         {
+@@ -3337,6 +3341,11 @@
+     {
+         return 0;
+     }
++    // (0025: the factory says it takes flags 8, non-masking named interceptors; a script asks before it relies on them)
++    if (function->Set(context, v8::String::NewFromUtf8Literal(isolate, "nonMasking"), v8::True(isolate)).IsNothing())
++    {
++        return 0;
++    }
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 
