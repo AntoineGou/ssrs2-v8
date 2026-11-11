@@ -1,0 +1,170 @@
+--- a/ClearScriptV8/StdString.cpp
++++ b/ClearScriptV8/StdString.cpp
+@@ -7,47 +7,142 @@
+ // StdString implementation
+ //-----------------------------------------------------------------------------
+ 
+-size_t StdString::GetDigest() const
++// SSRS2 (0026): the digest of a script's text, 64 bits made 32 bytes a step in four lanes (XXH64's rounds, seed 0;
++// Yann Collet's algorithm, written here), in place of FNV-1a a byte a step. The library asks it of a script's whole
++// text at each compile and execute of text, and of each module's text every time an import of it is resolved, to look
++// the compiled script or module up: SSRS2's HTML engine resolves a page's static imports again at every dynamic
++// import, and FNV-1a's one multiplication a byte (about 1 GB/s) was 1% of the time of its 55 recorded pages, 2% to 4%
++// of the pages made of modules (a 500,000-character chunk hashed in 1.2 ms, each time it is imported). The digests
++// are compared with each other only (the script and module caches): none is kept outside the process, and the managed
++// side's own digest (MiscHelpers.GetDigest, its CommonJS modules' key) is never compared with this one.
++
++namespace
+ {
+-    return (sizeof(size_t) == 4) ? static_cast<size_t>(GetDigestAsUInt32()) : static_cast<size_t>(GetDigestAsUInt64());
+-}
++    constexpr uint64_t DigestPrime1 = 11400714785074694791ULL;
++    constexpr uint64_t DigestPrime2 = 14029467366897019727ULL;
++    constexpr uint64_t DigestPrime3 = 1609587929392839161ULL;
++    constexpr uint64_t DigestPrime4 = 9650029242287828579ULL;
++    constexpr uint64_t DigestPrime5 = 2870177450012600261ULL;
+ 
+-//-----------------------------------------------------------------------------
++    inline uint64_t DigestRotate(uint64_t value, int bits)
++    {
++        return (value << bits) | (value >> (64 - bits));
++    }
+ 
+-uint32_t StdString::GetDigestAsUInt32() const
+-{
+-    uint32_t digest { 2166136261UL };
+-    const uint32_t prime { 16777619UL };
++    inline uint64_t DigestRead64(const uint8_t* pBytes)
++    {
++        uint64_t value;
++        memcpy(&value, pBytes, sizeof(value));
++        return value;
++    }
+ 
+-    auto pBytes = reinterpret_cast<const uint8_t*>(m_Value.data());
+-    size_t length { m_Value.length() * sizeof(StdChar) };
++    inline uint32_t DigestRead32(const uint8_t* pBytes)
++    {
++        uint32_t value;
++        memcpy(&value, pBytes, sizeof(value));
++        return value;
++    }
+ 
+-    for (size_t index = 0; index < length; index++)
++    inline uint64_t DigestRound(uint64_t lane, uint64_t input)
+     {
+-        digest ^= pBytes[index];
+-        digest *= prime;
++        lane += input * DigestPrime2;
++        lane = DigestRotate(lane, 31);
++        return lane * DigestPrime1;
+     }
+ 
+-    return digest;
++    inline uint64_t DigestMerge(uint64_t digest, uint64_t lane)
++    {
++        digest ^= DigestRound(0, lane);
++        return digest * DigestPrime1 + DigestPrime4;
++    }
++
++    uint64_t Digest64(const uint8_t* pBytes, size_t length)
++    {
++        const uint8_t* pEnd = pBytes + length;
++        uint64_t digest;
++
++        if (length >= 32)
++        {
++            const uint8_t* pLimit = pEnd - 32;
++            uint64_t lane1 = DigestPrime1 + DigestPrime2;
++            uint64_t lane2 = DigestPrime2;
++            uint64_t lane3 = 0;
++            uint64_t lane4 = 0 - DigestPrime1;
++
++            do
++            {
++                lane1 = DigestRound(lane1, DigestRead64(pBytes));
++                lane2 = DigestRound(lane2, DigestRead64(pBytes + 8));
++                lane3 = DigestRound(lane3, DigestRead64(pBytes + 16));
++                lane4 = DigestRound(lane4, DigestRead64(pBytes + 24));
++                pBytes += 32;
++            }
++            while (pBytes <= pLimit);
++
++            digest = DigestRotate(lane1, 1) + DigestRotate(lane2, 7) + DigestRotate(lane3, 12) + DigestRotate(lane4, 18);
++            digest = DigestMerge(digest, lane1);
++            digest = DigestMerge(digest, lane2);
++            digest = DigestMerge(digest, lane3);
++            digest = DigestMerge(digest, lane4);
++        }
++        else
++        {
++            digest = DigestPrime5;
++        }
++
++        digest += static_cast<uint64_t>(length);
++
++        while (pBytes + 8 <= pEnd)
++        {
++            digest ^= DigestRound(0, DigestRead64(pBytes));
++            digest = DigestRotate(digest, 27) * DigestPrime1 + DigestPrime4;
++            pBytes += 8;
++        }
++
++        if (pBytes + 4 <= pEnd)
++        {
++            digest ^= static_cast<uint64_t>(DigestRead32(pBytes)) * DigestPrime1;
++            digest = DigestRotate(digest, 23) * DigestPrime2 + DigestPrime3;
++            pBytes += 4;
++        }
++
++        while (pBytes < pEnd)
++        {
++            digest ^= (*pBytes) * DigestPrime5;
++            digest = DigestRotate(digest, 11) * DigestPrime1;
++            pBytes++;
++        }
++
++        digest ^= digest >> 33;
++        digest *= DigestPrime2;
++        digest ^= digest >> 29;
++        digest *= DigestPrime3;
++        digest ^= digest >> 32;
++        return digest;
++    }
+ }
+ 
+ //-----------------------------------------------------------------------------
+ 
+-uint64_t StdString::GetDigestAsUInt64() const
++size_t StdString::GetDigest() const
+ {
+-    uint64_t digest { 14695981039346656037ULL };
+-    const uint64_t prime { 1099511628211ULL };
++    return (sizeof(size_t) == 4) ? static_cast<size_t>(GetDigestAsUInt32()) : static_cast<size_t>(GetDigestAsUInt64());
++}
+ 
+-    auto pBytes = reinterpret_cast<const uint8_t*>(m_Value.data());
+-    size_t length { m_Value.length() * sizeof(StdChar) };
++//-----------------------------------------------------------------------------
+ 
+-    for (size_t index = 0; index < length; index++)
+-    {
+-        digest ^= pBytes[index];
+-        digest *= prime;
+-    }
++uint32_t StdString::GetDigestAsUInt32() const
++{
++    // (the 64 bits folded: a 32-bit process's size_t)
++    auto digest = GetDigestAsUInt64();
++    return static_cast<uint32_t>(digest ^ (digest >> 32));
++}
+ 
+-    return digest;
++//-----------------------------------------------------------------------------
++
++uint64_t StdString::GetDigestAsUInt64() const
++{
++    return Digest64(reinterpret_cast<const uint8_t*>(m_Value.data()), m_Value.length() * sizeof(StdChar));
+ }
+ 
+ //-----------------------------------------------------------------------------

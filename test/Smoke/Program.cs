@@ -57,12 +57,14 @@ var prototypeSetup = PrototypeSetups.Check(Directory.GetFiles(AppContext.BaseDir
 Console.WriteLine($"prototype setup: {prototypeSetup}");
 var scriptIds = FunctionScriptIds.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"function script id: {scriptIds}");
+var digests = TextDigests.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"text digest: {digests}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
-    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected) return 0;
+    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected) return 0;
 Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}");
 return 1;
 
@@ -754,5 +756,38 @@ static unsafe class FunctionScriptIds
         engine.Execute("globalThis.f = function f() {}; globalThis.g = () => 1;");
         return installed + ":" + engine.Evaluate("const id = ssrs2.functionScriptId; function h() {}" +
             "[id(f) > 0, id(f) === id(g), id(h) !== id(f), id(f.bind(null)), id(42)].join(':')");
+    }
+}
+
+// patches/clearscript/0026: the digest of a script's text (the script and module caches' key) is XXH64 of its UTF-16
+// bytes, seed 0 (a 32-bit process's: its halves folded), in place of FNV-1a a byte a step: known answers for texts of
+// 0, 1, 3 and 89 characters (the last past 32 bytes: the four lanes, then a tail of 8, 4 and single bytes), a text that
+// differs by one character another digest, and the same text the same.
+static unsafe class TextDigests
+{
+    public const string Expected = "ef46db3751d8e999:e513e02c99167f96:aff0f2a2f8b32731:49bb1df8f8e706ad:True:True";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "StdString_New", out var newExport) || !NativeLibrary.TryGetExport(handle, "StdString_Delete", out var deleteExport)
+            || !NativeLibrary.TryGetExport(handle, "V8UnitTestSupport_GetTextDigest", out var digestExport)) return "export missing";
+        var make = (delegate* unmanaged[Stdcall]<char*, int, nint>)newExport;
+        var free = (delegate* unmanaged[Stdcall]<nint, void>)deleteExport;
+        var digest = (delegate* unmanaged[Stdcall]<nint, nuint>)digestExport;
+        ulong Of(string text)
+        {
+            fixed (char* p = text)
+            {
+                var s = make(p, text.Length);
+                try { return digest(s); }
+                finally { free(s); }
+            }
+        }
+        // (a 32-bit process's digest is the 64 bits folded)
+        string Hex(ulong d, ulong whole) => (IntPtr.Size == 8 ? d == whole : d == (uint)(whole ^ (whole >> 32))) ? whole.ToString("x16") : "other " + d.ToString("x");
+        string longer = "const answer = 42; // 中文 耀￿ " + new string('x', 61);
+        return Hex(Of(""), 0xef46db3751d8e999) + ":" + Hex(Of("a"), 0xe513e02c99167f96) + ":" + Hex(Of("abc"), 0xaff0f2a2f8b32731) + ":" + Hex(Of(longer), 0x49bb1df8f8e706ad)
+            + ":" + (Of(longer) != Of(longer.Replace('耀', '\u0000'))) + ":" + (Of(longer) == Of(new string(longer.AsSpan())));
     }
 }
