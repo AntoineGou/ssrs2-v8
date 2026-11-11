@@ -770,8 +770,12 @@ static unsafe class TextDigests
     public static string Check(string library)
     {
         var handle = NativeLibrary.Load(library);
-        if (!NativeLibrary.TryGetExport(handle, "StdString_New", out var newExport) || !NativeLibrary.TryGetExport(handle, "StdString_Delete", out var deleteExport)
-            || !NativeLibrary.TryGetExport(handle, "V8UnitTestSupport_GetTextDigest", out var digestExport)) return "export missing";
+        // (ClearScript's own entry points are stdcall: a 32-bit Windows library exports them decorated, _Name@bytes of
+        // arguments, which its P/Invokes find by themselves and a lookup by name does not)
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("StdString_New", 8, out var newExport) || !Export("StdString_Delete", 4, out var deleteExport)
+            || !Export("V8UnitTestSupport_GetTextDigest", 4, out var digestExport)) return "export missing";
         var make = (delegate* unmanaged[Stdcall]<char*, int, nint>)newExport;
         var free = (delegate* unmanaged[Stdcall]<nint, void>)deleteExport;
         var digest = (delegate* unmanaged[Stdcall]<nint, nuint>)digestExport;
