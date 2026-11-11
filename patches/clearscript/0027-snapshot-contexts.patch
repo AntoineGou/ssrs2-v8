@@ -1,0 +1,545 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+index 79cc2d4..05de31c 100644
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -410,6 +410,57 @@ V8ContextImpl::V8ContextImpl(V8IsolateImpl* pIsolateImpl, const StdString& name)
+ // SSRS2 (0021): see V8ContextImpl.h.
+ thread_local bool g_Ssrs2ImmutableGlobalPrototype = false;
+ 
++// SSRS2 (0027): see V8ContextImpl.h.
++thread_local bool g_Ssrs2SnapshotContextRequested = false;
++thread_local bool g_Ssrs2SnapshotContextMade = false;
++
++v8::Local<v8::ObjectTemplate> V8ContextImpl::Ssrs2CreateGlobalTemplate(v8::Isolate* pIsolate, bool immutablePrototype)
++{
++    auto hGlobalTemplate = v8::ObjectTemplate::New(pIsolate);
++    hGlobalTemplate->SetInternalFieldCount(1);
++    if (immutablePrototype)
++    {
++        hGlobalTemplate->SetImmutableProto();
++    }
++    hGlobalTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(GetGlobalProperty, SetGlobalProperty, QueryGlobalProperty, DeleteGlobalProperty, GetGlobalPropertyNames, v8::Local<v8::Value>(), v8::PropertyHandlerFlags::kNonMasking));
++    hGlobalTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(GetGlobalProperty, SetGlobalProperty, QueryGlobalProperty, DeleteGlobalProperty, GetGlobalPropertyIndices));
++    return hGlobalTemplate;
++}
++
++// (0024's prototype setup function, V8SplitProxyNative.cpp)
++void Ssrs2PrototypeSetup(const v8::FunctionCallbackInfo<v8::Value>& info);
++
++const intptr_t* V8ContextImpl::Ssrs2GetExternalReferences()
++{
++    // (each handler by its own signature: the names are overloaded, by name and by index)
++    using NamedGetter = v8::Intercepted (*)(v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>&);
++    using NamedSetter = v8::Intercepted (*)(v8::Local<v8::Name>, v8::Local<v8::Value>, const v8::PropertyCallbackInfo<v8::Boolean>&);
++    using NamedQuery = v8::Intercepted (*)(v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Integer>&);
++    using NamedDeleter = v8::Intercepted (*)(v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Boolean>&);
++    using IndexedGetter = v8::Intercepted (*)(uint32_t, const v8::PropertyCallbackInfo<v8::Value>&);
++    using IndexedSetter = v8::Intercepted (*)(uint32_t, v8::Local<v8::Value>, const v8::PropertyCallbackInfo<v8::Boolean>&);
++    using IndexedQuery = v8::Intercepted (*)(uint32_t, const v8::PropertyCallbackInfo<v8::Integer>&);
++    using IndexedDeleter = v8::Intercepted (*)(uint32_t, const v8::PropertyCallbackInfo<v8::Boolean>&);
++    using Enumerator = void (*)(const v8::PropertyCallbackInfo<v8::Array>&);
++    static const intptr_t s_References[] =
++    {
++        reinterpret_cast<intptr_t>(static_cast<NamedGetter>(GetGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<NamedSetter>(SetGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<NamedQuery>(QueryGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<NamedDeleter>(DeleteGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<Enumerator>(GetGlobalPropertyNames)),
++        reinterpret_cast<intptr_t>(static_cast<IndexedGetter>(GetGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<IndexedSetter>(SetGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<IndexedQuery>(QueryGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<IndexedDeleter>(DeleteGlobalProperty)),
++        reinterpret_cast<intptr_t>(static_cast<Enumerator>(GetGlobalPropertyIndices)),
++        // (the prototype setup function the snapshot's script is given: a script that kept it is read back whole)
++        reinterpret_cast<intptr_t>(Ssrs2PrototypeSetup),
++        0
++    };
++    return s_References;
++}
++
+ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvEngine, const StdString& name, const Options& options):
+     m_Name(name),
+     m_pvEngine(pvEngine),
+@@ -450,16 +501,27 @@ V8ContextImpl::V8ContextImpl(SharedPtr<V8IsolateImpl>&& spIsolateImpl, void* pvE
+         }
+         else
+         {
+-            auto hGlobalTemplate = CreateObjectTemplate();
+-            hGlobalTemplate->SetInternalFieldCount(1);
+-            if (g_Ssrs2ImmutableGlobalPrototype)
++            // SSRS2 (0027): the context read from the process's blob where the host asked for it, the isolate was
++            // started from the blob and the blob's context has this global (its prototype immutable or not, as now);
++            // else made anew, with the same template the blob's maker uses. Either way the context's pointer goes in
++            // its global's internal field and the rest of the constructor is the same: nothing of one process is in
++            // a blob.
++            g_Ssrs2SnapshotContextMade = false;
++            if (g_Ssrs2SnapshotContextRequested && m_spIsolateImpl->Ssrs2HasSnapshotContext(g_Ssrs2ImmutableGlobalPrototype))
++            {
++                v8::Local<v8::Context> hFromSnapshot;
++                if (v8::Context::FromSnapshot(m_spIsolateImpl->Ssrs2GetIsolate(), 0).ToLocal(&hFromSnapshot))
++                {
++                    m_hContext = CreatePersistent(hFromSnapshot);
++                    g_Ssrs2SnapshotContextMade = true;
++                }
++            }
++
++            if (m_hContext.IsEmpty())
+             {
+-                hGlobalTemplate->SetImmutableProto();
++                m_hContext = CreatePersistent(CreateContext(nullptr, Ssrs2CreateGlobalTemplate(m_spIsolateImpl->Ssrs2GetIsolate(), g_Ssrs2ImmutableGlobalPrototype)));
+             }
+-            hGlobalTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(GetGlobalProperty, SetGlobalProperty, QueryGlobalProperty, DeleteGlobalProperty, GetGlobalPropertyNames, v8::Local<v8::Value>(), v8::PropertyHandlerFlags::kNonMasking));
+-            hGlobalTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(GetGlobalProperty, SetGlobalProperty, QueryGlobalProperty, DeleteGlobalProperty, GetGlobalPropertyIndices));
+ 
+-            m_hContext = CreatePersistent(CreateContext(nullptr, hGlobalTemplate));
+             if (!m_hContext.IsEmpty())
+             {
+                 auto hGlobal = m_hContext->Global();
+@@ -2083,6 +2145,16 @@ v8::MaybeLocal<v8::Promise> V8ContextImpl::ImportModule(v8::Local<v8::Data> hHos
+         }
+     }
+ 
++    // SSRS2 (0027): code of a script that came with a snapshot blob, which no context of this isolate compiled: V8 has no
++    // host-defined options for it. The script the host keeps to stand for the blob's is its referrer (V8IsolateImpl.h).
++    if ((pSourceDocumentInfo == nullptr) && (hHostDefinedOptions.IsEmpty() || (hHostDefinedOptions.As<v8::PrimitiveArray>()->Length() == 0)))
++    {
++        if (m_spIsolateImpl->Ssrs2TryGetSnapshotReferrer(sourceDocumentInfo))
++        {
++            pSourceDocumentInfo = &sourceDocumentInfo;
++        }
++    }
++
+     return ImportModule(pSourceDocumentInfo, hSpecifier);
+ }
+ 
+diff --git a/ClearScriptV8/V8ContextImpl.h b/ClearScriptV8/V8ContextImpl.h
+index 5d067eb..f5dc1d3 100644
+--- a/ClearScriptV8/V8ContextImpl.h
++++ b/ClearScriptV8/V8ContextImpl.h
+@@ -13,6 +13,12 @@ class V8WeakContextBinding;
+ // (Ssrs2_SetImmutableGlobalPrototype).
+ extern thread_local bool g_Ssrs2ImmutableGlobalPrototype;
+ 
++// SSRS2 (0027): contexts made from a blob. While the first is set, a context this thread makes comes from the process's
++// snapshot blob (V8IsolateImpl::Ssrs2MakeSnapshot) where its isolate was started from it and the blob's context has the
++// global the context asks for; the second says whether the last context this thread made did (Ssrs2_SnapshotContext).
++extern thread_local bool g_Ssrs2SnapshotContextRequested;
++extern thread_local bool g_Ssrs2SnapshotContextMade;
++
+ //-----------------------------------------------------------------------------
+ // V8ContextImpl
+ //-----------------------------------------------------------------------------
+@@ -23,6 +29,14 @@ class V8ContextImpl final: public V8Context
+ 
+ public:
+ 
++    // SSRS2 (0027): the template of a context's global object where it has global members (an internal field for the
++    // context, the named and indexed handlers), its prototype immutable when asked (0021): the one function the
++    // context's constructor and the blob's maker both call, so that a context read from a blob has the global a
++    // context made here would have. And the addresses V8 needs declared to write and read such a global: the
++    // handlers', ended by 0 (v8::Isolate::CreateParams::external_references).
++    static v8::Local<v8::ObjectTemplate> Ssrs2CreateGlobalTemplate(v8::Isolate* pIsolate, bool immutablePrototype);
++    static const intptr_t* Ssrs2GetExternalReferences();
++
+     // SSRS2 (0017): what the context's host callbacks are given as their data. A context's functions and host objects
+     // outlive its teardown when its script still runs: a task V8 posted for the isolate (an asynchronous WebAssembly
+     // compile's result, its promise's reactions) after the engine was disposed called a host function, whose data was the
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index f20488d..7011c8f 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -160,9 +160,37 @@ int V8Platform::NumberOfWorkerThreads()
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2 (0027): an isolate that is not one of this library's own, the snapshot creator's (V8IsolateImpl::
++// Ssrs2MakeSnapshot), has no V8IsolateImpl to run its tasks. It lives for one script's run and one blob's writing: the
++// tasks V8 posts to its own thread are dropped (none is run before it goes), and those for a worker thread run on a
++// thread of their own.
++class Ssrs2DroppedTaskRunner final: public v8::TaskRunner
++{
++public:
++
++    virtual bool IdleTasksEnabled() override { return false; }
++    virtual bool NonNestableTasksEnabled() const override { return true; }
++    virtual bool NonNestableDelayedTasksEnabled() const override { return true; }
++
++protected:
++
++    virtual void PostTaskImpl(std::unique_ptr<v8::Task> /*upTask*/, const v8::SourceLocation& /*location*/) override {}
++    virtual void PostNonNestableTaskImpl(std::unique_ptr<v8::Task> /*upTask*/, const v8::SourceLocation& /*location*/) override {}
++    virtual void PostDelayedTaskImpl(std::unique_ptr<v8::Task> /*upTask*/, double /*delayInSeconds*/, const v8::SourceLocation& /*location*/) override {}
++    virtual void PostNonNestableDelayedTaskImpl(std::unique_ptr<v8::Task> /*upTask*/, double /*delayInSeconds*/, const v8::SourceLocation& /*location*/) override {}
++    virtual void PostIdleTaskImpl(std::unique_ptr<v8::IdleTask> /*upTask*/, const v8::SourceLocation& /*location*/) override {}
++};
++
+ std::shared_ptr<v8::TaskRunner> V8Platform::GetForegroundTaskRunner(v8::Isolate* pIsolate, v8::TaskPriority /*priority*/)
+ {
+-    return V8IsolateImpl::GetInstanceFromIsolate(pIsolate)->GetForegroundTaskRunner();
++    auto pIsolateImpl = V8IsolateImpl::GetInstanceFromIsolate(pIsolate);
++    if (pIsolateImpl == nullptr)
++    {
++        static std::shared_ptr<v8::TaskRunner> s_spDropped = std::make_shared<Ssrs2DroppedTaskRunner>();
++        return s_spDropped;
++    }
++
++    return pIsolateImpl->GetForegroundTaskRunner();
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -181,9 +209,14 @@ void V8Platform::PostTaskOnWorkerThreadImpl(v8::TaskPriority /*priority*/, std::
+     {
+         upTask->Run();
+     }
++    else if (auto pIsolateImpl = V8IsolateImpl::GetInstanceFromIsolate(pIsolate))
++    {
++        pIsolateImpl->RunTaskAsync(std::move(upTask));
++    }
+     else
+     {
+-        V8IsolateImpl::GetInstanceFromIsolate(pIsolate)->RunTaskAsync(std::move(upTask));
++        // SSRS2 (0027): the snapshot creator's isolate (see Ssrs2DroppedTaskRunner).
++        std::thread([pTask = upTask.release()] { std::unique_ptr<v8::Task> upOwned(pTask); upOwned->Run(); }).detach();
+     }
+ }
+ 
+@@ -194,7 +227,11 @@ void V8Platform::PostDelayedTaskOnWorkerThreadImpl(v8::TaskPriority /*priority*/
+     auto pIsolate = v8::Isolate::GetCurrent();
+     if (pIsolate != nullptr)
+     {
+-        V8IsolateImpl::GetInstanceFromIsolate(pIsolate)->RunTaskDelayed(std::move(upTask), delayInSeconds);
++        // SSRS2 (0027): not the snapshot creator's isolate, which waits for nothing.
++        if (auto pIsolateImpl = V8IsolateImpl::GetInstanceFromIsolate(pIsolate))
++        {
++            pIsolateImpl->RunTaskDelayed(std::move(upTask), delayInSeconds);
++        }
+     }
+ }
+ 
+@@ -500,6 +537,178 @@ static const size_t s_StackBreathingRoom = static_cast<size_t>(16 * 1024);
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2 (0027): the process's snapshot blob (see V8IsolateImpl.h), null until one is made, and whether its context's
++// global has an immutable prototype.
++static std::atomic<const v8::StartupData*> s_Ssrs2SnapshotBlob(nullptr);
++static bool s_Ssrs2SnapshotImmutablePrototype = false;
++static std::string s_Ssrs2SnapshotReferrer;
++
++#include "v8-ssrs2.h"
++
++// (0024's prototype setup function, V8SplitProxyNative.cpp)
++void Ssrs2PrototypeSetup(const v8::FunctionCallbackInfo<v8::Value>& info);
++
++// (one blob a process: made, or taken, under this lock)
++static std::mutex s_Ssrs2SnapshotMutex;
++
++size_t V8IsolateImpl::Ssrs2MakeSnapshot(const uint16_t* pName, int nameLength, const uint16_t* pCode, int codeLength, bool immutablePrototype, const char* pReferrer) noexcept
++{
++    std::lock_guard<std::mutex> lock(s_Ssrs2SnapshotMutex);
++    if (auto pExisting = s_Ssrs2SnapshotBlob.load())
++    {
++        return static_cast<size_t>(pExisting->raw_size);
++    }
++
++    if ((pName == nullptr) || (pCode == nullptr) || (nameLength < 0) || (codeLength < 0))
++    {
++        return 0;
++    }
++
++    V8Platform::GetInstance().EnsureInitialized();
++
++    std::unique_ptr<v8::ArrayBuffer::Allocator> upAllocator(v8::ArrayBuffer::Allocator::NewDefaultAllocator());
++    v8::Isolate::CreateParams params;
++    params.array_buffer_allocator = upAllocator.get();
++    params.external_references = V8ContextImpl::Ssrs2GetExternalReferences();
++
++    v8::StartupData blob { nullptr, 0 };
++    auto succeeded = false;
++    {
++        // (the creator owns its isolate and enters it; V8 lets an isolate that writes a snapshot be used without a
++        // locker)
++        v8::SnapshotCreator creator(params);
++        auto pIsolate = creator.GetIsolate();
++        {
++            v8::HandleScope handleScope(pIsolate);
++
++            // (the context V8 makes for an ordinary v8::Context::New: untouched)
++            creator.SetDefaultContext(v8::Context::New(pIsolate));
++
++            auto hContext = v8::Context::New(pIsolate, nullptr, V8ContextImpl::Ssrs2CreateGlobalTemplate(pIsolate, immutablePrototype));
++            if (!hContext.IsEmpty())
++            {
++                {
++                    v8::Context::Scope contextScope(hContext);
++                    v8::TryCatch tryCatch(pIsolate);
++                    v8::Local<v8::String> hName;
++                    v8::Local<v8::String> hCode;
++                    v8::Local<v8::Script> hScript;
++                    v8::Local<v8::Value> hResult;
++
++                    // (the prototype setup function a context's script gets from Ssrs2_InstallPrototypeSetup, here the
++                    // global's ssrs2PrototypeSetup while the script runs: a script that redefines the members of many
++                    // prototypes leaves them fast in the blob, as it leaves them in a context it runs in. Taken off
++                    // the global before the blob is written.)
++                    auto hSetupName = v8::String::NewFromUtf8Literal(pIsolate, "ssrs2PrototypeSetup");
++                    v8::Local<v8::Function> hSetup;
++                    auto hasSetup = v8::Function::New(hContext, Ssrs2PrototypeSetup, v8::Local<v8::Value>(), 2, v8::ConstructorBehavior::kThrow).ToLocal(&hSetup) &&
++                        hContext->Global()->Set(hContext, hSetupName, hSetup).FromMaybe(false);
++
++                    if (v8::String::NewFromTwoByte(pIsolate, pName, v8::NewStringType::kNormal, nameLength).ToLocal(&hName) &&
++                        v8::String::NewFromTwoByte(pIsolate, pCode, v8::NewStringType::kNormal, codeLength).ToLocal(&hCode))
++                    {
++                        v8::ScriptOrigin origin(hName);
++                        v8::ScriptCompiler::Source source(hCode, origin);
++                        succeeded = v8::ScriptCompiler::Compile(hContext, &source).ToLocal(&hScript) && hScript->Run(hContext).ToLocal(&hResult);
++                    }
++
++                    if (hasSetup)
++                    {
++                        hContext->Global()->Delete(hContext, hSetupName).FromMaybe(false);
++                    }
++
++                    // (a script that threw between its two calls: the mode is the thread's)
++                    v8::ssrs2::SetPrototypeSetupMode(false);
++
++                    // (no job may wait in a heap V8 writes)
++                    pIsolate->PerformMicrotaskCheckpoint();
++                }
++
++                if (succeeded)
++                {
++                    creator.AddContext(hContext);
++                }
++            }
++        }
++
++        // (functions keep the bytecode the script's run compiled: a context read from the blob compiles none of it again)
++        blob = creator.CreateBlob(v8::SnapshotCreator::FunctionCodeHandling::kKeep);
++    }
++
++    if (!succeeded || (blob.data == nullptr) || (blob.raw_size <= 0))
++    {
++        delete[] blob.data;
++        return 0;
++    }
++
++    s_Ssrs2SnapshotImmutablePrototype = immutablePrototype;
++    s_Ssrs2SnapshotReferrer = (pReferrer != nullptr) ? pReferrer : "";
++    s_Ssrs2SnapshotBlob.store(new v8::StartupData(blob));
++    return static_cast<size_t>(blob.raw_size);
++}
++
++size_t V8IsolateImpl::Ssrs2CopySnapshot(char* pBuffer, size_t capacity) noexcept
++{
++    auto pBlob = s_Ssrs2SnapshotBlob.load();
++    if (pBlob == nullptr)
++    {
++        return 0;
++    }
++
++    auto size = static_cast<size_t>(pBlob->raw_size);
++    if ((pBuffer != nullptr) && (capacity >= size))
++    {
++        memcpy(pBuffer, pBlob->data, size);
++    }
++
++    return size;
++}
++
++size_t V8IsolateImpl::Ssrs2UseSnapshot(const char* pData, size_t size, bool immutablePrototype, const char* pReferrer) noexcept
++{
++    std::lock_guard<std::mutex> lock(s_Ssrs2SnapshotMutex);
++    if (s_Ssrs2SnapshotBlob.load() != nullptr)
++    {
++        return 0;
++    }
++
++    if ((pData == nullptr) || (size == 0) || (size > static_cast<size_t>(INT32_MAX)))
++    {
++        return 0;
++    }
++
++    V8Platform::GetInstance().EnsureInitialized();
++
++    auto pCopy = new char[size];
++    memcpy(pCopy, pData, size);
++    v8::StartupData blob { pCopy, static_cast<int>(size) };
++
++    // (a blob of another V8 version is refused here, where V8 would end the process when an isolate starts from it)
++    if (!blob.IsValid())
++    {
++        delete[] pCopy;
++        return 0;
++    }
++
++    s_Ssrs2SnapshotImmutablePrototype = immutablePrototype;
++    s_Ssrs2SnapshotReferrer = (pReferrer != nullptr) ? pReferrer : "";
++    s_Ssrs2SnapshotBlob.store(new v8::StartupData(blob));
++    return size;
++}
++
++bool V8IsolateImpl::Ssrs2HasSnapshotContext(bool immutablePrototype) const
++{
++    return m_Ssrs2StartedFromSnapshot && (s_Ssrs2SnapshotImmutablePrototype == immutablePrototype);
++}
++
++bool V8IsolateImpl::Ssrs2TryGetSnapshotReferrer(V8DocumentInfo& documentInfo)
++{
++    // (the name is written once, before the blob is published, and an isolate started from the blob is made after)
++    return m_Ssrs2StartedFromSnapshot && !s_Ssrs2SnapshotReferrer.empty() && Ssrs2TryGetKeptScriptInfoByName(StdString(s_Ssrs2SnapshotReferrer.c_str()), documentInfo);
++}
++
++//-----------------------------------------------------------------------------
++
+ V8IsolateImpl::V8IsolateImpl(const StdString& name, const v8::ResourceConstraints* pConstraints, const Options& options):
+     m_Name(name),
+     m_CallWithLockLevel(0),
+@@ -521,7 +730,8 @@ V8IsolateImpl::V8IsolateImpl(const StdString& name, const v8::ResourceConstraint
+     m_pDocumentInfo(nullptr),
+     m_InternalPromiseHookEnabled(false),
+     m_IsOutOfMemory(false),
+-    m_Released(false)
++    m_Released(false),
++    m_Ssrs2StartedFromSnapshot(false)
+ {
+     V8Platform::GetInstance().EnsureInitialized();
+ 
+@@ -538,6 +748,14 @@ V8IsolateImpl::V8IsolateImpl(const StdString& name, const v8::ResourceConstraint
+             params.constraints.set_max_old_generation_size_in_bytes(pConstraints->max_old_generation_size_in_bytes());
+         }
+ 
++        // SSRS2 (0027): started from the process's blob once there is one (see V8IsolateImpl.h).
++        if (auto pBlob = s_Ssrs2SnapshotBlob.load())
++        {
++            params.snapshot_blob = pBlob;
++            params.external_references = V8ContextImpl::Ssrs2GetExternalReferences();
++            m_Ssrs2StartedFromSnapshot = true;
++        }
++
+         v8::Isolate::Initialize(m_upIsolate.get(), params);
+ 
+         m_upIsolate->AddNearHeapLimitCallback(HeapExpansionCallback, this);
+diff --git a/ClearScriptV8/V8IsolateImpl.h b/ClearScriptV8/V8IsolateImpl.h
+index 7d6e77c..1f1c6b0 100644
+--- a/ClearScriptV8/V8IsolateImpl.h
++++ b/ClearScriptV8/V8IsolateImpl.h
+@@ -149,6 +149,30 @@ public:
+     static V8IsolateImpl* GetInstanceFromIsolate(v8::Isolate* pIsolate);
+     static size_t GetInstanceCount();
+ 
++    // SSRS2 (0027): a snapshot blob for the process. Ssrs2MakeSnapshot runs a script in a context of an isolate of its
++    // own (V8's SnapshotCreator), whose global is made as a context's here is (V8ContextImpl::Ssrs2CreateGlobalTemplate),
++    // and keeps the blob V8 writes of it: the heap the script left, its functions with their bytecode. Every isolate
++    // made afterwards starts from the blob (Isolate::CreateParams::snapshot_blob, with the global's handlers as external
++    // references), and a context may then be read from it in place of being made and the script run in it
++    // (V8ContextImpl's constructor, v8::Context::FromSnapshot). Once a process; the blob's size in bytes, 0 when the
++    // script failed or V8 wrote none. The blob is of this V8 build, its flags and this machine: made in the process,
++    // it always matches.
++    // A script that came with the blob was compiled in no context of an isolate started from it: where V8 asks whose
++    // code imports a module, it has no host-defined options to name its document. The host then keeps, in each such
++    // isolate, a script under the resource name it gave here (pReferrer, UTF-8; null: none) to stand for it:
++    // Ssrs2TryGetSnapshotReferrer finds that script's document info (V8ContextImpl::ImportModule).
++    static size_t Ssrs2MakeSnapshot(const uint16_t* pName, int nameLength, const uint16_t* pCode, int codeLength, bool immutablePrototype, const char* pReferrer) noexcept;
++    // The blob's bytes, for a host that keeps them between processes: Ssrs2CopySnapshot answers the blob's size and
++    // copies it into a buffer that holds it; Ssrs2UseSnapshot takes a copy of such bytes as the process's blob, in
++    // place of making one (0: there is one already, or V8 says these are not of its version). The bytes must be those
++    // this very library wrote, for the same script, V8 flags and global: the host's to make sure, and that they are
++    // whole (V8 ends the process on a blob whose checksum fails).
++    static size_t Ssrs2CopySnapshot(char* pBuffer, size_t capacity) noexcept;
++    static size_t Ssrs2UseSnapshot(const char* pData, size_t size, bool immutablePrototype, const char* pReferrer) noexcept;
++    bool Ssrs2HasSnapshotContext(bool immutablePrototype) const;
++    bool Ssrs2TryGetSnapshotReferrer(V8DocumentInfo& documentInfo);
++    v8::Isolate* Ssrs2GetIsolate() const { return m_upIsolate.get(); }
++
+     const StdString& GetName() const { return m_Name; }
+     const Persistent<v8::Private>& GetHostObjectHolderKey() const { return m_hHostObjectHolderKey; }
+     const V8DocumentInfo* GetDocumentInfo() const { return m_pDocumentInfo; }
+@@ -732,6 +756,7 @@ private:
+     size_t m_StackWatchLevel;
+     size_t* m_pStackLimit;
+     SimpleMutex m_TerminateExecutionMutex;
++    bool m_Ssrs2StartedFromSnapshot; // SSRS2 (0027)
+     SimpleMutex m_Ssrs2KeptScriptInfosMutex;
+     std::unordered_map<uint64_t, std::pair<size_t, V8DocumentInfo>> m_Ssrs2KeptScriptInfos;
+     bool m_IsExecutionTerminating;
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 91b370d..4333b00 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3355,7 +3355,9 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallInterceptors(const char* holder, const char
+ // host's classes, every member of a used prototype redefined, took n * n); prototypeSetup(false, objects) ends that and
+ // makes each object of the array fast again once, answering how many are. Only how fast properties are found changes.
+ // globalThis[holder][name] made prototypeSetup, from inside a host call: 1 when made, 0 outside a context.
+-static void Ssrs2PrototypeSetup(const v8::FunctionCallbackInfo<v8::Value>& info)
++// (not static since 0027: V8IsolateImpl::Ssrs2MakeSnapshot gives it to the script it runs, and it is one of the
++// snapshot's external references)
++void Ssrs2PrototypeSetup(const v8::FunctionCallbackInfo<v8::Value>& info)
+ {
+     auto isolate = info.GetIsolate();
+     bool on = info.Length() > 0 && info[0]->BooleanValue(isolate);
+@@ -3438,6 +3440,55 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallFunctionScriptId(const char* holder, const
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 
++// Contexts from a blob (0027). Ssrs2_MakeSnapshot(name, nameLength, code, codeLength, referrer) runs the script
++// (UTF-16, under the resource name given) in a context of an isolate of its own, whose global is made as the contexts
++// this thread makes now are (Ssrs2_SetImmutableGlobalPrototype counts), and keeps the blob V8 writes of the heap the
++// script left (V8's SnapshotCreator; functions keep their bytecode): once a process, the blob's size in bytes, 0 when
++// the script threw or no blob was written. Every isolate made afterwards starts from the blob. referrer (UTF-8, or
++// null) is the resource name of a script the host keeps in each such isolate to stand for the blob's script where its
++// code imports a module: the blob's script was compiled in none of the isolate's contexts and has no document there. Ssrs2_SnapshotContext(1) then makes
++// the contexts this thread creates come from the blob (v8::Context::FromSnapshot) where their isolate was started
++// from it, in place of an empty context: what the script defined is there, nothing run; (0) ordinary ones again. It
++// answers whether the last context this thread made came from the blob. The blob holds JavaScript objects alone: a
++// script that leaves a host object, or anything of one process, has no place in it. It is of this V8 build, its flags
++// and this machine's architecture: made in the process that uses it.
++NATIVE_ENTRY_POINT(int) Ssrs2_MakeSnapshot(const uint16_t* name, int32_t nameLength, const uint16_t* code, int32_t codeLength, const char* referrer) noexcept
++{
++    auto size = V8IsolateImpl::Ssrs2MakeSnapshot(name, nameLength, code, codeLength, g_Ssrs2ImmutableGlobalPrototype, referrer);
++    return (size > static_cast<size_t>(INT32_MAX)) ? INT32_MAX : static_cast<int>(size);
++}
++
++// The blob between processes (0027). Ssrs2_SnapshotData(buffer, capacity) answers the size of the process's blob (0:
++// none) and copies its bytes into the buffer when it holds them. Ssrs2_UseSnapshot(data, size, referrer) takes a copy
++// of bytes Ssrs2_SnapshotData gave, in an earlier process of this very library, as the process's blob in place of
++// making one: its size, or 0 when the process has a blob already or V8 says the bytes are not of its version. The
++// global is the one contexts this thread makes now have, and referrer as for Ssrs2_MakeSnapshot. The host makes sure
++// the bytes are whole and are those of the same library, script and V8 flags: V8 ends the process on a blob it
++// cannot read.
++NATIVE_ENTRY_POINT(int) Ssrs2_SnapshotData(char* buffer, int32_t capacity) noexcept
++{
++    auto size = V8IsolateImpl::Ssrs2CopySnapshot(buffer, capacity < 0 ? 0 : static_cast<size_t>(capacity));
++    return (size > static_cast<size_t>(INT32_MAX)) ? INT32_MAX : static_cast<int>(size);
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_UseSnapshot(const char* data, int32_t size, const char* referrer) noexcept
++{
++    if (size <= 0)
++    {
++        return 0;
++    }
++
++    auto taken = V8IsolateImpl::Ssrs2UseSnapshot(data, static_cast<size_t>(size), g_Ssrs2ImmutableGlobalPrototype, referrer);
++    return static_cast<int>(taken);
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_SnapshotContext(int on) noexcept
++{
++    auto made = g_Ssrs2SnapshotContextMade;
++    g_Ssrs2SnapshotContextRequested = on != 0;
++    return made ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -3457,4 +3508,8 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallFunctionScriptId(const char* holder, const
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallInterceptors=_Ssrs2_InstallInterceptors@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallPrototypeSetup=_Ssrs2_InstallPrototypeSetup@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFunctionScriptId=_Ssrs2_InstallFunctionScriptId@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_MakeSnapshot=_Ssrs2_MakeSnapshot@20")
++#pragma comment(linker, "/EXPORT:Ssrs2_SnapshotContext=_Ssrs2_SnapshotContext@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_SnapshotData=_Ssrs2_SnapshotData@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_UseSnapshot=_Ssrs2_UseSnapshot@12")
+ #endif

@@ -3,11 +3,15 @@
 // our V8 has it (the workflow sets another zone first).
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Microsoft.ClearScript;
 using Microsoft.ClearScript.V8;
 
 // (ClearScript loads its library from the app's folder on .NET)
 foreach (var library in Directory.GetFiles(args[0], "ClearScriptV8.*"))
     File.Copy(library, Path.Combine(AppContext.BaseDirectory, Path.GetFileName(library)), overwrite: true);
+// (patches/clearscript/0027, first: a process makes one snapshot blob and every isolate made after it starts from it)
+var snapshot = SnapshotContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"snapshot contexts: {snapshot}");
 var script = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "smoke.js"));
 var expected = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "expected.txt")).Trim();
 using var engine = new V8ScriptEngine();
@@ -64,7 +68,7 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
-    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected) return 0;
+    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected) return 0;
 Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}");
 return 1;
 
@@ -793,5 +797,86 @@ static unsafe class TextDigests
         string longer = "const answer = 42; // 中文 耀￿ " + new string('x', 61);
         return Hex(Of(""), 0xef46db3751d8e999) + ":" + Hex(Of("a"), 0xe513e02c99167f96) + ":" + Hex(Of("abc"), 0xaff0f2a2f8b32731) + ":" + Hex(Of(longer), 0x49bb1df8f8e706ad)
             + ":" + (Of(longer) != Of(longer.Replace('耀', '\u0000'))) + ":" + (Of(longer) == Of(new string(longer.AsSpan())));
+    }
+}
+
+// patches/clearscript/0027: a context read from a blob. Ssrs2_MakeSnapshot runs a script in a context of an isolate of
+// V8's snapshot creator, whose global is made as the library makes a context's, and keeps the blob V8 writes; isolates
+// made afterwards start from it, and Ssrs2_SnapshotContext(1) makes the contexts a thread creates come from the blob.
+// (Its last argument names a script the host keeps to stand for the blob's where its code imports a module: none here.)
+// Checked with a toy script: what it defined is there in such a context without being run again (an object, a class
+// with a private field, a map holding a typed array, a closure's state), a second context of the blob has its own
+// copy, host objects still work in it, a context made without the request is empty, and an isolate made before the
+// blob (none here: the blob is made first) is not asked. While the script runs, the global's ssrs2PrototypeSetup is
+// 0024's prototype setup function (called here as a context's script calls it), gone from a context read from the
+// blob. Ssrs2_SnapshotData gives the blob's bytes out whole, and Ssrs2_UseSnapshot refuses bytes once the process has
+// a blob (that a later process starts from bytes kept in a file is checked by the host that keeps them: one blob a
+// process). The call must come first in the smoke test: the blob is made once a process and every later isolate starts
+// from it.
+static unsafe class SnapshotContexts
+{
+    public const string Expected = "made:True:53.5:1:2:1:host 5:undefined:False:function02:undefined:data True:use 0";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        // (ClearScript's own entry points are stdcall: a 32-bit Windows library exports them decorated, _Name@bytes of
+        // arguments, which a lookup by name does not find)
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_MakeSnapshot", 20, out var makeExport) || !Export("Ssrs2_SnapshotContext", 4, out var contextExport)) return "export missing";
+        var make = (delegate* unmanaged[Stdcall]<char*, int, char*, int, byte*, int>)makeExport;
+        var context = (delegate* unmanaged[Stdcall]<int, int>)contextExport;
+
+        // (V8 is started by ClearScript, which gives it its flags: a runtime made and left before the blob)
+        using (new V8Runtime("before")) { }
+        const string name = "toy.js";
+        const string code = """
+            globalThis.made = { answer: 42, add(a, b) { return a + b; } };
+            class Kept { #x = 7; get x() { return this.#x; } }
+            globalThis.Kept = Kept;
+            globalThis.table = new Map([['k', new Float64Array([1.5])]]);
+            globalThis.count = (() => { let n = 0; return () => ++n; })();
+            globalThis.setup = typeof ssrs2PrototypeSetup + ssrs2PrototypeSetup(true) + ssrs2PrototypeSetup(false, [Kept.prototype, {}]);
+            """;
+        int size;
+        fixed (char* n = name)
+        fixed (char* c = code)
+            size = make(n, name.Length, c, code.Length, null);
+        if (size <= 0) return "no blob";
+        // (the blob's bytes given out whole, and not taken again: the process has its blob)
+        string kept = "no data exports";
+        if (Export("Ssrs2_SnapshotData", 8, out var dataExport) && Export("Ssrs2_UseSnapshot", 12, out var useExport))
+        {
+            var data = (delegate* unmanaged[Stdcall]<byte*, int, int>)dataExport;
+            var use = (delegate* unmanaged[Stdcall]<byte*, int, byte*, int>)useExport;
+            var bytes = new byte[size];
+            fixed (byte* b = bytes)
+                kept = "data " + (data(null, 0) == size && data(b, size) == size && bytes.Any(x => x != 0)) + ":use " + use(b, size, null);
+        }
+
+        using var runtime = new V8Runtime("after");
+        context(1);
+        var first = runtime.CreateScriptEngine();
+        bool fromBlob = context(1) == 1;
+        var second = runtime.CreateScriptEngine();
+        context(0);
+        var plain = runtime.CreateScriptEngine();
+        bool plainFromBlob = context(0) == 1;
+        try
+        {
+            var sum = first.Evaluate("made.answer + made.add(1, 2) + new Kept().x + table.get('k')[0]");
+            var counts = first.Evaluate("count() + ':' + count()") + ":" + second.Evaluate("count()");
+            first.AddHostObject("given", new { Value = 5 });
+            var host = first.Evaluate("'host ' + given.Value");
+            return "made:" + fromBlob + ":" + Convert.ToString(sum, System.Globalization.CultureInfo.InvariantCulture) + ":" + counts + ":" + host + ":" + plain.Evaluate("typeof made") + ":" + plainFromBlob
+                + ":" + first.Evaluate("setup + ':' + typeof ssrs2PrototypeSetup") + ":" + kept;
+        }
+        finally
+        {
+            first.Dispose();
+            second.Dispose();
+            plain.Dispose();
+        }
     }
 }
