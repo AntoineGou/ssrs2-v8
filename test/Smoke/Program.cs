@@ -63,13 +63,16 @@ var scriptIds = FunctionScriptIds.Check(Directory.GetFiles(AppContext.BaseDirect
 Console.WriteLine($"function script id: {scriptIds}");
 var digests = TextDigests.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"text digest: {digests}");
+var arena = StringArenas.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"string arena: {arena}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
-    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}");
+    && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
+    && arena == StringArenas.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -878,5 +881,80 @@ static unsafe class SnapshotContexts
             second.Dispose();
             plain.Dispose();
         }
+    }
+}
+
+// patches/clearscript/0029: text an embedder and a context's scripts both read without copying it at each crossing.
+// Ssrs2_ArenaNew makes an arena (memory that never moves, a limit of bytes); Ssrs2_ArenaAdd adds a string of UTF-16
+// units and answers its number (from 1; one byte a character kept when all are Latin-1); Ssrs2_ArenaEntry gives an
+// entry's characters in place; Ssrs2_InstallArena, from inside a host call, makes globalThis[holder][name] = { text,
+// put, count }: text(number) is a string over the entry's own characters (a V8 external string; under 24 characters a
+// copy), put(string) has V8 write the string into the arena and answers its number, count() the entries.
+// Ssrs2_ArenaRelease ends the embedder's use: nothing more is added, and the memory lives until the last string over
+// it and the context's functions are collected. Checked with toy strings: short and long, Latin-1 and not, empty; a
+// script's own strings read back by the embedder in place; the numbers that are no entry; a limit reached; strings
+// still whole after the release and a collection.
+static unsafe class StringArenas
+{
+    public const string Expected = "1 2 3 4:short|true|true|true|:5 6:6:1 abc|2 3000 é語:undefined undefined:0 full:true 0 6";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        // (ClearScript's own entry points are stdcall: a 32-bit Windows library exports them decorated)
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ArenaNew", 8, out var newExport) || !Export("Ssrs2_ArenaAdd", 12, out var addExport) || !Export("Ssrs2_ArenaEntry", 16, out var entryExport)
+            || !Export("Ssrs2_ArenaCount", 4, out var countExport) || !Export("Ssrs2_ArenaRelease", 4, out var releaseExport) || !Export("Ssrs2_InstallArena", 12, out var installExport))
+            return "export missing";
+        var make = (delegate* unmanaged[Stdcall]<long, nint>)newExport;
+        var add = (delegate* unmanaged[Stdcall]<nint, char*, int, int>)addExport;
+        var entry = (delegate* unmanaged[Stdcall]<nint, int, void**, int*, int>)entryExport;
+        var count = (delegate* unmanaged[Stdcall]<nint, int>)countExport;
+        var release = (delegate* unmanaged[Stdcall]<nint, void>)releaseExport;
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, nint, int>)installExport;
+
+        int Add(nint arena, string text) { fixed (char* chars = text) return add(arena, chars, text.Length); }
+        string Read(nint arena, int number)
+        {
+            void* data; int length;
+            int kind = entry(arena, number, &data, &length);
+            if (kind == 0) return "none";
+            var text = kind == 2 ? new string((char*)data, 0, length) : string.Concat(new ReadOnlySpan<byte>(data, length).ToArray().Select(b => (char)b));
+            return kind + " " + (length > 40 ? length.ToString() : text);
+        }
+        bool Install(nint arena)
+        {
+            var h = System.Text.Encoding.UTF8.GetBytes("__toy\0"); var n = System.Text.Encoding.UTF8.GetBytes("arena\0");
+            fixed (byte* hp = h, np = n) return install(hp, np, arena) == 1;
+        }
+
+        string longLatin = new string('x', 2999) + "é", longWide = new string('語', 2999) + "a";
+        var arena = make(0);
+        string numbers = $"{Add(arena, "short")} {Add(arena, longLatin)} {Add(arena, longWide)} {Add(arena, "")}";
+
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() => Install(arena)));
+        engine.Script.longLatin = longLatin; engine.Script.longWide = longWide;
+        var texts = (string)engine.Evaluate("""
+            install(); const a = __toy.arena;
+            globalThis.kept = [a.text(2), a.text(3)];
+            [a.text(1), a.text(2) === longLatin, a.text(3) === longWide, (a.text(2) + a.text(3)).length === 6000 && a.text(3).slice(2998) === '語a', a.text(4)].join('|')
+            """);
+        // (a script's own strings, written by V8 into the arena: read here in place)
+        var put = (string)engine.Evaluate("[__toy.arena.put('abc'), __toy.arena.put('é'.repeat(1) + '語'.repeat(2999))].join(' ')");
+        string read = $"{count(arena)}:{Read(arena, 5)}|{Read(arena, 6).Replace("3000", "3000 é語")}";
+        var none = (string)engine.Evaluate("[__toy.arena.text(0), __toy.arena.text(99)].map(String).join(' ')");
+
+        // (a limit reached: 0 answers, to the embedder and to the script)
+        var small = make(64);
+        string full = $"{Add(small, new string('y', 200))} {(Add(small, "fits") == 1 ? "full" : "not")}";
+        release(small);
+
+        // (released: nothing more is added; the strings made over it are whole after a collection)
+        release(arena);
+        engine.CollectGarbage(true);
+        var after = (string)engine.Evaluate("[kept[0] === longLatin && kept[1] === longWide, __toy.arena.put('late'), __toy.arena.count()].join(' ')");
+        return $"{numbers}:{texts}:{put}:{read}:{none}:{full}:{after}";
     }
 }

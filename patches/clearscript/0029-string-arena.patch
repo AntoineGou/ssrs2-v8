@@ -1,0 +1,362 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 4333b00..d2d9b07 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3489,6 +3489,346 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SnapshotContext(int on) noexcept
+     return made ? 1 : 0;
+ }
+ 
++// String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
++// arena is blocks of memory that never move; an entry is a string's characters, one byte each when all are Latin-1,
++// else two, numbered from 1 in the order added. The embedder adds a string once (Ssrs2_ArenaAdd) and reads an entry
++// back in place (Ssrs2_ArenaEntry); the scripts of a context given the arena (Ssrs2_InstallArena: globalThis[holder]
++// [name] = { text, put, count }) get text(number), a string whose characters ARE the entry's (a V8 external string;
++// under 24 characters a copy, whose object is smaller than an external string's), and put(string), the string written
++// by V8 straight into the arena, its number answered (0: no room, or no string). The embedder releases the arena
++// (Ssrs2_ArenaRelease) when it is done with it; its memory is freed when the last string over it and the last
++// context's functions have died too. Entries are never changed or removed. A limit of bytes is given when the arena
++// is made: past it Ssrs2_ArenaAdd and put answer 0 and the caller copies as before.
++namespace Ssrs2Arena
++{
++    struct Entry
++    {
++        const char* data;
++        int32_t length;   // in characters
++        int32_t twoByte;
++    };
++
++    struct Arena
++    {
++        std::atomic<int64_t> refs{ 1 };
++        std::vector<char*> blocks;
++        std::vector<Entry> entries;
++        size_t blockSize = 0, blockUsed = 0, bytes = 0, limit = 0;
++        bool released = false;
++
++        char* Reserve(size_t size)
++        {
++            size = (size + 7) & ~static_cast<size_t>(7);
++            if (bytes + size > limit)
++            {
++                return nullptr;
++            }
++            if (blocks.empty() || blockUsed + size > blockSize)
++            {
++                size_t wanted = size > (static_cast<size_t>(1) << 20) ? size : (static_cast<size_t>(1) << 20);
++                auto block = static_cast<char*>(malloc(wanted));
++                if (block == nullptr)
++                {
++                    return nullptr;
++                }
++                blocks.push_back(block);
++                blockSize = wanted;
++                blockUsed = 0;
++            }
++            auto at = blocks.back() + blockUsed;
++            blockUsed += size;
++            bytes += size;
++            return at;
++        }
++
++        int32_t Push(const char* data, int32_t length, bool twoByte)
++        {
++            if (entries.size() >= 0x7FFFFFF0)
++            {
++                return 0;
++            }
++            entries.push_back(Entry{ data, length, twoByte ? 1 : 0 });
++            return static_cast<int32_t>(entries.size());
++        }
++
++        void AddRef() { refs.fetch_add(1, std::memory_order_relaxed); }
++
++        void Release()
++        {
++            if (refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
++            {
++                for (auto block : blocks)
++                {
++                    free(block);
++                }
++                delete this;
++            }
++        }
++    };
++
++    class OneByteText final : public v8::String::ExternalOneByteStringResource
++    {
++    public:
++        OneByteText(Arena* arena, const char* data, size_t length) : m_arena(arena), m_data(data), m_length(length) { arena->AddRef(); }
++        const char* data() const override { return m_data; }
++        size_t length() const override { return m_length; }
++        void Dispose() override { auto arena = m_arena; delete this; arena->Release(); }
++    private:
++        Arena* m_arena;
++        const char* m_data;
++        size_t m_length;
++    };
++
++    class TwoByteText final : public v8::String::ExternalStringResource
++    {
++    public:
++        TwoByteText(Arena* arena, const uint16_t* data, size_t length) : m_arena(arena), m_data(data), m_length(length) { arena->AddRef(); }
++        const uint16_t* data() const override { return m_data; }
++        size_t length() const override { return m_length; }
++        void Dispose() override { auto arena = m_arena; delete this; arena->Release(); }
++    private:
++        Arena* m_arena;
++        const uint16_t* m_data;
++        size_t m_length;
++    };
++
++    constexpr int32_t CopyBelow = 24;
++
++    static Arena* Of(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        return static_cast<Arena*>(info.Data().As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
++    }
++
++    static void Text(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto arena = Of(info);
++        if (info.Length() < 1 || !info[0]->IsInt32())
++        {
++            return;
++        }
++        int32_t number = info[0].As<v8::Int32>()->Value();
++        if (number <= 0 || static_cast<size_t>(number) > arena->entries.size())
++        {
++            return;
++        }
++        auto isolate = info.GetIsolate();
++        const Entry& entry = arena->entries[static_cast<size_t>(number) - 1];
++        if (entry.length == 0)
++        {
++            info.GetReturnValue().SetEmptyString();
++            return;
++        }
++        v8::Local<v8::String> text;
++        if (entry.twoByte != 0)
++        {
++            auto data = reinterpret_cast<const uint16_t*>(entry.data);
++            if (entry.length < CopyBelow)
++            {
++                if (!v8::String::NewFromTwoByte(isolate, data, v8::NewStringType::kNormal, entry.length).ToLocal(&text))
++                {
++                    return;
++                }
++            }
++            else
++            {
++                auto resource = new TwoByteText(arena, data, static_cast<size_t>(entry.length));
++                if (!v8::String::NewExternalTwoByte(isolate, resource).ToLocal(&text))
++                {
++                    resource->Dispose();
++                    return;
++                }
++            }
++        }
++        else if (entry.length < CopyBelow)
++        {
++            if (!v8::String::NewFromOneByte(isolate, reinterpret_cast<const uint8_t*>(entry.data), v8::NewStringType::kNormal, entry.length).ToLocal(&text))
++            {
++                return;
++            }
++        }
++        else
++        {
++            auto resource = new OneByteText(arena, entry.data, static_cast<size_t>(entry.length));
++            if (!v8::String::NewExternalOneByte(isolate, resource).ToLocal(&text))
++            {
++                resource->Dispose();
++                return;
++            }
++        }
++        info.GetReturnValue().Set(text);
++    }
++
++    static void Put(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto arena = Of(info);
++        info.GetReturnValue().Set(0);
++        if (info.Length() < 1 || !info[0]->IsString() || arena->released)
++        {
++            return;
++        }
++        auto isolate = info.GetIsolate();
++        auto text = info[0].As<v8::String>();
++        auto length = static_cast<uint32_t>(text->Length());
++        bool twoByte = !text->IsOneByte();
++        auto at = arena->Reserve(length == 0 ? 8 : twoByte ? static_cast<size_t>(length) * 2 : length);
++        if (at == nullptr)
++        {
++            return;
++        }
++        if (length > 0)
++        {
++            if (twoByte)
++            {
++                text->WriteV2(isolate, 0, length, reinterpret_cast<uint16_t*>(at));
++            }
++            else
++            {
++                text->WriteOneByteV2(isolate, 0, length, reinterpret_cast<uint8_t*>(at));
++            }
++        }
++        info.GetReturnValue().Set(arena->Push(at, static_cast<int32_t>(length), twoByte));
++    }
++
++    static void Count(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        info.GetReturnValue().Set(static_cast<int32_t>(Of(info)->entries.size()));
++    }
++
++    // (the functions' share of the arena, given back when the object that holds them is collected)
++    struct Hold
++    {
++        v8::Global<v8::Object> object;
++        Arena* arena;
++    };
++
++    static void Collected(const v8::WeakCallbackInfo<Hold>& info)
++    {
++        auto hold = info.GetParameter();
++        hold->object.Reset();
++        hold->arena->Release();
++        delete hold;
++    }
++}
++
++NATIVE_ENTRY_POINT(void*) Ssrs2_ArenaNew(int64_t limit) noexcept
++{
++    auto arena = new (std::nothrow) Ssrs2Arena::Arena();
++    if (arena != nullptr)
++    {
++        arena->limit = limit <= 0 ? static_cast<size_t>(1) << 28 : static_cast<size_t>(limit);
++    }
++    return arena;
++}
++
++// A string of UTF-16 units added: its number, 0 when the arena has no room for it.
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_ArenaAdd(void* handle, const uint16_t* chars, int32_t length) noexcept
++{
++    auto arena = static_cast<Ssrs2Arena::Arena*>(handle);
++    if (arena == nullptr || length < 0 || (chars == nullptr && length > 0) || arena->released)
++    {
++        return 0;
++    }
++    bool twoByte = false;
++    for (int32_t i = 0; i < length; i++)
++    {
++        if (chars[i] > 0xFF)
++        {
++            twoByte = true;
++            break;
++        }
++    }
++    auto at = arena->Reserve(length == 0 ? 8 : twoByte ? static_cast<size_t>(length) * 2 : static_cast<size_t>(length));
++    if (at == nullptr)
++    {
++        return 0;
++    }
++    if (twoByte)
++    {
++        memcpy(at, chars, static_cast<size_t>(length) * 2);
++    }
++    else
++    {
++        for (int32_t i = 0; i < length; i++)
++        {
++            at[i] = static_cast<char>(chars[i]);
++        }
++    }
++    return arena->Push(at, length, twoByte);
++}
++
++// An entry in place: 1 when its characters are one byte each, 2 when two, 0 for no such entry.
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_ArenaEntry(void* handle, int32_t number, const void** data, int32_t* length) noexcept
++{
++    auto arena = static_cast<Ssrs2Arena::Arena*>(handle);
++    if (arena == nullptr || data == nullptr || length == nullptr || number <= 0 || static_cast<size_t>(number) > arena->entries.size())
++    {
++        return 0;
++    }
++    const auto& entry = arena->entries[static_cast<size_t>(number) - 1];
++    *data = entry.data;
++    *length = entry.length;
++    return entry.twoByte != 0 ? 2 : 1;
++}
++
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_ArenaCount(void* handle) noexcept
++{
++    auto arena = static_cast<Ssrs2Arena::Arena*>(handle);
++    return arena == nullptr ? 0 : static_cast<int32_t>(arena->entries.size());
++}
++
++// The embedder is done: nothing more is added; the memory goes with the last string and the last context's functions.
++NATIVE_ENTRY_POINT(void) Ssrs2_ArenaRelease(void* handle) noexcept
++{
++    auto arena = static_cast<Ssrs2Arena::Arena*>(handle);
++    if (arena != nullptr)
++    {
++        arena->released = true;
++        arena->Release();
++    }
++}
++
++// globalThis[holder][name] = { text, put, count } over the arena, from inside a host call: 1 when made.
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallArena(const char* holder, const char* name, void* handle) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    auto arena = static_cast<Ssrs2Arena::Arena*>(handle);
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr || arena == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    if (object.IsEmpty())
++    {
++        return 0;
++    }
++    auto functions = v8::Object::New(isolate);
++    auto data = v8::External::New(isolate, arena, v8::kExternalPointerTypeTagDefault);
++    struct { const char* name; v8::FunctionCallback callback; int length; } members[] = {
++        { "text", Ssrs2Arena::Text, 1 }, { "put", Ssrs2Arena::Put, 1 }, { "count", Ssrs2Arena::Count, 0 } };
++    for (const auto& member : members)
++    {
++        v8::Local<v8::Function> function;
++        if (!v8::Function::New(context, member.callback, data, member.length, v8::ConstructorBehavior::kThrow).ToLocal(&function)
++            || functions->Set(context, v8::String::NewFromUtf8(isolate, member.name).ToLocalChecked(), function).IsNothing())
++        {
++            return 0;
++        }
++    }
++    if (object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), functions).IsNothing())
++    {
++        return 0;
++    }
++    // (the functions hold the arena through this object: they are reached from it alone in the smoke check's use and
++    // from a host's own keeping; a function kept past its object still finds the arena's memory while a string lives,
++    // and the embedder keeps the arena for a context's whole life)
++    arena->AddRef();
++    auto hold = new Ssrs2Arena::Hold{ v8::Global<v8::Object>(isolate, functions), arena };
++    hold->object.SetWeak(hold, Ssrs2Arena::Collected, v8::WeakCallbackType::kParameter);
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -3512,4 +3852,10 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SnapshotContext(int on) noexcept
+ #pragma comment(linker, "/EXPORT:Ssrs2_SnapshotContext=_Ssrs2_SnapshotContext@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SnapshotData=_Ssrs2_SnapshotData@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_UseSnapshot=_Ssrs2_UseSnapshot@12")
++#pragma comment(linker, "/EXPORT:Ssrs2_ArenaNew=_Ssrs2_ArenaNew@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_ArenaAdd=_Ssrs2_ArenaAdd@12")
++#pragma comment(linker, "/EXPORT:Ssrs2_ArenaEntry=_Ssrs2_ArenaEntry@16")
++#pragma comment(linker, "/EXPORT:Ssrs2_ArenaCount=_Ssrs2_ArenaCount@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_ArenaRelease=_Ssrs2_ArenaRelease@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallArena=_Ssrs2_InstallArena@12")
+ #endif
