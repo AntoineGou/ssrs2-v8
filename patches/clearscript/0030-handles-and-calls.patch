@@ -1,0 +1,243 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index d2d9b07..74baf04 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2132,9 +2132,13 @@ NATIVE_ENTRY_POINT(void) V8UnitTestSupport_GetStatistics(uint64_t& isolateCount,
+ // keeps until its next answer), null, undefined, or an error message thrown as an Error.
+ //-----------------------------------------------------------------------------
+ 
++// (0030, below: the script value under a handle of the current context)
++static v8::MaybeLocal<v8::Value> Ssrs2HandleValue(v8::Isolate* isolate, int32_t handle);
++
+ namespace Ssrs2DirectCalls
+ {
+-    enum Kind : int32_t { Undefined = 0, Null = 1, Number = 2, Boolean = 3, String = 4, Bytes = 5, Other = 6, Error = 7 };
++    // (8 to 10 are 0030's: a script value by its handle, one found in a table by an index, a value to throw again)
++    enum Kind : int32_t { Undefined = 0, Null = 1, Number = 2, Boolean = 3, String = 4, Bytes = 5, Other = 6, Error = 7, Handle = 8, Indexed = 9, Thrown = 10 };
+ 
+     struct Value
+     {
+@@ -2251,6 +2255,16 @@ namespace Ssrs2DirectCalls
+                 }
+                 break;
+             }
++            case Thrown:
++            {
++                // (0030: the script value a call into script left under a handle, thrown again as it is)
++                v8::Local<v8::Value> thrown;
++                if (Ssrs2HandleValue(isolate, static_cast<int32_t>(result.number)).ToLocal(&thrown))
++                {
++                    isolate->ThrowException(thrown);
++                }
++                break;
++            }
+             default:
+                 break;
+         }
+@@ -3489,6 +3503,199 @@ NATIVE_ENTRY_POINT(int) Ssrs2_SnapshotContext(int on) noexcept
+     return made ? 1 : 0;
+ }
+ 
++// Handles and calls into script (0030). A context's handle table is a script array kept in the context (its embedder
++// data), which the context's own script fills and empties as it likes (Ssrs2_InstallHandles: globalThis[holder][name]
++// is that array); an embedder names a script value by its index there. Ssrs2_Call, from inside a host call, calls the
++// function under a handle with a `this` and arguments given as direct calls give them (numbers, booleans, strings in
++// place, null, undefined), as handles, or as "indexed": the element of a table (itself under a handle) at an index,
++// made by a maker function (under a handle, given the index) where the table has none: so an embedder passes an object
++// it knows by a number of its own, which the script keeps in an array. The answer comes back as a direct call's does;
++// an object is left at index 1 of the handle table (the embedder then names it 1 until the next call). A call that
++// throws answers 0 and leaves what was thrown at index 2: a direct call's handler may answer Thrown with that handle,
++// and the same value is thrown to the script that called it. The function runs in its own realm, as any call does.
++static const int kSsrs2HandlesIndex = 4;
++
++static v8::MaybeLocal<v8::Value> Ssrs2HandleValue(v8::Isolate* isolate, int32_t handle)
++{
++    auto context = isolate->GetCurrentContext();
++    if (context.IsEmpty() || context->GetNumberOfEmbedderDataFields() <= static_cast<uint32_t>(kSsrs2HandlesIndex) || handle < 0)
++    {
++        return v8::MaybeLocal<v8::Value>();
++    }
++    auto data = context->GetEmbedderDataV2(kSsrs2HandlesIndex);
++    if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsArray())
++    {
++        return v8::MaybeLocal<v8::Value>();
++    }
++    return data.As<v8::Array>()->Get(context, static_cast<uint32_t>(handle));
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallHandles(const char* holder, const char* name) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || name == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    if (object.IsEmpty())
++    {
++        return 0;
++    }
++    auto table = v8::Array::New(isolate, 8);
++    context->SetEmbedderDataV2(kSsrs2HandlesIndex, table);
++    return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), table).IsJust() ? 1 : 0;
++}
++
++namespace Ssrs2Calls
++{
++    using Value = Ssrs2DirectCalls::Value;
++    constexpr int32_t MaxArgs = 16;
++
++    static bool ToScript(v8::Isolate* isolate, v8::Local<v8::Context> context, const Value& given, v8::Local<v8::Value>* made)
++    {
++        switch (given.kind)
++        {
++            case Ssrs2DirectCalls::Null:
++                *made = v8::Null(isolate);
++                return true;
++            case Ssrs2DirectCalls::Number:
++                *made = v8::Number::New(isolate, given.number);
++                return true;
++            case Ssrs2DirectCalls::Boolean:
++                *made = v8::Boolean::New(isolate, given.number != 0);
++                return true;
++            case Ssrs2DirectCalls::String:
++                return v8::String::NewFromTwoByte(isolate, static_cast<const uint16_t*>(given.data), v8::NewStringType::kNormal, given.length).ToLocal(made);
++            case Ssrs2DirectCalls::Handle:
++                return Ssrs2HandleValue(isolate, static_cast<int32_t>(given.number)).ToLocal(made);
++            case Ssrs2DirectCalls::Indexed:
++            {
++                // (length: the table's handle; number: the index; data: the maker's handle, as a number)
++                v8::Local<v8::Value> table;
++                if (!Ssrs2HandleValue(isolate, given.length).ToLocal(&table) || !table->IsObject())
++                {
++                    return false;
++                }
++                auto index = static_cast<uint32_t>(given.number);
++                if (!table.As<v8::Object>()->Get(context, index).ToLocal(made))
++                {
++                    return false;
++                }
++                if (!(*made)->IsNullOrUndefined())
++                {
++                    return true;
++                }
++                v8::Local<v8::Value> maker;
++                if (!Ssrs2HandleValue(isolate, static_cast<int32_t>(reinterpret_cast<intptr_t>(given.data))).ToLocal(&maker) || !maker->IsFunction())
++                {
++                    return false;
++                }
++                v8::Local<v8::Value> argument = v8::Integer::NewFromUnsigned(isolate, index);
++                return maker.As<v8::Function>()->Call(context, v8::Undefined(isolate), 1, &argument).ToLocal(made);
++            }
++            default:
++                *made = v8::Undefined(isolate);
++                return true;
++        }
++    }
++}
++
++// 1: called, *result its answer; 0: it threw (what was thrown is at index 2 of the handle table, *result an Error with
++// its text where it has one); -1: not inside a host call, or no such function.
++NATIVE_ENTRY_POINT(int) Ssrs2_Call(int32_t function, int32_t receiver, const Ssrs2DirectCalls::Value* args, int32_t count, Ssrs2DirectCalls::Value* result) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || result == nullptr || count < 0 || count > Ssrs2Calls::MaxArgs || (args == nullptr && count > 0))
++    {
++        return -1;
++    }
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    *result = Ssrs2DirectCalls::Value{ Ssrs2DirectCalls::Undefined, 0, 0, nullptr };
++    v8::Local<v8::Value> callee;
++    if (!Ssrs2HandleValue(isolate, function).ToLocal(&callee) || !callee->IsFunction())
++    {
++        return -1;
++    }
++    v8::Local<v8::Value> self = v8::Undefined(isolate);
++    if (receiver > 0 && !Ssrs2HandleValue(isolate, receiver).ToLocal(&self))
++    {
++        return -1;
++    }
++    v8::Local<v8::Value> made[Ssrs2Calls::MaxArgs];
++    v8::TryCatch tryCatch(isolate);
++    bool ready = true;
++    for (int32_t i = 0; i < count && ready; i++)
++    {
++        ready = Ssrs2Calls::ToScript(isolate, context, args[i], &made[i]);
++    }
++    v8::Local<v8::Value> answer;
++    if (ready && callee.As<v8::Function>()->Call(context, self, count, made).ToLocal(&answer))
++    {
++        thread_local std::vector<uint16_t> chars;
++        if (answer->IsNumber())
++        {
++            result->kind = Ssrs2DirectCalls::Number;
++            result->number = answer.As<v8::Number>()->Value();
++        }
++        else if (answer->IsBoolean())
++        {
++            result->kind = Ssrs2DirectCalls::Boolean;
++            result->number = answer->BooleanValue(isolate) ? 1 : 0;
++        }
++        else if (answer->IsNull())
++        {
++            result->kind = Ssrs2DirectCalls::Null;
++        }
++        else if (answer->IsString())
++        {
++            auto text = answer.As<v8::String>();
++            auto length = static_cast<uint32_t>(text->Length());
++            if (chars.size() < length + 1)
++            {
++                chars.resize(length + 1);
++            }
++            text->WriteV2(isolate, 0, length, chars.data());
++            result->kind = Ssrs2DirectCalls::String;
++            result->length = static_cast<int32_t>(length);
++            result->data = chars.data();
++        }
++        else if (!answer->IsUndefined())
++        {
++            // (an object: left under handle 1 for the embedder)
++            auto data = context->GetEmbedderDataV2(kSsrs2HandlesIndex);
++            if (!data.IsEmpty() && data->IsValue() && data.As<v8::Value>()->IsArray() && data.As<v8::Array>()->Set(context, 1, answer).IsJust())
++            {
++                result->kind = Ssrs2DirectCalls::Handle;
++                result->number = 1;
++            }
++            else
++            {
++                result->kind = Ssrs2DirectCalls::Other;
++            }
++        }
++        return 1;
++    }
++    // (thrown, by the function or while an argument was made: kept under handle 2, its text answered where it has one)
++    if (tryCatch.HasCaught())
++    {
++        auto thrown = tryCatch.Exception();
++        auto data = context->GetEmbedderDataV2(kSsrs2HandlesIndex);
++        if (!data.IsEmpty() && data->IsValue() && data.As<v8::Value>()->IsArray())
++        {
++            (void)data.As<v8::Array>()->Set(context, 2, thrown);
++        }
++        tryCatch.Reset();
++        result->kind = Ssrs2DirectCalls::Error;
++        result->number = 2;
++        return 0;
++    }
++    return -1;
++}
++
+ // String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
+ // arena is blocks of memory that never move; an entry is a string's characters, one byte each when all are Latin-1,
+ // else two, numbered from 1 in the order added. The embedder adds a string once (Ssrs2_ArenaAdd) and reads an entry
+@@ -3858,4 +4065,6 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallArena(const char* holder, const char* name,
+ #pragma comment(linker, "/EXPORT:Ssrs2_ArenaCount=_Ssrs2_ArenaCount@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_ArenaRelease=_Ssrs2_ArenaRelease@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallArena=_Ssrs2_InstallArena@12")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallHandles=_Ssrs2_InstallHandles@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_Call=_Ssrs2_Call@20")
+ #endif

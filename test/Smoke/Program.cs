@@ -65,14 +65,16 @@ var digests = TextDigests.Check(Directory.GetFiles(AppContext.BaseDirectory, "Cl
 Console.WriteLine($"text digest: {digests}");
 var arena = StringArenas.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"string arena: {arena}");
+var handleCalls = HandlesAndCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"handles and calls: {handleCalls}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
-    && arena == StringArenas.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}");
+    && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -956,5 +958,93 @@ static unsafe class StringArenas
         engine.CollectGarbage(true);
         var after = (string)engine.Evaluate("[kept[0] === longLatin && kept[1] === longWide, __toy.arena.put('late'), __toy.arena.count()].join(' ')");
         return $"{numbers}:{texts}:{put}:{read}:{none}:{full}:{after}";
+    }
+}
+
+// patches/clearscript/0030: an embedder calls a context's script functions from inside a host call, naming script
+// values by numbers. Ssrs2_InstallHandles makes globalThis[holder][name] the context's handle table, a script array
+// the script fills as it likes; Ssrs2_Call(function, this, arguments, count, answer) calls the function under a handle
+// with arguments given as numbers, booleans, strings, null, handles, or "indexed" (a table's element at an index, made
+// by a maker function where the table has none). An answer that is an object is left under handle 1; what a call
+// throws is left under handle 2 and the call answers 0. Checked with toy functions: each kind of argument and of
+// answer, `this`, a thrown error kept as it is, an indexed argument made once then found, a handle that is no
+// function, and a call made outside a host call (refused).
+static unsafe class HandlesAndCalls
+{
+    public const string Expected = "5:a-é語-true-null:7:object 1 42:threw 0 RangeError boom:made 9,9 1:-1:-1";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Value { public int Kind; public int Length; public double Number; public nint Data; }
+    const int Undefined = 0, Null = 1, Number = 2, Boolean = 3, String = 4, Error = 7, Handle = 8, Indexed = 9;
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_InstallHandles", 8, out var installExport) || !Export("Ssrs2_Call", 20, out var callExport)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)installExport;
+        var call = (delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int>)callExport;
+
+        string Answer(Value v) => v.Kind switch
+        {
+            Number => v.Number.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Boolean => v.Number != 0 ? "true" : "false",
+            String => new string((char*)v.Data, 0, v.Length),
+            Null => "null", Undefined => "undefined", Handle => "object " + v.Number, Error => "error " + v.Number, _ => "kind " + v.Kind,
+        };
+        using var engine = new V8ScriptEngine();
+        var results = new List<string>();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            var h = System.Text.Encoding.UTF8.GetBytes("__toy\0"); var n = System.Text.Encoding.UTF8.GetBytes("handles\0");
+            fixed (byte* hp = h, np = n) return install(hp, np) == 1;
+        }));
+        engine.AddHostObject("run", new Action(() =>
+        {
+            Value answer;
+            var args = stackalloc Value[4];
+            // (numbers)
+            args[0] = new Value { Kind = Number, Number = 2 }; args[1] = new Value { Kind = Number, Number = 3 };
+            results.Add(call(3, 0, args, 2, &answer) == 1 ? Answer(answer) : "failed");
+            // (a string, a boolean, null: joined by the script)
+            fixed (char* text = "a-é語")
+            {
+                args[0] = new Value { Kind = String, Length = 4, Data = (nint)text }; args[1] = new Value { Kind = Boolean, Number = 1 }; args[2] = new Value { Kind = Null };
+                results.Add(call(4, 0, args, 3, &answer) == 1 ? Answer(answer) : "failed");
+            }
+            // (this, a handle)
+            results.Add(call(5, 6, args, 0, &answer) == 1 ? Answer(answer) : "failed");
+            // (an object answered: left under handle 1, passed back as a handle)
+            int made = call(7, 0, args, 0, &answer);
+            string first = made == 1 ? Answer(answer) : "failed";
+            args[0] = new Value { Kind = Handle, Number = 1 };
+            results.Add(first + " " + (call(8, 0, args, 1, &answer) == 1 ? Answer(answer) : "failed"));
+            // (a throw: 0, the value under handle 2, read by the script afterwards)
+            int threw = call(9, 0, args, 0, &answer);
+            args[0] = new Value { Kind = Handle, Number = 2 };
+            results.Add("threw " + threw + " " + (call(10, 0, args, 1, &answer) == 1 ? Answer(answer) : "failed"));
+            // (indexed: the table under 11, the maker under 12; index 9 made once, then found)
+            args[0] = new Value { Kind = Indexed, Length = 11, Number = 9, Data = 12 }; args[1] = new Value { Kind = Indexed, Length = 11, Number = 9, Data = 12 };
+            results.Add(call(13, 0, args, 2, &answer) == 1 ? Answer(answer) : "failed");
+            // (a handle that is no function)
+            results.Add(call(6, 0, args, 0, &answer).ToString());
+        }));
+        engine.Execute("""
+            install(); const h = __toy.handles;
+            h[3] = (a, b) => a + b;
+            h[4] = (s, b, n) => s + '-' + b + '-' + n;
+            h[5] = function () { return this.k; }; h[6] = { k: 7 };
+            h[7] = () => ({ answer: 42 }); h[8] = o => o.answer;
+            h[9] = () => { throw new RangeError('boom'); }; h[10] = e => e.constructor.name + ' ' + e.message;
+            let makes = 0;
+            h[11] = []; h[12] = i => { makes++; return h[11][i] = { index: i }; };
+            h[13] = (a, b) => 'made ' + a.index + ',' + b.index + ' ' + makes;
+            run();
+            """);
+        // (outside a host call: refused)
+        Value outside;
+        results.Add(call(3, 0, null, 0, &outside).ToString());
+        return string.Join(":", results);
     }
 }
