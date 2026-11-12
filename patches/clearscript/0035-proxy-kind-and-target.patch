@@ -1,0 +1,93 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -4351,8 +4351,82 @@
+         return 0;
+     }
+     return v8::ssrs2::SetImmutableProto(value.As<v8::Object>()) ? 1 : 0;
++}
++
++// Whether a value is a Proxy, and a Proxy's target (0035): what no script can ask without running a trap (a Proxy
++// answers every operation through its handler, and a revoked one throws at each).
++//
++//   int Ssrs2_ProxyKind(int32_t context, int32_t value);
++//   int Ssrs2_ProxyTarget(int32_t context, int32_t proxy, int32_t into);
++//
++// The values are named by their handles in the context's table (0030; the context by its number, 0032, or 0 for the
++// current one). Ssrs2_ProxyKind answers 0 for a value that is no Proxy (an ordinary object, a primitive, nothing), 1
++// for a Proxy, 2 for a revoked Proxy. Ssrs2_ProxyTarget leaves the Proxy's target, as it is (itself a Proxy where a
++// Proxy wraps one: asked again), at index `into` of the same table (1 or more: the host names an index it owns, or 1,
++// the place of a call's answer, which the next call into script of that context reuses) and answers 1; 0 where the
++// value is no Proxy or a revoked one (it has no target any more): nothing is written. Both answer -1 with no isolate
++// entered on this thread, a number that names no context, a context without a handle table, a negative handle, or
++// `into` below 1. Threading: the isolate's thread, the isolate entered and locked by the caller. No trap and no
++// script runs, no callback is made: safe inside any host call or callback, and where the host reads an object's own
++// properties and must not be seen doing it.
++namespace Ssrs2Proxies
++{
++    // The value under a handle of a context: false where there is no such context, table or handle.
++    static bool Value(v8::Isolate* isolate, int32_t context, int32_t handle, v8::Local<v8::Context>* target, v8::Local<v8::Value>* value)
++    {
++        *target = Ssrs2Contexts::Find(isolate, context);
++        if (target->IsEmpty())
++        {
++            return false;
++        }
++        v8::Context::Scope contextScope(*target);
++        return Ssrs2HandleValue(isolate, handle).ToLocal(value);
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_ProxyKind(int32_t context, int32_t value) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr)
++    {
++        return -1;
++    }
++    v8::HandleScope scope(isolate);
++    v8::Local<v8::Context> target;
++    v8::Local<v8::Value> given;
++    if (!Ssrs2Proxies::Value(isolate, context, value, &target, &given))
++    {
++        return -1;
++    }
++    if (!given->IsProxy())
++    {
++        return 0;
++    }
++    return given.As<v8::Proxy>()->IsRevoked() ? 2 : 1;
+ }
+ 
++NATIVE_ENTRY_POINT(int) Ssrs2_ProxyTarget(int32_t context, int32_t proxy, int32_t into) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || into < 1)
++    {
++        return -1;
++    }
++    v8::HandleScope scope(isolate);
++    v8::Local<v8::Context> target;
++    v8::Local<v8::Value> given;
++    if (!Ssrs2Proxies::Value(isolate, context, proxy, &target, &given))
++    {
++        return -1;
++    }
++    if (!given->IsProxy() || given.As<v8::Proxy>()->IsRevoked())
++    {
++        return 0;
++    }
++    v8::Context::Scope contextScope(target);
++    return Ssrs2HandlePut(target, into, given.As<v8::Proxy>()->GetTarget()) ? 1 : -1;
++}
++
+ // String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
+ // arena is blocks of memory that never move; an entry is a string's characters, one byte each when all are Latin-1,
+ // else two, numbered from 1 in the order added. The embedder adds a string once (Ssrs2_ArenaAdd) and reads an entry
+@@ -4728,4 +4802,6 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_Call=_Ssrs2_Call@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_CallIn=_Ssrs2_CallIn@28")
+ #pragma comment(linker, "/EXPORT:Ssrs2_MakePrototypeImmutable=_Ssrs2_MakePrototypeImmutable@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_ProxyKind=_Ssrs2_ProxyKind@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_ProxyTarget=_Ssrs2_ProxyTarget@12")
+ #endif

@@ -80,6 +80,8 @@ var callsIn = CallsInContext.Check(Directory.GetFiles(AppContext.BaseDirectory, 
 Console.WriteLine($"calls in a context: {callsIn}");
 var immutableByHandle = ImmutablePrototypesByHandle.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"immutable prototype by handle: {immutableByHandle}");
+var proxies = ProxyKinds.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"proxy kind and target: {proxies}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -88,8 +90,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
-    && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}");
+    && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1605,6 +1607,66 @@ static unsafe class ImmutablePrototypesByHandle
                 Reflect.setPrototypeOf(h[5], {})].join(' '), String(Reflect.setPrototypeOf(free, {}))].join(':')
             """));
         results.Add(first.Evaluate("lockSecond()") + " " + second.Evaluate("(() => { try { Object.setPrototypeOf(kept, {}); return 'changed'; } catch (x) { return x.name; } })()"));
+        results.Add((string)first.Evaluate("refused()"));
+        return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0035: Ssrs2_ProxyKind(context, value) says whether the value under a handle is a Proxy (1), a
+// revoked Proxy (2) or neither (0), and Ssrs2_ProxyTarget(context, proxy, into) leaves a Proxy's target under another
+// handle, without running a trap. Checked with toy values: a plain object, a Proxy whose handler counts its traps
+// (none run), a revoked Proxy, a number, a Proxy of a Proxy (its target the inner Proxy), nothing; the target of the
+// plain object and of the revoked Proxy (0, nothing written); a Proxy of a second context asked from the first by the
+// context's number; a negative handle, `into` 0 and a number that names no context (-1).
+static unsafe class ProxyKinds
+{
+    public const string Expected = "0 1 2 0 1 0:1 1 0 0:true true 1 kept 0:1 1 true:-1 -1 -1 -1";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_InstallHandles", 8, out var handlesExport)
+            || !Export("Ssrs2_ProxyKind", 8, out var kindExport) || !Export("Ssrs2_ProxyTarget", 12, out var targetExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        var kind = (delegate* unmanaged[Stdcall]<int, int, int>)kindExport;
+        var target = (delegate* unmanaged[Stdcall]<int, int, int, int>)targetExport;
+
+        using var runtime = new V8Runtime();
+        using var first = runtime.CreateScriptEngine();
+        using var second = runtime.CreateScriptEngine();
+        int secondNumber = 0;
+        Func<bool> install = () =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8) return handles(holder, table) == 1;
+        };
+        first.AddHostObject("install", install);
+        second.AddHostObject("install", install);
+        second.AddHostObject("number", new Action(() => secondNumber = number()));
+        // (handles 3: a plain object; 4: a Proxy; 5: a revoked Proxy; 6: a number; 7: a Proxy of the Proxy; 20: nothing)
+        first.AddHostObject("kinds", new Func<string>(() => string.Join(" ", kind(0, 3), kind(0, 4), kind(0, 5), kind(0, 6), kind(0, 7), kind(0, 20))));
+        // (targets: the Proxy's under 8, the outer Proxy's under 9, none for the plain object and the revoked Proxy,
+        // whose index 10 keeps what it held)
+        first.AddHostObject("targets", new Func<string>(() => string.Join(" ", target(0, 4, 8), target(0, 7, 9), target(0, 3, 10), target(0, 5, 10))));
+        first.AddHostObject("inner", new Func<int>(() => kind(0, 9)));
+        first.AddHostObject("ofSecond", new Func<string>(() => kind(secondNumber, 3) + " " + target(secondNumber, 3, 4)));
+        first.AddHostObject("refused", new Func<string>(() => string.Join(" ", kind(0, -1), target(0, 4, 0), kind(int.MaxValue, 3), target(int.MaxValue, 4, 8))));
+        second.Execute("install(); number(); globalThis.inside = { name: 'inside' }; __toy.handles[3] = new Proxy(inside, {});");
+        var results = new List<string>();
+        results.Add((string)first.Evaluate("""
+            install();
+            const h = __toy.handles;
+            let traps = 0;
+            const count = new Proxy({}, { get(t, name) { return (...args) => { traps++; return Reflect[name](...args); }; } });
+            const plain = h[3] = {}, inside = { name: 'inside' }, proxy = h[4] = new Proxy(inside, count);
+            const revocable = Proxy.revocable({}, {}); revocable.revoke(); h[5] = revocable.proxy;
+            h[6] = 5; h[7] = new Proxy(proxy, count); h[10] = 'kept';
+            const asked = kinds(), left = targets();
+            [asked, left, [h[8] === inside, h[9] === proxy, inner(), h[10], traps].join(' ')].join(':')
+            """));
+        results.Add(first.Evaluate("ofSecond()") + " " + second.Evaluate("String(__toy.handles[4] === inside)"));
         results.Add((string)first.Evaluate("refused()"));
         return string.Join(":", results);
     }
