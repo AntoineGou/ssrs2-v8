@@ -69,14 +69,17 @@ var handleCalls = HandlesAndCalls.Check(Directory.GetFiles(AppContext.BaseDirect
 Console.WriteLine($"handles and calls: {handleCalls}");
 var tables = InterceptorTables.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"interceptor tables: {tables}");
+var guards = InterceptorTableGuards.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"interceptor table guards: {guards}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
-    && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}");
+    && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
+    && guards == InterceptorTableGuards.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1093,5 +1096,76 @@ static unsafe class InterceptorTables
             out.push(String(factory(handler, 1).setTable === undefined && factory(handler, 1)(null)[4] === 't4'));
             out.join(':');
             """);
+    }
+}
+
+// patches/clearscript/0031b: the guards of an interceptor object's indexed table (0031) keep the memory of the arrays
+// their cells are in, so a read stays valid whatever becomes of those arrays, and an array over a buffer a script can
+// resize is refused. Checked with a toy handler that counts its calls: a table guarded by a cell of a buffer that is
+// then transferred (the read still answered from the table: the memory is the same), the cell written through the
+// buffer it was transferred to (the read goes to the handler), that buffer dropped and collected (the read still
+// safe), a transfer to another size, an array over a resizable buffer and a detached array (no table), and two
+// thousand objects with tables dropped and collected.
+static unsafe class InterceptorTableGuards
+{
+    public const string Expected = "a0:a0:t0,1:read:read:false false:2000 collected";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallInterceptors", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_InstallInterceptors@8", out export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, name = "interceptorFactory\0"u8) return install(holder, name) == 1;
+        }));
+        var results = new List<string>();
+        engine.Execute("""
+            install();
+            globalThis.calls = 0;
+            const handler = { get(o, i) { calls++; return 't' + i; } };
+            globalThis.make = __toy.interceptorFactory(handler, 1 | 16);
+            globalThis.o = make(null);
+            globalThis.buffer = new ArrayBuffer(16);
+            const cells = new Int32Array(buffer); cells[1] = 7;
+            make.setTable(o, ['a'], cells, 1, 7);
+            """);
+        results.Add((string)engine.Evaluate("o[0] + calls"));
+        // (the buffer transferred: the guard's array is detached, its memory now the new buffer's)
+        results.Add((string)engine.Evaluate("globalThis.moved = buffer.transfer(); o[0] + calls"));
+        results.Add((string)engine.Evaluate("new Int32Array(moved)[1] = 8; o[0] + ',' + calls"));
+        // (the new buffer dropped and collected: the guard still has the memory)
+        engine.Execute("globalThis.moved = undefined; globalThis.buffer = undefined;");
+        engine.CollectGarbage(true);
+        results.Add((string)engine.Evaluate("typeof o[0] === 'string' ? 'read' : 'none'"));
+        // (a transfer to another size: the guard's memory is the old one, kept)
+        engine.Execute("""
+            globalThis.p = make(null);
+            let wide = new ArrayBuffer(16); const view = new Int32Array(wide); view[0] = 3;
+            make.setTable(p, ['b'], view, 0, 3);
+            wide = wide.transfer(4096); wide = undefined;
+            """);
+        engine.CollectGarbage(true);
+        results.Add((string)engine.Evaluate("typeof p[0] === 'string' ? 'read' : 'none'"));
+        // (an array over a buffer a script can resize, and a detached array: no table)
+        results.Add((string)engine.Evaluate("""
+            (() => {
+                const resizable = new Int32Array(new ArrayBuffer(16, { maxByteLength: 64 }));
+                const gone = new ArrayBuffer(16), detached = new Int32Array(gone); gone.transfer();
+                return make.setTable(make(null), ['c'], resizable, 0, 0) + ' ' + make.setTable(make(null), ['c'], detached, 0, 0);
+            })()
+            """));
+        // (objects with tables made and dropped: their guards freed with them)
+        var made = Convert.ToInt32(engine.Evaluate("""
+            (() => {
+                let n = 0;
+                for (let i = 0; i < 2000; i++) { const q = make(null); if (make.setTable(q, [i], new Int32Array([i, i]), 1, i) && q[0] === i) n++; }
+                return n;
+            })()
+            """));
+        engine.CollectGarbage(true);
+        results.Add(made + " " + engine.Evaluate("'collected'"));
+        return string.Join(":", results);
     }
 }

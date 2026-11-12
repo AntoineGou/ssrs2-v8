@@ -1,0 +1,94 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3141,6 +3141,9 @@
+ // V8's 0005 though they have a named interceptor) and callable: a call is the handler's call(...arguments). One
+ // template a factory: its objects share their maps. globalThis[holder][name] made interceptorFactory, from inside a host
+ // call: 1 when made, 0 outside a context.
++#include <cstring>
++#include <memory>
++
+ namespace Ssrs2Interceptors
+ {
+     enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4, kNonMasking = 8, kIndexedTable = 16 };
+@@ -3178,8 +3181,23 @@
+     // table again when what the values were made from has changed; a cell that moved in between sends the read to the
+     // handler's get, as does a value not yet in the array. The object's internal fields: the values; a buffer holding
+     // the guards (each cell's address and expected value) and its address; the guards' arrays, kept alive.
++    // (0031b) What a table's read relies on, and what it leaves to the script. A guard's cell is read through a raw
++    // pointer at every indexed read, so the memory under it must outlive the object whatever the script does with the
++    // guard's array afterwards: the guards keep each array's backing store themselves (TableGuards::stores: a buffer
++    // detached, transferred or collected leaves its memory in place, the cell then holding what it last held), and an
++    // array over a buffer a script can resize is refused (a buffer made shorter gives its pages back: a read there
++    // would fault). The guards live in memory of the library's own, freed when the buffer that stands for them in the
++    // object's internal fields is collected, with the object or at its next setTable. The values are read as a script
++    // reads an array's element: an index the array has no element for (a hole) is looked up on the array's prototype
++    // chain before the read goes to the handler, so a script that leaves holes gives the array a null prototype, or
++    // fills it with undefined, where other code of the page could put indexed properties on Array.prototype.
+     enum : int { kTableValues = 0, kTableGuards, kTableGuardsData, kTableView, kTableGuardCount = 3, kTableFields = kTableView + kTableGuardCount };
+     struct TableGuard { const int32_t* cell; int64_t expected; };
++    struct TableGuards
++    {
++        TableGuard guards[kTableGuardCount] = {};
++        std::shared_ptr<v8::BackingStore> stores[kTableGuardCount];
++    };
+ 
+     // (the indexed getter of a factory made with flags 16 alone: its objects have the fields)
+     static bool FromTable(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info)
+@@ -3218,7 +3236,7 @@
+         if (object->InternalFieldCount() <= kTableFields || !object->GetInternalField(kTableFields).As<v8::Value>()->StrictEquals(info.Data())) return;
+         object->SetInternalField(kTableValues, v8::Undefined(isolate));
+         if (!info[1]->IsArray()) return;
+-        TableGuard guards[kTableGuardCount] = {};
++        auto held = std::make_unique<TableGuards>();
+         v8::Local<v8::Value> views[kTableGuardCount];
+         int count = 0;
+         for (int at = 2; at + 2 < info.Length() && count < kTableGuardCount; at += 3)
+@@ -3227,19 +3245,28 @@
+             auto view = info[at].As<v8::Int32Array>();
+             int64_t index, expected;
+             if (!info[at + 1]->IntegerValue(context).To(&index) || !info[at + 2]->IntegerValue(context).To(&expected)) return;
++            // (0031b: read after the conversions above, which may run script: the array as it is now. A detached
++            // array has no length; a buffer a script can resize is refused; the store is kept with the guard)
+             if (index < 0 || static_cast<uint64_t>(index) >= view->Length()) return;
+-            auto base = static_cast<const uint8_t*>(view->Buffer()->Data());
+-            if (base == nullptr) return;
+-            guards[count].cell = reinterpret_cast<const int32_t*>(base + view->ByteOffset()) + index;
+-            guards[count].expected = expected;
++            auto viewed = view->Buffer();
++            if (viewed->IsResizableByUserJavaScript()) return;
++            auto store = viewed->GetBackingStore();
++            auto base = store ? static_cast<const uint8_t*>(store->Data()) : nullptr;
++            size_t offset = view->ByteOffset();
++            if (base == nullptr || offset + (static_cast<size_t>(index) + 1) * sizeof(int32_t) > store->ByteLength()) return;
++            held->guards[count].cell = reinterpret_cast<const int32_t*>(base + offset) + index;
++            held->guards[count].expected = expected;
++            held->stores[count] = std::move(store);
+             views[count++] = view;
+         }
+         // (more guards than the table holds: no table, every read the handler's)
+         if (info.Length() > 2 + 3 * kTableGuardCount) return;
+-        auto buffer = v8::ArrayBuffer::New(isolate, sizeof(guards));
+-        memcpy(buffer->Data(), guards, sizeof(guards));
++        // (0031b: the guards in the library's memory, freed with the buffer that stands for them)
++        auto guards = held->guards;
++        auto buffer = v8::ArrayBuffer::New(isolate, v8::ArrayBuffer::NewBackingStore(held.release(), sizeof(TableGuards),
++            [] (void* data, size_t, void*) { delete static_cast<TableGuards*>(data); }, nullptr));
+         object->SetInternalField(kTableGuards, buffer);
+-        object->SetAlignedPointerInInternalField(kTableGuardsData, buffer->Data(), v8::kEmbedderDataTypeTagDefault);
++        object->SetAlignedPointerInInternalField(kTableGuardsData, guards, v8::kEmbedderDataTypeTagDefault);
+         for (int g = 0; g < kTableGuardCount; g++)
+         {
+             if (g < count) object->SetInternalField(kTableView + g, views[g]); else object->SetInternalField(kTableView + g, v8::Undefined(isolate));
+@@ -3414,7 +3441,10 @@
+         auto instanceTemplate = functionTemplate->InstanceTemplate();
+         if (flags & kIndexed)
+         {
+-            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration((flags & kIndexedTable) ? GetTabled : Get<uint32_t>, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
++            // (0031b: the getter named by its type first: a compiler need not pick a template's instance inside ?:)
++            v8::Intercepted (*getter)(uint32_t, const v8::PropertyCallbackInfo<v8::Value>&) = Get<uint32_t>;
++            if (flags & kIndexedTable) getter = GetTabled;
++            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(getter, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
+                 Keys<true>, Define<uint32_t>, Descriptor<uint32_t>, handler));
+         }
+         if (flags & kNamed)
