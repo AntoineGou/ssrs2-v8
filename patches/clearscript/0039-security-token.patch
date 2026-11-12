@@ -1,0 +1,76 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -4921,6 +4921,66 @@
+     return number;
+ }
+ 
++// A context's security token (0039): which contexts of an isolate V8 lets reach into each other.
++//
++//   int32_t Ssrs2_SetSecurityToken(int32_t context, const uint16_t* token, int32_t length);
++//
++// V8 gives every context a security token, by default the context's own global object, so that no two contexts
++// have the same one, and refuses a few operations made from one context on another whose token is not the same
++// object. Ssrs2_SetSecurityToken gives the context (its number, 0032, or 0 for the current one) a token of the
++// host's: a string (UTF-16, length characters, which may be 0), made a unique string of the isolate, so that two
++// contexts given the same characters have the same token and two given different characters do not. token null
++// gives the context its default token back. It answers the context's number, 0 with no isolate entered on this
++// thread, a number that names no context, or a negative length. It may be called at any time and again (V8 compares
++// the tokens at each operation, not once); nothing else of the context changes.
++//
++// What V8 15.6 asks the tokens for (the context "asking" is the one entered: the context of the script the host
++// started, or of Ssrs2_CallIn, not the realm of the function that makes the call):
++//   - the Function constructor of another context, and its generator, async and async generator forms, called,
++//     constructed, bound or given to Reflect.construct: a TypeError ("no access") without the same token, also
++//     when the call is made by a function of that other context which the asking context called;
++//   - the global eval function of another context: undefined is answered, nothing compiled;
++//   - the Promise constructor of another context given an executor that is not of that context: a TypeError;
++//   - another context's global object itself: reading, writing, defining or deleting a property of it, `in`, a
++//     property's descriptor and setting its prototype are a TypeError, and its keys are answered as none. Ordinary
++//     objects, functions and prototypes of another context are never asked about: a script that holds one reads,
++//     writes and calls it whatever the tokens (a script function is called with another context's global as its
++//     `this` too).
++// A token does nothing to a context's check of code generation (0019, 0032): once the tokens let a call through to
++// another context's Function constructor or eval, V8 asks the check of the context that constructor or eval belongs
++// to, with that context's number, as for a call from inside it; the calling context's own check is not asked.
++// Threading: the isolate's thread, the isolate entered and locked by the caller. No script runs and no callback is
++// made: safe inside any host call or callback.
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_SetSecurityToken(int32_t context, const uint16_t* token, int32_t length) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || (token != nullptr && length < 0))
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto target = Ssrs2Contexts::Find(isolate, context);
++    if (target.IsEmpty())
++    {
++        return 0;
++    }
++    if (token == nullptr)
++    {
++        target->UseDefaultSecurityToken();
++    }
++    else
++    {
++        // (a unique string: V8 compares tokens as objects, and equal characters are then one object)
++        v8::Local<v8::String> made;
++        if (!v8::String::NewFromTwoByte(isolate, token, v8::NewStringType::kInternalized, length).ToLocal(&made))
++        {
++            return 0;
++        }
++        target->SetSecurityToken(made);
++    }
++    return Ssrs2Contexts::NumberOf(isolate, target);
++}
++
+ // String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
+ // arena is blocks of memory that never move; an entry is a string's characters, one byte each when all are Latin-1,
+ // else two, numbered from 1 in the order added. The embedder adds a string once (Ssrs2_ArenaAdd) and reads an entry
+@@ -5300,4 +5360,5 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_ProxyTarget=_Ssrs2_ProxyTarget@12")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetImportHostScheduler=_Ssrs2_SetImportHostScheduler@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetNamedHostHandler=_Ssrs2_SetNamedHostHandler@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetSecurityToken=_Ssrs2_SetSecurityToken@12")
+ #endif

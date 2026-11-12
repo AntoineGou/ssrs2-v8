@@ -88,6 +88,8 @@ var namedHost = NamedHostInterceptors.Check(Directory.GetFiles(AppContext.BaseDi
 Console.WriteLine($"named host interceptors: {namedHost}");
 var tableQueries = TableQueries.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"table queries: {tableQueries}");
+var tokens = SecurityTokens.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"security tokens: {tokens}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -97,8 +99,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
-    && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}");
+    && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
+    && tokens == SecurityTokens.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2024,5 +2027,112 @@ static unsafe class TableQueries
             out.push(String(Object.prototype.propertyIsEnumerable.call(o, 0)));
             out.join(':')
             """);
+    }
+}
+
+// patches/clearscript/0039: Ssrs2_SetSecurityToken(context, token, length) gives a context a security token of the
+// host's, a string (null: the default token again); V8 lets a context reach into another only where both have the
+// same token. Checked with two toy contexts of one isolate, the second handing the first an object: from the first,
+// the second's Function constructor reached through the object, a function of the second that calls its own Function
+// constructor, the second's async function constructor, its global eval, its Promise constructor given a function of
+// the first, a property of its global object, and a property of the object itself (never refused): with the default
+// tokens, the same token, different tokens, and the second's default again. Then, with the same token, the
+// code-generation host check (0032): the second context's check is asked for its Function constructor called from
+// the first, allows and refuses; the first context's own check, which refuses everything, is asked for its own
+// Function only; with different tokens the call is refused before any check is asked. A negative length and a number
+// that names no context answer 0.
+static unsafe class SecurityTokens
+{
+    const string Refused = "TypeError no access | TypeError no access | TypeError no access | undefined | TypeError no access | TypeError no access | own";
+    const string Allowed = "7 | 8 | function | 2 | object | second | own";
+    public const string Expected =
+        "true:" + Refused + ":" + Allowed + ":" + Refused + ":" + Refused
+        + ":7 second:EvalError refused second:1 none:EvalError refused first:7 second:TypeError no access none:0 0";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Answer { public nint Source; public int SourceLength; public nint Message; public int MessageLength; }
+
+    static int s_first, s_second;
+    static readonly List<string> s_asked = new();
+
+    // (the first context's check refuses everything; the second's refuses a source that says NOPE)
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int HostCheck(int context, int flags, char* source, int length, Answer* answer)
+    {
+        s_asked.Add(context == s_first ? "first" : context == s_second ? "second" : "other");
+        if (context == s_first) return 0;
+        return source != null && new string(source, 0, length).Contains("NOPE", StringComparison.Ordinal) ? 0 : 1;
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_SetSecurityToken", 12, out var tokenExport)
+            || !Export("Ssrs2_SetCodeGenHostCheck", 16, out var checkExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var token = (delegate* unmanaged[Stdcall]<int, char*, int, int>)tokenExport;
+        var check = (delegate* unmanaged[Stdcall]<int, delegate* unmanaged[Cdecl]<int, int, char*, int, Answer*, int>, char*, int, int>)checkExport;
+
+        using var runtime = new V8Runtime();
+        using var first = runtime.CreateScriptEngine();
+        using var second = runtime.CreateScriptEngine();
+        int Token(int context, string? text)
+        {
+            fixed (char* chars = text) return token(context, text is null ? null : chars, text?.Length ?? 0);
+        }
+        second.AddHostObject("number", new Action(() => s_second = number()));
+        second.Execute("""
+            number();
+            globalThis.tag = 'second';
+            globalThis.o = { tag: 'own', make: source => Function(source)(), eval, Promise, global: globalThis,
+                AsyncFunction: Object.getPrototypeOf(async function () { }).constructor };
+            """);
+        first.AddHostObject("number", new Action(() => s_first = number()));
+        // (the two contexts' tokens: a text, or null for the default; true when both were set)
+        first.AddHostObject("tokens", new Func<string?, string?, bool>((own, other) => Token(0, own) == s_first && Token(s_second, other) == s_second));
+        first.AddHostObject("checkSecond", new Func<bool>(() => { fixed (char* message = "refused") return check(s_second, &HostCheck, message, 7) == s_second; }));
+        first.AddHostObject("checkFirst", new Func<bool>(() => { fixed (char* message = "refused") return check(0, &HostCheck, message, 7) == s_first; }));
+        first.AddHostObject("asked", new Func<string>(() => { var seen = s_asked.Count == 0 ? "none" : string.Join(",", s_asked.Distinct()); s_asked.Clear(); return seen; }));
+        first.AddHostObject("refusals", new Func<string>(() => TokenBad(token) + " " + Token(int.MaxValue, "one")));
+        first.Script.o = second.Script.o;
+        return (string)first.Evaluate("""
+            number();
+            const e = f => { try { return String(f()); } catch (x) { return x.name + ' ' + x.message; } };
+            const probe = () => [
+                e(() => o.constructor.constructor('return 7')()),
+                e(() => o.make('return 8')),
+                e(() => typeof new o.AsyncFunction('return 1')),
+                e(() => o.eval('1 + 1')),
+                e(() => typeof new o.Promise(() => { })),
+                e(() => o.global.tag),
+                e(() => o.tag),
+            ].join(' | ');
+            const r = [String(typeof o === 'object'), probe()];
+            tokens('one', 'one'); r.push(probe());
+            tokens('one', 'two'); r.push(probe());
+            tokens('one', 'one'); tokens('one', null); r.push(probe());
+            // (the same token again, and the second context's code-generation check)
+            tokens('one', 'one'); checkSecond();
+            r.push(e(() => o.constructor.constructor('return 7')()) + ' ' + asked());
+            r.push(e(() => o.constructor.constructor('return "NOPE"')()) + ' ' + asked());
+            r.push(e(() => Function('return 1')()) + ' ' + asked());
+            // (the first context's own check: asked for its own Function, not for the second's)
+            checkFirst();
+            r.push(e(() => Function('return 1')()) + ' ' + asked());
+            r.push(e(() => o.constructor.constructor('return 7')()) + ' ' + asked());
+            // (different tokens: refused before any check is asked)
+            tokens('one', 'two');
+            r.push(e(() => o.constructor.constructor('return 7')()) + ' ' + asked());
+            r.push(refusals());
+            r.join(':')
+            """);
+    }
+
+    // (a negative length: refused)
+    static int TokenBad(delegate* unmanaged[Stdcall]<int, char*, int, int> token)
+    {
+        fixed (char* chars = "one") return token(0, chars, -1);
     }
 }
