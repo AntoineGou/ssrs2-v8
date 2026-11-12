@@ -73,6 +73,8 @@ var guards = InterceptorTableGuards.Check(Directory.GetFiles(AppContext.BaseDire
 Console.WriteLine($"interceptor table guards: {guards}");
 var hostCheck = CodeGenHostChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"code generation host check: {hostCheck}");
+var codeLikeSources = CodeLikeSources.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"code-like sources: {codeLikeSources}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -80,8 +82,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
-    && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}");
+    && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1317,5 +1319,81 @@ static unsafe class CodeGenHostChecks
         other.Dispose();
         results.Add(Convert.ToInt32(engine.Evaluate("deadOther()")).ToString());
         return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0032b: the host's code-generation check (0032) is told flags 2 for every source V8 takes as
+// code: a code-like object, and now also a Function constructor's assembled source text when all its arguments were
+// code-like objects (0032 told it flags 0, as for any string). Checked with a toy check that allows what is code-like,
+// leaves other objects as they are and refuses every plain string, and that notes the flags of each request: a plain
+// string refused; a code-like object given to a direct eval (its scope kept) and to the global eval; a Function
+// constructor of one and of two code-like objects (allowed: the arguments, then the source, all flags 2, the source
+// the assembled text); one given a code-like object and a plain string, a plain string alone, nothing, a plain object
+// (refused: the source is flags 0); the async and generator function constructors of code-like objects.
+static unsafe class CodeLikeSources
+{
+    public const string Expected =
+        "EvalError 0:2 2:42 2:3 2,2 assembled:5 2,2,2 assembled:EvalError 2,0:EvalError 0:EvalError 0:EvalError 4,0"
+        + ":function 2,2 assembled:function 2,2 assembled";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Answer { public nint Source; public int SourceLength; public nint Message; public int MessageLength; }
+
+    static readonly List<int> s_flags = new();
+    static bool s_assembled;
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int HostCheck(int context, int flags, char* source, int length, Answer* answer)
+    {
+        s_flags.Add(flags);
+        if (source != null && new string(source, 0, length).Contains(" anonymous(", StringComparison.Ordinal)) s_assembled = flags == 2;
+        return flags == 2 || flags == 4 ? 1 : 0;
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_SetCodeGenHostCheck", 16, out var setExport) || !Export("Ssrs2_InstallCodeLike", 8, out var codeLikeExport)) return "export missing";
+        var set = (delegate* unmanaged[Stdcall]<int, delegate* unmanaged[Cdecl]<int, int, char*, int, Answer*, int>, char*, int, int>)setExport;
+        var codeLike = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)codeLikeExport;
+
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, maker = "codeLike\0"u8)
+            {
+                if (codeLike(holder, maker) != 1) return false;
+            }
+            return set(0, &HostCheck, null, 0) > 0;
+        }));
+        // (the flags of the requests since the last ask, and whether an assembled source was among them with flags 2)
+        engine.AddHostObject("asked", new Func<string>(() =>
+        {
+            var seen = string.Join(",", s_flags) + (s_assembled ? " assembled" : "");
+            s_flags.Clear(); s_assembled = false;
+            return seen;
+        }));
+        return (string)engine.Evaluate("""
+            install();
+            const e = f => { let made; try { made = String(f()); } catch (x) { made = x.name; } return made + ' ' + asked(); };
+            const code = text => { const o = new __toy.codeLike(); o.toString = () => text; return o; };
+            const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
+            const GeneratorFunction = Object.getPrototypeOf(function* () { }).constructor;
+            [
+                e(() => eval('1 + 1')),
+                e(() => (function () { let local = 1; eval(code('local = 2')); return local; })()),
+                e(() => (0, eval)(code('6 * 7'))),
+                e(() => new Function(code('return 3'))()),
+                e(() => new Function(code('a'), code('return a + 1'))(4)),
+                e(() => new Function(code('a'), 'return a')),
+                e(() => new Function('return 1')),
+                e(() => new Function()),
+                e(() => new Function({ toString() { return 'return 1'; } })),
+                e(() => typeof new AsyncFunction(code('return 1'))),
+                e(() => typeof new GeneratorFunction(code('yield 1'))),
+            ].join(':')
+            """);
     }
 }

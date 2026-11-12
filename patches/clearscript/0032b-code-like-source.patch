@@ -1,0 +1,28 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3065,7 +3065,10 @@
+ //
+ // V8 then asks the check, on the isolate's thread, from inside the script's request:
+ //   - before it compiles a string (eval, the Function constructors' assembled source text): flags 0, source the text;
+-//   - for a code-like object (0013) given to eval or to a Function constructor: flags 2, source the object's text;
++//   - for what V8 takes as code (0013): flags 2, source the text. That is a code-like object given to eval or to a
++//     Function constructor (the object's own text), and (0032b) a Function constructor's assembled source text when
++//     every argument it was given was a code-like object, each of which the check was asked for first. A
++//     constructor given a plain string among its arguments, or no argument, has its source asked with flags 0;
+ //   - for any other object given to eval or to a Function constructor: flags 4, no source (null, 0), the object left
+ //     at index 1 of the context's handle table (0030) where it has one;
+ //   - before it compiles WebAssembly from bytes (WebAssembly.Module, compile, instantiate, their streaming forms):
+@@ -3145,6 +3148,12 @@
+         if (source->IsString())
+         {
+             text = source.As<v8::String>();
++            // (0032b: a string V8 itself says is code-like, a Function constructor's source made of code-like
++            // arguments only: told as such, as 0019's script check is, which is given V8's answer with every value)
++            if (isCodeLike)
++            {
++                flags = kCodeLike;
++            }
+         }
+         else if (!source->IsObject())
+         {
