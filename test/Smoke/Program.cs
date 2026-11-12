@@ -82,6 +82,8 @@ var immutableByHandle = ImmutablePrototypesByHandle.Check(Directory.GetFiles(App
 Console.WriteLine($"immutable prototype by handle: {immutableByHandle}");
 var proxies = ProxyKinds.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"proxy kind and target: {proxies}");
+var hostScheduler = ImportHostSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"import host scheduler: {hostScheduler}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -90,8 +92,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
-    && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}");
+    && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
+    && hostScheduler == ImportHostSchedulers.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1668,6 +1671,133 @@ static unsafe class ProxyKinds
             """));
         results.Add(first.Evaluate("ofSecond()") + " " + second.Evaluate("String(__toy.handles[4] === inside)"));
         results.Add((string)first.Evaluate("refused()"));
+        return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0036: Ssrs2_SetImportHostScheduler(context, scheduler) gives a context a scheduler of dynamic
+// imports that is a C function of the host's: for each import() of a module not evaluated yet it is given the
+// context's number, the continuation (a function left under handle 1 of the context's table, which evaluates the
+// module and settles the import) and the module's resource name; it takes the continuation (1) and calls it later,
+// or declines (0: evaluated in a microtask, as with no scheduler). Checked with toy modules: two imports taken (the
+// scheduler moves each continuation under a handle of the script's through Ssrs2_Call) and one declined; nothing
+// evaluated but the declined one when the importing script ends; the first continuation called from a host call of
+// another context of the isolate with Ssrs2_CallIn and a checkpoint (the module evaluated, the import resolved), the
+// second from a host call of its own context (a module that throws: the import alone rejected, no rejection left
+// without a handler), a continuation called twice (nothing more); the scheduler taken away (evaluated in a
+// microtask); a number that names no context.
+static unsafe class ImportHostSchedulers
+{
+    public const string Expected = "true:before after declined:2 side.js bad.js decline.js 1:before after declined evaluated resolved:bad 0:before after declined evaluated resolved:true late:0";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Value { public int Kind; public int Length; public double Number; public nint Data; }
+    const int Number = 2, Handle = 8;
+
+    sealed class Loader : DocumentLoader
+    {
+        public override Document LoadDocument(DocumentSettings settings, DocumentInfo? sourceInfo, string specifier, DocumentCategory category, DocumentContextCallback contextCallback)
+        {
+            if (specifier.EndsWith("\0import()", StringComparison.Ordinal)) specifier = specifier[..^"\0import()".Length];
+            var code = specifier.Contains("side", StringComparison.Ordinal) ? "globalThis.order.push('evaluated');"
+                : specifier.Contains("decline", StringComparison.Ordinal) ? "globalThis.order.push('declined');"
+                : specifier.Contains("late", StringComparison.Ordinal) ? "globalThis.order.push('late');" : "throw new Error('bad');";
+            return new StringDocument(new DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard }, code);
+        }
+
+        public override Task<Document> LoadDocumentAsync(DocumentSettings settings, DocumentInfo? sourceInfo, string specifier, DocumentCategory category, DocumentContextCallback contextCallback) =>
+            Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
+    }
+
+    static delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int> s_call;
+    static readonly List<int> s_taken = new(), s_contexts = new();
+    static readonly List<string> s_names = new();
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int Scheduler(int context, int continuation, char* name, int nameLength)
+    {
+        var text = name == null ? "" : new string(name, 0, nameLength);
+        s_names.Add(text[(text.LastIndexOf('/') + 1)..]);
+        if (!s_contexts.Contains(context)) s_contexts.Add(context);
+        if (text.Contains("decline", StringComparison.Ordinal)) return 0;
+        // (the continuation moved from handle 1 under a handle the script gives: its function under handle 3)
+        Value answer, given = new Value { Kind = Handle, Number = continuation };
+        if (s_call(3, 0, &given, 1, &answer) != 1 || answer.Kind != Number) return 0;
+        s_taken.Add((int)answer.Number);
+        return 1;
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_InstallHandles", 8, out var handlesExport)
+            || !Export("Ssrs2_Call", 20, out var callExport) || !Export("Ssrs2_CallIn", 28, out var callInExport)
+            || !Export("Ssrs2_SetImportHostScheduler", 8, out var setExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        s_call = (delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int>)callExport;
+        var callIn = (delegate* unmanaged[Stdcall]<int, int, int, Value*, int, int, Value*, int>)callInExport;
+        var set = (delegate* unmanaged[Stdcall]<int, delegate* unmanaged[Cdecl]<int, int, char*, int, int>, int>)setExport;
+
+        using var runtime = new V8Runtime();
+        using var engine = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
+        using var other = runtime.CreateScriptEngine();
+        int unhandled = 0, own = 0;
+        engine.PromiseRejectionCallback = (kind, promise, value) =>
+        {
+            if (kind == V8PromiseRejectionEventKind.RejectedWithoutHandler) unhandled++;
+            else if (kind == V8PromiseRejectionEventKind.HandlerAddedAfterRejection) unhandled--;
+        };
+        engine.DocumentSettings.Loader = new Loader();
+        engine.DocumentSettings.AccessFlags = DocumentAccessFlags.EnableAllLoading;
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8)
+            {
+                if (handles(holder, table) != 1) return false;
+            }
+            own = number();
+            return set(0, &Scheduler) == own && own > 0;
+        }));
+        // (a continuation called from a host call of its own context, twice: the second call does nothing)
+        engine.AddHostObject("runSecond", new Action(() =>
+        {
+            Value answer;
+            s_call(s_taken[1], 0, null, 0, &answer);
+            s_call(s_taken[1], 0, null, 0, &answer);
+            s_call(s_taken[0], 0, null, 0, &answer);
+        }));
+        engine.AddHostObject("remove", new Func<bool>(() => set(0, null) == own));
+        // (a continuation called from a host call of another context, with a checkpoint: the import's reactions run)
+        other.AddHostObject("runFirst", new Func<int>(() =>
+        {
+            Value answer;
+            return callIn(own, s_taken[0], 0, null, 0, 1, &answer);
+        }));
+        other.AddHostObject("dead", new Func<int>(() => set(int.MaxValue, &Scheduler)));
+
+        var results = new List<string>();
+        results.Add(((bool)engine.Evaluate("globalThis.next = 20; const made = install(); __toy.handles[3] = run => { __toy.handles[next] = run; return next++; }; made")).ToString().ToLowerInvariant());
+        engine.Execute(new DocumentInfo(new Uri("file:///main.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            "globalThis.order = ['before']; import('./side.js').then(() => order.push('resolved')); import('./bad.js').catch(e => { globalThis.caught = e.message; });"
+            + " import('./decline.js'); globalThis.order.push('after');");
+        results.Add((string)engine.Evaluate("order.join(' ')"));
+        results.Add($"{s_taken.Count} {string.Join(" ", s_names)} {s_contexts.Count}");
+        var ran = Convert.ToInt32(other.Evaluate("runFirst()"));
+        results.Add(ran == 1 ? (string)engine.Evaluate("order.join(' ')") : "failed " + ran);
+        engine.Execute("runSecond()");
+        engine.Execute("0");
+        results.Add($"{engine.Evaluate("String(globalThis.caught)")} {unhandled}");
+        results.Add((string)engine.Evaluate("order.join(' ')"));
+        // (the scheduler taken away: evaluated in a microtask, the host not asked)
+        int asked = s_names.Count;
+        var removed = (bool)engine.Evaluate("remove()");
+        engine.Execute(new DocumentInfo(new Uri("file:///main2.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            "globalThis.order = []; import('./late.js');");
+        results.Add($"{(removed && s_names.Count == asked).ToString().ToLowerInvariant()} {engine.Evaluate("order.join(' ')")}");
+        results.Add(Convert.ToInt32(other.Evaluate("dead()")).ToString());
         return string.Join(":", results);
     }
 }
