@@ -71,6 +71,8 @@ var tables = InterceptorTables.Check(Directory.GetFiles(AppContext.BaseDirectory
 Console.WriteLine($"interceptor tables: {tables}");
 var guards = InterceptorTableGuards.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"interceptor table guards: {guards}");
+var hostCheck = CodeGenHostChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"code generation host check: {hostCheck}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -78,8 +80,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
-    && guards == InterceptorTableGuards.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}");
+    && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1166,6 +1168,154 @@ static unsafe class InterceptorTableGuards
             """));
         engine.CollectGarbage(true);
         results.Add(made + " " + engine.Evaluate("'collected'"));
+        return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0032: Ssrs2_ContextNumber answers a number for the current context, and
+// Ssrs2_SetCodeGenHostCheck(context, check, message, length) gives a context a check of code generation that is a C
+// function of the host's: asked before a string is compiled (eval, the Function constructors), for a code-like object,
+// for any other object given to them, and before WebAssembly is compiled from bytes; it allows, refuses (with its own
+// message or the one given here) or allows with another text. Checked with toy sources: a string allowed, a direct eval
+// keeping its scope, a refusal with the default message and with the check's own, a replacement, the Function
+// constructor allowed and refused, a number (not asked), a plain object and a code-like one, a check that runs script
+// which evals again (entered twice), WebAssembly allowed then refused, the check taken away; a second context of the
+// same isolate unchecked, then given the check by its number from the first and freed of it; a number that names no
+// context any more.
+static unsafe class CodeGenHostChecks
+{
+    public const string Expected =
+        "true:2:2:EvalError refused by the host:EvalError the check's own words:42:3:EvalError refused by the host:5:true:42:42:7"
+        + ":[object WebAssembly.Module]:CompileError WebAssembly.Module(): no WebAssembly here:[object WebAssembly.Module]"
+        + ":strings 10 code-like 1 objects 3 wasm 3 nested 1 contexts 1"
+        + ":NOPE:NOPE [object WebAssembly.Module]:true EvalError Code generation from strings disallowed for this context:true NOPE:0";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Answer { public nint Source; public int SourceLength; public nint Message; public int MessageLength; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct Value { public int Kind; public int Length; public double Number; public nint Data; }
+
+    static delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int> s_call;
+    static readonly int[] s_counts = new int[8];
+    static readonly HashSet<int> s_contexts = new();
+    static bool s_wasm = true;
+    static int s_depth, s_nested;
+    // (the answers' texts, the host's until its next answer: kept for the process here)
+    static readonly nint s_swap = Marshal.StringToHGlobalUni("40 + 2"), s_words = Marshal.StringToHGlobalUni("the check's own words"),
+        s_noWasm = Marshal.StringToHGlobalUni("no WebAssembly here");
+    static nint s_made;
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int HostCheck(int context, int flags, char* source, int length, Answer* answer)
+    {
+        s_counts[flags]++;
+        s_contexts.Add(context);
+        if (s_depth > 0) s_nested++;
+        if ((flags & 1) != 0)
+        {
+            if (s_wasm) return 1;
+            answer->Message = s_noWasm; answer->MessageLength = "no WebAssembly here".Length;
+            return 0;
+        }
+        if ((flags & 4) != 0) return source == null && length == 0 ? 1 : 0;
+        var text = new string(source, 0, length);
+        if (text.Contains("NOPE")) return 0;
+        if (text.Contains("WORDS")) { answer->Message = s_words; answer->MessageLength = "the check's own words".Length; return 0; }
+        if (text.Contains("SWAP")) { answer->Source = s_swap; answer->SourceLength = "40 + 2".Length; return 2; }
+        if (text.Contains("NEST"))
+        {
+            // (script run from inside the check: the function under handle 3 evals a string itself, and its answer, a
+            // string, is the text compiled in place of this one)
+            Value made;
+            s_depth++;
+            int called = s_call(3, 0, null, 0, &made);
+            s_depth--;
+            if (called != 1 || made.Kind != 4) return 0;
+            if (s_made != 0) Marshal.FreeHGlobal(s_made);
+            s_made = Marshal.StringToHGlobalUni(new string((char*)made.Data, 0, made.Length));
+            answer->Source = s_made; answer->SourceLength = made.Length;
+            return 2;
+        }
+        return 1;
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_SetCodeGenHostCheck", 16, out var setExport)
+            || !Export("Ssrs2_InstallHandles", 8, out var handlesExport) || !Export("Ssrs2_Call", 20, out var callExport)
+            || !Export("Ssrs2_InstallCodeLike", 8, out var codeLikeExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var set = (delegate* unmanaged[Stdcall]<int, delegate* unmanaged[Cdecl]<int, int, char*, int, Answer*, int>, char*, int, int>)setExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        var codeLike = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)codeLikeExport;
+        s_call = (delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int>)callExport;
+
+        using var runtime = new V8Runtime();
+        using var engine = runtime.CreateScriptEngine();
+        var other = runtime.CreateScriptEngine();
+        int own = 0, others = 0;
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8, maker = "codeLike\0"u8)
+            {
+                if (handles(holder, table) != 1 || codeLike(holder, maker) != 1) return false;
+            }
+            own = number();
+            fixed (char* message = "refused by the host") return set(0, &HostCheck, message, "refused by the host".Length) == own && own > 0 && number() == own;
+        }));
+        engine.AddHostObject("wasm", new Action<bool>(on => s_wasm = on));
+        engine.AddHostObject("remove", new Func<bool>(() => set(0, null, null, 0) == own));
+        // (the other context's check set and taken away from this one, by its number)
+        engine.AddHostObject("checkOther", new Func<bool>(() => set(others, &HostCheck, null, 0) == others));
+        engine.AddHostObject("freeOther", new Func<bool>(() => set(others, null, null, 0) == others));
+        engine.AddHostObject("deadOther", new Func<int>(() => set(others, &HostCheck, null, 0)));
+        other.AddHostObject("number", new Action(() => others = number()));
+        other.Execute("number()");
+
+        var results = new List<string>();
+        results.Add((string)engine.Evaluate("""
+            const e = f => { try { return String(f()); } catch (x) { return x.name + ' ' + x.message; } };
+            const r = [String(install())], h = __toy.handles;
+            h[3] = () => String(eval('3 + 4'));
+            r.push(e(() => eval('1 + 1')));
+            r.push(e(() => (function () { let local = 1; eval('local = 2'); return local; })()));
+            r.push(e(() => eval('"NOPE"')));
+            r.push(e(() => eval('"WORDS"')));
+            r.push(e(() => eval('SWAP')));
+            r.push(e(() => new Function('return 3')()));
+            r.push(e(() => new Function('NOPE')));
+            r.push(e(() => eval(5)));
+            const plain = { toString() { return 'return 6 * 7'; } };
+            r.push(e(() => eval(plain) === plain && h[1] === plain));
+            r.push(e(() => new Function(plain)()));
+            const code = new __toy.codeLike(); code.toString = () => '6 * 7';
+            r.push(e(() => eval(code)));
+            r.push(e(() => eval('NEST')));
+            const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+            r.push(e(() => new WebAssembly.Module(bytes)));
+            wasm(false); r.push(e(() => new WebAssembly.Module(bytes))); wasm(true);
+            r.push(e(() => new WebAssembly.Module(bytes)));
+            r.join(':')
+            """));
+        // (how often the check was asked: the plain object counts twice for its direct eval, which V8 resolves and then
+        // calls as the global eval, and once as the Function constructor's argument)
+        results.Add($"strings {s_counts[0]} code-like {s_counts[2]} objects {s_counts[4]} wasm {s_counts[1]} nested {s_nested} contexts {s_contexts.Count}");
+        // (the check taken away: strings compile unchecked)
+        results.Add((string)engine.Evaluate("remove() ? eval('\"NOPE\"') : 'kept'"));
+        // (the second context: unchecked, then given the check by its number from the first, then freed of it)
+        s_wasm = false;
+        results.Add((string)other.Evaluate("eval('\"NOPE\"') + ' ' + new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))"));
+        s_wasm = true;
+        var given = (bool)engine.Evaluate("checkOther()");
+        results.Add(given.ToString().ToLowerInvariant() + " " + (string)other.Evaluate("(() => { try { return eval('\"NOPE\"'); } catch (x) { return x.name + ' ' + x.message; } })()"));
+        var freed = (bool)engine.Evaluate("freeOther()");
+        results.Add(freed.ToString().ToLowerInvariant() + " " + (string)other.Evaluate("eval('\"NOPE\"')"));
+        // (the second context gone: its number names nothing)
+        other.Dispose();
+        results.Add(Convert.ToInt32(engine.Evaluate("deadOther()")).ToString());
         return string.Join(":", results);
     }
 }

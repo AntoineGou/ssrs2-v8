@@ -1,0 +1,495 @@
+diff --git a/ClearScriptV8/V8ContextImpl.cpp b/ClearScriptV8/V8ContextImpl.cpp
+--- a/ClearScriptV8/V8ContextImpl.cpp
++++ b/ClearScriptV8/V8ContextImpl.cpp
+@@ -4,6 +4,9 @@
+ // Licensed under the MIT license.
+ 
+ #include "ClearScriptV8Native.h"
++
++// SSRS2 (0032): the context numbers' table, V8SplitProxyNative.cpp.
++void Ssrs2ContextGone(v8::Isolate* isolate, v8::Local<v8::Context> context);
+ 
+ // SSRS2 (0015): the resource name of the host's stand-in script for "no referrer" (V8SplitProxyNative.cpp's
+ // Ssrs2_SetNoReferrerName sets it), for every isolate.
+@@ -2564,6 +2567,12 @@
+ 
+     m_spIsolateImpl->RemoveContext(this);
+ 
++    // SSRS2 (0032): the context's number names no context from here on (V8SplitProxyNative.cpp, Ssrs2Contexts).
++    if (!m_hContext.IsEmpty())
++    {
++        Ssrs2ContextGone(v8::Isolate::GetCurrent(), m_hContext);
++    }
++
+     // SSRS2 (0017): this context's functions, still callable from its script, find no context from here on.
+     if (m_pSsrs2Link != nullptr)
+     {
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -1955,6 +1955,9 @@
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2 (0032): the context numbers' table, V8SplitProxyNative.cpp.
++void Ssrs2IsolateGone(v8::Isolate* isolate);
++
+ V8IsolateImpl::~V8IsolateImpl()
+ {
+     --s_InstanceCount;
+@@ -1966,6 +1969,8 @@
+     BEGIN_ISOLATE_SCOPE
+         DisableDebugging();
+         ClearScriptCache();
++        // SSRS2 (0032): the table of the isolate's numbered contexts goes with it.
++        Ssrs2IsolateGone(m_upIsolate.get());
+     END_ISOLATE_SCOPE
+ 
+     {
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2134,6 +2134,8 @@
+ 
+ // (0030, below: the script value under a handle of the current context)
+ static v8::MaybeLocal<v8::Value> Ssrs2HandleValue(v8::Isolate* isolate, int32_t handle);
++// (0032, below: a value left under a handle of a context's table; false where the context has no table)
++static bool Ssrs2HandlePut(v8::Local<v8::Context> context, int32_t handle, v8::Local<v8::Value> value);
+ 
+ namespace Ssrs2DirectCalls
+ {
+@@ -2894,6 +2896,330 @@
+         return v8::Local<v8::Object>();
+     }
+     return object;
++}
++
++// Context numbers (0032). A host with several contexts in an isolate names one by a number the library gives it:
++//
++//   int32_t Ssrs2_ContextNumber(void);
++//
++// from inside a host call, answers the current context's number: 1 or more, the same at each ask, never given to
++// another context of the process; 0 outside a context. The exports that take a context (0032 and later) take that
++// number, or 0 for the current context, and a host callback is told the number of the context it is asked for. A
++// number names its context until the context is torn down (its engine disposed) or collected: after that an export
++// answers as it does where there is no context, and no callback is called for it. The numbers of an isolate's
++// contexts are kept by the isolate (its data slot 2: a table of weak references, freed with the isolate) and in each
++// context's embedder data (index 5). Threading: the isolate's thread, the isolate entered and locked by the caller, as
++// for every export here; nothing is shared between isolates but the counter the numbers come from.
++#include <atomic>
++#include <cstdint>
++#include <iterator>
++#include <memory>
++
++namespace Ssrs2Contexts
++{
++    constexpr uint32_t kIsolateSlot = 2;
++    constexpr int kNumberIndex = 5;
++
++    struct Table
++    {
++        std::unordered_map<int32_t, v8::Global<v8::Context>> contexts;
++        size_t sweepAt = 64;
++    };
++
++    static std::atomic<int32_t> g_next { 1 };
++
++    static Table* TableOf(v8::Isolate* isolate, bool make)
++    {
++        auto table = static_cast<Table*>(isolate->GetData(kIsolateSlot));
++        if (table == nullptr && make)
++        {
++            table = new Table();
++            isolate->SetData(kIsolateSlot, table);
++        }
++        return table;
++    }
++
++    // The number a context carries (0: none), which names it only while the isolate's table has it for that context
++    // (a context read from a snapshot carries what the snapshot's had).
++    static int32_t Stored(v8::Local<v8::Context> context)
++    {
++        if (context->GetNumberOfEmbedderDataFields() <= static_cast<uint32_t>(kNumberIndex))
++        {
++            return 0;
++        }
++        auto data = context->GetEmbedderDataV2(kNumberIndex);
++        if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsInt32())
++        {
++            return 0;
++        }
++        return data.As<v8::Int32>()->Value();
++    }
++
++    // The context's number, given now where it has none; 0 when there is none left to give.
++    static int32_t NumberOf(v8::Isolate* isolate, v8::Local<v8::Context> context)
++    {
++        auto table = TableOf(isolate, true);
++        int32_t number = Stored(context);
++        if (number > 0)
++        {
++            auto found = table->contexts.find(number);
++            if (found != table->contexts.end() && found->second.Get(isolate) == context)
++            {
++                return number;
++            }
++        }
++        number = g_next.fetch_add(1);
++        if (number <= 0)
++        {
++            g_next.store(INT32_MIN);
++            return 0;
++        }
++        // (the references of collected contexts dropped, now and then)
++        if (table->contexts.size() >= table->sweepAt)
++        {
++            for (auto it = table->contexts.begin(); it != table->contexts.end(); )
++            {
++                it = it->second.IsEmpty() ? table->contexts.erase(it) : std::next(it);
++            }
++            table->sweepAt = table->contexts.size() * 2 + 64;
++        }
++        auto& slot = table->contexts[number];
++        slot.Reset(isolate, context);
++        slot.SetWeak();
++        context->SetEmbedderDataV2(kNumberIndex, v8::Integer::New(isolate, number));
++        return number;
++    }
++
++    // The context a number names (0: the current one): empty for a number that names none.
++    static v8::Local<v8::Context> Find(v8::Isolate* isolate, int32_t number)
++    {
++        if (number == 0)
++        {
++            return isolate->InContext() ? isolate->GetCurrentContext() : v8::Local<v8::Context>();
++        }
++        auto table = TableOf(isolate, false);
++        if (table == nullptr)
++        {
++            return v8::Local<v8::Context>();
++        }
++        auto found = table->contexts.find(number);
++        if (found == table->contexts.end())
++        {
++            return v8::Local<v8::Context>();
++        }
++        auto context = found->second.Get(isolate);
++        if (context.IsEmpty())
++        {
++            table->contexts.erase(found);
++        }
++        return context;
++    }
++}
++
++// (V8ContextImpl::Teardown: the context's number names nothing from here on)
++void Ssrs2ContextGone(v8::Isolate* isolate, v8::Local<v8::Context> context)
++{
++    auto table = Ssrs2Contexts::TableOf(isolate, false);
++    if (table == nullptr || context.IsEmpty())
++    {
++        return;
++    }
++    int32_t number = Ssrs2Contexts::Stored(context);
++    auto found = table->contexts.find(number);
++    if (number > 0 && found != table->contexts.end() && found->second.Get(isolate) == context)
++    {
++        table->contexts.erase(found);
++    }
++}
++
++// (V8IsolateImpl's destructor, the isolate still there: its table freed)
++void Ssrs2IsolateGone(v8::Isolate* isolate)
++{
++    delete Ssrs2Contexts::TableOf(isolate, false);
++    isolate->SetData(Ssrs2Contexts::kIsolateSlot, nullptr);
++}
++
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_ContextNumber() noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext())
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    return Ssrs2Contexts::NumberOf(isolate, isolate->GetCurrentContext());
++}
++
++// A context's check of code generation answered by the host (0032): where 0019's check is a script function, this one
++// is a C function of the host's.
++//
++//   typedef struct { const uint16_t* source; int32_t sourceLength; const uint16_t* message; int32_t messageLength; } Ssrs2CodeGenAnswer;
++//   typedef int32_t (*Ssrs2CodeGenHostCheck)(int32_t context, int32_t flags, const uint16_t* source, int32_t length, Ssrs2CodeGenAnswer* answer);
++//   int32_t Ssrs2_SetCodeGenHostCheck(int32_t context, Ssrs2CodeGenHostCheck check, const uint16_t* message, int32_t messageLength);
++//
++// Ssrs2_SetCodeGenHostCheck gives the context (its number, or 0 for the current one) the check, with the message of
++// the error a refusal throws where the check gives none (UTF-16; null: V8's own words), and answers the context's
++// number, 0 where there is no such context. check null takes the context's host check away (strings compile again
++// unchecked). The function is the process's: the last one given is the one called, for every context that has a host
++// check. A context has one check: a host check replaces 0019's script check and the reverse.
++//
++// V8 then asks the check, on the isolate's thread, from inside the script's request:
++//   - before it compiles a string (eval, the Function constructors' assembled source text): flags 0, source the text;
++//   - for a code-like object (0013) given to eval or to a Function constructor: flags 2, source the object's text;
++//   - for any other object given to eval or to a Function constructor: flags 4, no source (null, 0), the object left
++//     at index 1 of the context's handle table (0030) where it has one;
++//   - before it compiles WebAssembly from bytes (WebAssembly.Module, compile, instantiate, their streaming forms):
++//     flags 1, no source.
++// It answers 0 to refuse, 1 to allow what was given (an object of flags 4 is then left as it is: eval returns it, a
++// Function constructor converts it to a string), 2 to allow with the text it puts in answer->source compiled in place
++// of what was given (WebAssembly: as 1). On a refusal V8 throws an EvalError (WebAssembly: a CompileError, or rejects
++// the promise with one) whose message is answer->message where the check set it, else the message given here. A value
++// that is neither a string nor an object (eval(5)) is not code: the check is not asked. V8 may ask twice for one
++// request (an object given to a direct eval: once when it resolves the call, once as the global eval's argument).
++//
++// The callback's contract. source is the library's and dies when the check returns. What the check puts in the answer
++// stays the host's, valid until the check is next called on that thread (the library copies it as soon as the check
++// returns). The check may be entered again before it returns, if it runs script that asks for code itself (it may
++// call Ssrs2_Call and Ssrs2_CallIn: V8 allows script here, and the library keeps nothing of its own across the call);
++// it must leave no script exception pending, must not dispose the context, its engine or the isolate, and must not
++// wait for another thread that needs the isolate.
++// (the context's embedder data that holds its check: 0019's script function, or a host check's default message)
++static const int kSsrs2CodeGenCheckIndex = 3;
++
++namespace Ssrs2CodeGenHost
++{
++    enum : int32_t { kWasm = 1, kCodeLike = 2, kObject = 4 };
++
++    struct Answer
++    {
++        const uint16_t* source;
++        int32_t sourceLength;
++        const uint16_t* message;
++        int32_t messageLength;
++    };
++
++    using Check = int32_t (*)(int32_t context, int32_t flags, const uint16_t* source, int32_t length, Answer* answer);
++
++    static std::atomic<Check> g_check { nullptr };
++
++    // The host check's default message, where the context has a host check (its embedder data at 0019's index: a
++    // function for a script check, a string for a host check).
++    static bool DefaultMessage(v8::Local<v8::Context> context, v8::Local<v8::String>* message)
++    {
++        if (context->GetNumberOfEmbedderDataFields() <= static_cast<uint32_t>(kSsrs2CodeGenCheckIndex))
++        {
++            return false;
++        }
++        auto data = context->GetEmbedderDataV2(kSsrs2CodeGenCheckIndex);
++        if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsString())
++        {
++            return false;
++        }
++        *message = data.As<v8::String>();
++        return true;
++    }
++
++    static v8::Local<v8::String> Message(v8::Isolate* isolate, const Answer& answer, v8::Local<v8::String> byDefault)
++    {
++        v8::Local<v8::String> message;
++        if (answer.message != nullptr && answer.messageLength >= 0
++            && v8::String::NewFromTwoByte(isolate, answer.message, v8::NewStringType::kNormal, answer.messageLength).ToLocal(&message))
++        {
++            return message;
++        }
++        return byDefault;
++    }
++
++    // V8's request for a string or an object, answered by the host.
++    static v8::ModifyCodeGenerationFromStringsResult Ask(v8::Isolate* isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> source, bool isCodeLike, v8::Local<v8::String> byDefault)
++    {
++        v8::ModifyCodeGenerationFromStringsResult result;
++        result.codegen_allowed = false;
++        auto check = g_check.load();
++        if (check == nullptr)
++        {
++            return result;
++        }
++        int32_t flags = 0;
++        v8::Local<v8::String> text;
++        if (source->IsString())
++        {
++            text = source.As<v8::String>();
++        }
++        else if (!source->IsObject())
++        {
++            // (a number, a boolean, a symbol: no code is made of it)
++            result.codegen_allowed = true;
++            return result;
++        }
++        else if (isCodeLike)
++        {
++            flags = kCodeLike;
++            v8::TryCatch tryCatch(isolate);
++            if (!source->ToString(context).ToLocal(&text))
++            {
++                return result;
++            }
++        }
++        else
++        {
++            flags = kObject;
++            (void)Ssrs2HandlePut(context, 1, source);
++        }
++        // (a copy of the text for this call alone: the check may be entered again before it returns)
++        std::unique_ptr<uint16_t[]> chars;
++        int32_t length = 0;
++        if (!text.IsEmpty())
++        {
++            length = text->Length();
++            chars.reset(new uint16_t[static_cast<size_t>(length) + 1]);
++            text->WriteV2(isolate, 0, static_cast<uint32_t>(length), chars.get());
++            chars[length] = 0;
++        }
++        Answer answer { nullptr, 0, nullptr, 0 };
++        int32_t verdict = check(Ssrs2Contexts::NumberOf(isolate, context), flags, chars.get(), length, &answer);
++        if (verdict == 0)
++        {
++            context->SetErrorMessageForCodeGenerationFromStrings(Message(isolate, answer, byDefault));
++            return result;
++        }
++        result.codegen_allowed = true;
++        v8::Local<v8::String> replacement;
++        if (verdict == 2 && answer.source != nullptr && answer.sourceLength >= 0
++            && v8::String::NewFromTwoByte(isolate, answer.source, v8::NewStringType::kNormal, answer.sourceLength).ToLocal(&replacement))
++        {
++            result.modified_source = replacement;
++        }
++        else if (!text.IsEmpty())
++        {
++            result.modified_source = text;
++        }
++        return result;
++    }
++
++    // V8's request before it compiles WebAssembly from bytes (it gives no source): a context without a host check
++    // allows it, as V8 does without the callback.
++    static bool AskWasm(v8::Local<v8::Context> context, v8::Local<v8::String>)
++    {
++        auto isolate = v8::Isolate::GetCurrent();
++        v8::Local<v8::String> byDefault;
++        if (!DefaultMessage(context, &byDefault))
++        {
++            return true;
++        }
++        auto check = g_check.load();
++        if (check == nullptr)
++        {
++            return false;
++        }
++        Answer answer { nullptr, 0, nullptr, 0 };
++        if (check(Ssrs2Contexts::NumberOf(isolate, context), kWasm, nullptr, 0, &answer) != 0)
++        {
++            return true;
++        }
++        context->SetErrorMessageForWasmCodeGeneration(Message(isolate, answer, byDefault));
++        return false;
++    }
+ }
+ 
+ // A context's check of code made from strings (0019): V8's modify-code-generation callback (the overload with is_code_like),
+@@ -2909,8 +3235,6 @@
+ // answers as V8 does without the callback: its strings compiled where it allows them, a code-like object as its
+ // string. With a check, eval and the Function constructors stay V8's own, a direct eval keeping its scope (HTML's
+ // Content-Security-Policy and Trusted Types checks, run by the host's script, where the host replaced eval before).
+-static const int kSsrs2CodeGenCheckIndex = 3;
+-
+ static v8::ModifyCodeGenerationFromStringsResult Ssrs2CodeGenCallback(v8::Local<v8::Context> context, v8::Local<v8::Value> source, bool isCodeLike)
+ {
+     v8::ModifyCodeGenerationFromStringsResult result;
+@@ -2925,6 +3249,11 @@
+     {
+         check = context->GetEmbedderDataV2(kSsrs2CodeGenCheckIndex);
+     }
++    // (0032: a string there is a host check's default message: the host is asked)
++    if (!check.IsEmpty() && check->IsValue() && check.As<v8::Value>()->IsString())
++    {
++        return Ssrs2CodeGenHost::Ask(isolate, context, source, isCodeLike, check.As<v8::String>());
++    }
+     if (check.IsEmpty() || !check->IsValue() || !check.As<v8::Value>()->IsFunction())
+     {
+         if (source->IsString())
+@@ -3028,6 +3357,51 @@
+         return 0;
+     }
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
++}
++
++// (0032: see Ssrs2CodeGenHost above)
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_SetCodeGenHostCheck(int32_t context, void* check, const uint16_t* message, int32_t messageLength) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto target = Ssrs2Contexts::Find(isolate, context);
++    if (target.IsEmpty())
++    {
++        return 0;
++    }
++    if (check == nullptr)
++    {
++        v8::Local<v8::String> was;
++        if (Ssrs2CodeGenHost::DefaultMessage(target, &was))
++        {
++            target->SetEmbedderDataV2(kSsrs2CodeGenCheckIndex, v8::Undefined(isolate));
++            target->AllowCodeGenerationFromStrings(true);
++        }
++        return Ssrs2Contexts::NumberOf(isolate, target);
++    }
++    v8::Local<v8::String> byDefault;
++    if (message == nullptr || messageLength < 0
++        || !v8::String::NewFromTwoByte(isolate, message, v8::NewStringType::kNormal, messageLength).ToLocal(&byDefault))
++    {
++        byDefault = v8::String::NewFromUtf8Literal(isolate, "Code generation from strings disallowed for this context");
++    }
++    int32_t number = Ssrs2Contexts::NumberOf(isolate, target);
++    if (number == 0)
++    {
++        return 0;
++    }
++    Ssrs2CodeGenHost::g_check.store(reinterpret_cast<Ssrs2CodeGenHost::Check>(check));
++    isolate->SetModifyCodeGenerationFromStringsCallback(Ssrs2CodeGenCallback);
++    isolate->SetAllowWasmCodeGenerationCallback(Ssrs2CodeGenHost::AskWasm);
++    target->SetEmbedderDataV2(kSsrs2CodeGenCheckIndex, byDefault);
++    target->SetErrorMessageForCodeGenerationFromStrings(byDefault);
++    target->SetErrorMessageForWasmCodeGeneration(byDefault);
++    target->AllowCodeGenerationFromStrings(false);
++    return number;
+ }
+ 
+ // The context a promise job runs in (0020): entryGlobal() answers, while V8 runs its microtasks, the global of the context
+@@ -3678,6 +4052,22 @@
+     return data.As<v8::Array>()->Get(context, static_cast<uint32_t>(handle));
+ }
+ 
++static bool Ssrs2HandlePut(v8::Local<v8::Context> context, int32_t handle, v8::Local<v8::Value> value)
++{
++    if (context.IsEmpty() || context->GetNumberOfEmbedderDataFields() <= static_cast<uint32_t>(kSsrs2HandlesIndex) || handle < 0)
++    {
++        return false;
++    }
++    auto data = context->GetEmbedderDataV2(kSsrs2HandlesIndex);
++    if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsArray())
++    {
++        return false;
++    }
++    // (a table the script froze, or gave a setter: no exception is left behind)
++    v8::TryCatch tryCatch(v8::Isolate::GetCurrent());
++    return data.As<v8::Array>()->Set(context, static_cast<uint32_t>(handle), value).FromMaybe(false);
++}
++
+ NATIVE_ENTRY_POINT(int) Ssrs2_InstallHandles(const char* holder, const char* name) noexcept
+ {
+     auto isolate = v8::Isolate::TryGetCurrent();
+@@ -4214,5 +4604,7 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_ArenaRelease=_Ssrs2_ArenaRelease@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallArena=_Ssrs2_InstallArena@12")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallHandles=_Ssrs2_InstallHandles@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_ContextNumber=_Ssrs2_ContextNumber@0")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetCodeGenHostCheck=_Ssrs2_SetCodeGenHostCheck@16")
+ #pragma comment(linker, "/EXPORT:Ssrs2_Call=_Ssrs2_Call@20")
+ #endif
