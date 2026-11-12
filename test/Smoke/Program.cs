@@ -78,6 +78,8 @@ var codeLikeSources = CodeLikeSources.Check(Directory.GetFiles(AppContext.BaseDi
 Console.WriteLine($"code-like sources: {codeLikeSources}");
 var callsIn = CallsInContext.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"calls in a context: {callsIn}");
+var immutableByHandle = ImmutablePrototypesByHandle.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"immutable prototype by handle: {immutableByHandle}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -86,8 +88,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
-    && callsIn == CallsInContext.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}");
+    && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1550,6 +1552,60 @@ static unsafe class CallsInContext
             Value answer;
             results.Add(callIn(secondNumber, 3, 0, null, 0, 0, &answer).ToString());
         });
+        return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0034: Ssrs2_MakePrototypeImmutable(context, object) makes the object under a handle of a
+// context's table an immutable prototype exotic object: its prototype cannot be changed any more, its properties
+// can. Checked with toy objects: an object locked from a host call of its context (Object.setPrototypeOf throws,
+// Reflect.setPrototypeOf answers false, the prototype it has is accepted, a property is still added, an object not
+// locked takes a new prototype), locked twice, a Proxy and a number (0, nothing changed), an object of a second
+// context locked from the first by the context's number, a negative handle and a number that names no context (-1).
+static unsafe class ImmutablePrototypesByHandle
+{
+    public const string Expected = "1 1 0 0 0:TypeError false true 7 true:true:1 TypeError:-1 -1";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_InstallHandles", 8, out var handlesExport)
+            || !Export("Ssrs2_MakePrototypeImmutable", 8, out var lockExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        var makeImmutable = (delegate* unmanaged[Stdcall]<int, int, int>)lockExport;
+
+        using var runtime = new V8Runtime();
+        using var first = runtime.CreateScriptEngine();
+        using var second = runtime.CreateScriptEngine();
+        int secondNumber = 0;
+        Func<bool> install = () =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8) return handles(holder, table) == 1;
+        };
+        first.AddHostObject("install", install);
+        second.AddHostObject("install", install);
+        second.AddHostObject("number", new Action(() => secondNumber = number()));
+        // (handles 3 and 4: objects; 5: a Proxy; 6: a number; 7: nothing)
+        first.AddHostObject("lock", new Func<string>(() => string.Join(" ", makeImmutable(0, 3), makeImmutable(0, 3), makeImmutable(0, 5), makeImmutable(0, 6), makeImmutable(0, 7))));
+        first.AddHostObject("lockSecond", new Func<int>(() => makeImmutable(secondNumber, 3)));
+        first.AddHostObject("refused", new Func<string>(() => makeImmutable(0, -1) + " " + makeImmutable(int.MaxValue, 3)));
+        second.Execute("install(); number(); __toy.handles[3] = globalThis.kept = {};");
+        var results = new List<string>();
+        results.Add((string)first.Evaluate("""
+            install();
+            const h = __toy.handles, e = f => { try { return String(f()); } catch (x) { return x.name; } };
+            const locked = h[3] = { a: 1 }, free = h[4] = {}, was = Object.getPrototypeOf(locked);
+            h[5] = new Proxy({}, {}); h[6] = 5;
+            const made = lock();
+            locked.added = 7;
+            [made, [e(() => Object.setPrototypeOf(locked, {})), Reflect.setPrototypeOf(locked, {}), Reflect.setPrototypeOf(locked, was), locked.added,
+                Reflect.setPrototypeOf(h[5], {})].join(' '), String(Reflect.setPrototypeOf(free, {}))].join(':')
+            """));
+        results.Add(first.Evaluate("lockSecond()") + " " + second.Evaluate("(() => { try { Object.setPrototypeOf(kept, {}); return 'changed'; } catch (x) { return x.name; } })()"));
+        results.Add((string)first.Evaluate("refused()"));
         return string.Join(":", results);
     }
 }

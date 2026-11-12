@@ -1,0 +1,55 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -4312,6 +4312,45 @@
+         return Ssrs2Calls::Invoke(isolate, target, function, receiver, args, count, flags, result);
+     }
+     return Ssrs2Calls::Invoke(isolate, target, function, receiver, args, count, flags, result);
++}
++
++// An object's prototype made immutable, by its handle (0034): what 0022's setImmutablePrototype(object) does for a
++// script, for a host that names the object by a handle.
++//
++//   int Ssrs2_MakePrototypeImmutable(int32_t context, int32_t object);
++//
++// The object under the handle `object` of the context's table (0030; the context by its number, 0032, or 0 for the
++// current one) becomes an immutable prototype exotic object: its [[SetPrototypeOf]] refuses, from then on, any
++// prototype other than the one it has (Object.setPrototypeOf and __proto__ throw a TypeError, Reflect.setPrototypeOf
++// answers false); its properties are still added, changed and deleted. There is no way back. 1: its prototype is
++// immutable (now, or already); 0: the value under the handle is no ordinary object (a Proxy, a primitive, nothing):
++// nothing changed; -1: no isolate entered on this thread, a number that names no context, a context without a handle
++// table, or a negative handle. Threading: the isolate's thread, the isolate entered and locked by the caller. No
++// script runs and no callback is made: safe inside any host call or callback.
++NATIVE_ENTRY_POINT(int) Ssrs2_MakePrototypeImmutable(int32_t context, int32_t object) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr)
++    {
++        return -1;
++    }
++    v8::HandleScope scope(isolate);
++    auto target = Ssrs2Contexts::Find(isolate, context);
++    if (target.IsEmpty())
++    {
++        return -1;
++    }
++    v8::Context::Scope contextScope(target);
++    v8::Local<v8::Value> value;
++    if (!Ssrs2HandleValue(isolate, object).ToLocal(&value))
++    {
++        return -1;
++    }
++    if (!value->IsObject())
++    {
++        return 0;
++    }
++    return v8::ssrs2::SetImmutableProto(value.As<v8::Object>()) ? 1 : 0;
+ }
+ 
+ // String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
+@@ -4688,4 +4727,5 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetCodeGenHostCheck=_Ssrs2_SetCodeGenHostCheck@16")
+ #pragma comment(linker, "/EXPORT:Ssrs2_Call=_Ssrs2_Call@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_CallIn=_Ssrs2_CallIn@28")
++#pragma comment(linker, "/EXPORT:Ssrs2_MakePrototypeImmutable=_Ssrs2_MakePrototypeImmutable@8")
+ #endif
