@@ -84,6 +84,8 @@ var proxies = ProxyKinds.Check(Directory.GetFiles(AppContext.BaseDirectory, "Cle
 Console.WriteLine($"proxy kind and target: {proxies}");
 var hostScheduler = ImportHostSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"import host scheduler: {hostScheduler}");
+var namedHost = NamedHostInterceptors.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"named host interceptors: {namedHost}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -93,8 +95,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
-    && hostScheduler == ImportHostSchedulers.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}");
+    && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1799,5 +1801,167 @@ static unsafe class ImportHostSchedulers
         results.Add($"{(removed && s_names.Count == asked).ToString().ToLowerInvariant()} {engine.Evaluate("order.join(' ')")}");
         results.Add(Convert.ToInt32(other.Evaluate("dead()")).ToString());
         return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0037: an interceptor factory made with flags 2 | 32 gives objects, make(prototype, number), whose
+// string-named properties one C function of the host's answers (Ssrs2_SetNamedHostHandler): get, set, delete, query,
+// enumerate and define, told the context's number, the object's number and the name. Checked with a toy store of
+// names and texts by object number: values set and read back (a string, a number, an object named by handle 1 and
+// made a string by a script function the handler calls), a missing name left to the prototype, two objects apart,
+// in, keys, a descriptor, a name not enumerable, delete, a set and a delete refused, an error thrown by its message
+// and a value thrown as it is, an object answered by its handle, a set not intercepted (an ordinary own property,
+// V8 asking a query after the set), defineProperty of a value and of an accessor (refused), a symbol (not asked),
+// the prototype masked or, with flags 8, asked first, an indexed handler and an indexed table beside the host's names,
+// an object of the template's constructor (number 0), the handler taken away, the context's number told.
+static unsafe class NamedHostInterceptors
+{
+    public const string Expected =
+        "true:one,2,obj,,proto:oneother:true false x,y,z {\"value\":\"one\",\"writable\":true,\"enumerable\":true,\"configurable\":true}"
+        + ":x,y,z x,y,z,_hidden:true,false,false,false:Error no boom:same:true:5 5 false 1 3:d TypeError:undefined 0"
+        + ":proto shadow mine:proto host only:i0 n 10:tab v 11:undefined:undefined one:true";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Value { public int Kind; public int Length; public double Number; public nint Data; }
+    const int Undefined = 0, Null = 1, Number = 2, Boolean = 3, String = 4, Error = 7, Handle = 8, Thrown = 10;
+
+    static delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int> s_call;
+    static readonly Dictionary<int, List<KeyValuePair<string, string>>> s_store = new();
+    static readonly HashSet<int> s_contexts = new();
+    static readonly List<int> s_plain = new();
+    static int s_symbols;
+    // (the answers' texts, the host's until its next answer: one buffer, as a host keeps one a thread)
+    static char* s_text = (char*)NativeMemory.Alloc(4096, sizeof(char));
+
+    static void Text(Value* answer, string text, int kind = String)
+    {
+        text.AsSpan().CopyTo(new Span<char>(s_text, 4096));
+        answer->Kind = kind; answer->Length = text.Length; answer->Data = (nint)s_text;
+    }
+
+    static List<KeyValuePair<string, string>> Of(int number) => s_store.TryGetValue(number, out var list) ? list : s_store[number] = new();
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int Handler(int context, int number, int operation, char* name, int nameLength, int detail, Value* value, Value* answer)
+    {
+        s_contexts.Add(context);
+        var list = Of(number);
+        if (operation == 4)
+        {
+            if (detail >= list.Count) return 0;
+            Text(answer, list[detail].Key);
+            return 1;
+        }
+        if (name == null) { s_symbols++; return 0; }
+        var key = new string(name, 0, nameLength);
+        int at = list.FindIndex(p => p.Key == key);
+        if (key == "plain") { s_plain.Add(operation); return 0; }
+        switch (operation)
+        {
+            case 0:
+                if (key == "self") { answer->Kind = Handle; answer->Number = 4; return 1; }
+                if (key == "thrown") { answer->Kind = Thrown; answer->Number = 5; return 1; }
+                if (at < 0) return 0;
+                Text(answer, list[at].Value);
+                return 1;
+            case 1:
+            case 5:
+                if (key == "locked") { answer->Kind = Boolean; answer->Number = 0; return 1; }
+                if (key == "boom") { Text(answer, "no boom", Error); return 1; }
+                // (an accessor: refused)
+                if (operation == 5 && (detail & 6) != 0) { answer->Kind = Boolean; answer->Number = 0; return 1; }
+                string text;
+                if (value->Kind == String) text = new string((char*)value->Data, 0, value->Length);
+                else if (value->Kind == Number) text = value->Number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                else if (value->Kind == Handle)
+                {
+                    // (an object: made a string by the script function under handle 3, called from inside the handler)
+                    Value made, given = new Value { Kind = Handle, Number = value->Number };
+                    if (s_call(3, 0, &given, 1, &made) != 1 || made.Kind != String) { Text(answer, "not a text", Error); return 1; }
+                    text = new string((char*)made.Data, 0, made.Length);
+                }
+                else text = "kind " + value->Kind;
+                if (at < 0) list.Add(new(key, text)); else list[at] = new(key, text);
+                return 1;
+            case 2:
+                if (key == "locked") { answer->Kind = Boolean; answer->Number = 0; return 1; }
+                if (at < 0) return 0;
+                list.RemoveAt(at);
+                answer->Kind = Boolean; answer->Number = 1;
+                return 1;
+            case 3:
+                if (at < 0) return 0;
+                answer->Kind = Number; answer->Number = key.StartsWith('_') ? 2 : 0;
+                return 1;
+        }
+        return 0;
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_InstallHandles", 8, out var handlesExport)
+            || !Export("Ssrs2_Call", 20, out var callExport) || !Export("Ssrs2_InstallInterceptors", 8, out var interceptorsExport)
+            || !Export("Ssrs2_SetNamedHostHandler", 4, out var setExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        var interceptors = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)interceptorsExport;
+        s_call = (delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int>)callExport;
+        var set = (delegate* unmanaged[Stdcall]<delegate* unmanaged[Cdecl]<int, int, int, char*, int, int, Value*, Value*, int>, int>)setExport;
+
+        using var engine = new V8ScriptEngine();
+        int own = 0;
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8, factory = "interceptorFactory\0"u8)
+            {
+                if (handles(holder, table) != 1 || interceptors(holder, factory) != 1) return false;
+            }
+            own = number();
+            return set(&Handler) == 1;
+        }));
+        engine.AddHostObject("hostHas", new Func<int, string, bool>((n, key) => Of(n).Any(p => p.Key == key)));
+        engine.AddHostObject("plainAsked", new Func<string>(() => string.Join(" ", s_plain.Take(2))));
+        engine.AddHostObject("symbolsAsked", new Func<int>(() => s_symbols));
+        engine.AddHostObject("handler", new Action<bool>(on => set(on ? &Handler : null)));
+        // (what the host holds for object 9 before any script names it)
+        Of(9).Add(new("inherited", "host")); Of(9).Add(new("only", "host only"));
+        var answer = (string)engine.Evaluate("""
+            install();
+            const h = __toy.handles, f = __toy.interceptorFactory, r = [String(f.namedHost === true)];
+            const e = g => { try { return String(g()); } catch (x) { return x === h[5] ? 'same' : x.name + ' ' + x.message; } };
+            h[3] = v => String(v); h[4] = { tag: 'kept' }; h[5] = new RangeError('as it is');
+            const make = f({}, 2 | 32);
+            const proto = { inherited: 'proto', get shadow() { return 'proto shadow'; } };
+            const a = make(proto, 7), b = make(null, 8);
+            a.x = 'one'; a.y = 2; a.z = { toString() { return 'obj'; } };
+            r.push([a.x, a.y, a.z, a.missing, a.inherited].join());
+            b.x = 'other'; r.push(a.x + b.x);
+            r.push(['x' in a, 'nope' in a, Object.keys(a).join(), JSON.stringify(Object.getOwnPropertyDescriptor(a, 'x'))].join(' '));
+            a._hidden = 'h'; r.push(Object.keys(a).join() + ' ' + Object.getOwnPropertyNames(a).join());
+            r.push([delete a.y, 'y' in a, Reflect.deleteProperty(a, 'locked'), Reflect.set(a, 'locked', 1)].join());
+            r.push(e(() => { a.boom = 1; }));
+            r.push(e(() => a.thrown));
+            r.push(String(a.self === h[4]));
+            a.plain = 5; r.push([a.plain, Object.getOwnPropertyDescriptor(a, 'plain').value, hostHas(7, 'plain'), plainAsked()].join(' '));
+            Object.defineProperty(a, 'defined', { value: 'd' });
+            r.push(a.defined + ' ' + e(() => Object.defineProperty(a, 'accessor', { get() { return 1; } })).split(' ')[0]);
+            r.push(String(a[Symbol.iterator]) + ' ' + symbolsAsked());
+            // (the prototype's own name: the host asked first, and with flags 8 after the prototype)
+            const before = a.shadow; a.inherited = 'mine'; r.push(before + ' ' + a.inherited);
+            const c = f({}, 2 | 8 | 32)(proto, 9); r.push(c.inherited + ' ' + c.only);
+            // (indices by the script's handler, by a table; names by the host)
+            const d = f({ get(o, i) { return 'i' + i; } }, 1 | 2 | 32)(null, 10); d.x = 'n';
+            r.push([d[0], d.x, hostHas(10, 'x') ? 10 : 0].join(' '));
+            const makeTable = f({}, 1 | 16 | 2 | 32), t = makeTable(null, 11); makeTable.setTable(t, ['tab']); t.q = 'v';
+            r.push([t[0], t.q, hostHas(11, 'q') ? 11 : 0].join(' '));
+            // (an object the template's constructor made, not make: number 0, where the host holds nothing)
+            const stray = new (Object.getPrototypeOf(make()).constructor)(); r.push(String(stray.x));
+            handler(false); const none = String(a.x); handler(true); r.push(none + ' ' + a.x);
+            r.join(':')
+            """);
+        return answer + ":" + (s_contexts.Count == 1 && s_contexts.Contains(own) && own > 0).ToString().ToLowerInvariant();
     }
 }

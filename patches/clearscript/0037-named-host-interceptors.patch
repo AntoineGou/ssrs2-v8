@@ -1,0 +1,449 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3526,7 +3526,7 @@
+ 
+ namespace Ssrs2Interceptors
+ {
+-    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4, kNonMasking = 8, kIndexedTable = 16 };
++    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4, kNonMasking = 8, kIndexedTable = 16, kNamedHost = 32 };
+ 
+     static v8::Local<v8::Value> Key(v8::Isolate*, v8::Local<v8::Name> name) { return name; }
+     static v8::Local<v8::Value> Key(v8::Isolate* isolate, uint32_t index) { return v8::Integer::NewFromUnsigned(isolate, index); }
+@@ -3535,7 +3535,9 @@
+     // callbacks get as their data: a property read made a string of the trap's name and looked it up in the handler at
+     // every call, half of what an indexed read through the interceptor cost. A trap put on the handler later is not
+     // seen; a handler is written whole before its factory is made.
+-    enum : int { kHandler = 0, kGet, kSet, kHas, kDelete, kDefine, kDescriptor, kOwnKeys, kCall, kFieldCount };
++    // (0037: the last field is the number of the context the factory was made in, for a factory whose named
++    // properties the host answers)
++    enum : int { kHandler = 0, kGet, kSet, kHas, kDelete, kDefine, kDescriptor, kOwnKeys, kCall, kContextNumber, kFieldCount };
+     static const char* const kTrapNames[] = { nullptr, "get", "set", "has", "deleteProperty", "defineProperty", "getOwnPropertyDescriptor", "ownKeys", "call" };
+ 
+     // The handler's trap called: -1 an exception (the request handled: V8 throws it), 0 no trap, 1 its answer in result.
+@@ -3773,8 +3775,284 @@
+         int r = InvokeTrap(isolate, info.Data(), kCall, static_cast<int>(args.size()), args.data(), result);
+         if (r == 0) isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "The object is not callable")));
+         else if (r > 0) info.GetReturnValue().Set(result);
++    }
++
++    // (0037, flags 2 | 32) Named properties answered by the host: see Ssrs2_SetNamedHostHandler below. The object's
++    // number is its last internal field; the context's number is in the callbacks' data.
++    namespace Host
++    {
++        using Value = Ssrs2DirectCalls::Value;
++        enum : int32_t { kGet = 0, kSet = 1, kDelete = 2, kQuery = 3, kEnumerate = 4, kDefine = 5 };
++        using Handler = int32_t (*)(int32_t context, int32_t object, int32_t operation, const uint16_t* name, int32_t nameLength, int32_t detail, const Value* value, Value* answer);
++
++        static std::atomic<Handler> g_handler { nullptr };
++
++        // (a string's characters for one call: short ones on the stack; the handler may be entered again before it returns)
++        struct Chars
++        {
++            uint16_t few[64];
++            std::unique_ptr<uint16_t[]> many;
++            const uint16_t* Of(v8::Isolate* isolate, v8::Local<v8::String> text, int32_t* length)
++            {
++                *length = text->Length();
++                uint16_t* at = few;
++                if (*length >= 64)
++                {
++                    many.reset(new uint16_t[static_cast<size_t>(*length) + 1]);
++                    at = many.get();
++                }
++                text->WriteV2(isolate, 0, static_cast<uint32_t>(*length), at);
++                at[*length] = 0;
++                return at;
++            }
++        };
++
++        // (an internal field read as a number: 0 for one never set, as an object's made by the template's own
++        // constructor, which a script reaches through a prototype, and not by make)
++        static int32_t Number(v8::Local<v8::Object> object, int field)
++        {
++            auto data = object->GetInternalField(field);
++            if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsInt32())
++            {
++                return 0;
++            }
++            return data.As<v8::Int32>()->Value();
++        }
++
++        template <typename T>
++        static int32_t ContextNumber(const v8::PropertyCallbackInfo<T>& info)
++        {
++            return Number(info.Data().template As<v8::Object>(), kContextNumber);
++        }
++
++        template <typename T>
++        static int32_t ObjectNumber(const v8::PropertyCallbackInfo<T>& info)
++        {
++            auto holder = info.Holder();
++            return Number(holder, holder->InternalFieldCount() - 1);
++        }
++
++        // The value under a handle of the factory's context (the table of the object's own context, whichever
++        // context's script asked for the property).
++        static v8::Local<v8::Value> Handled(v8::Isolate* isolate, int32_t context, int32_t handle)
++        {
++            v8::Local<v8::Value> value = v8::Undefined(isolate);
++            auto target = Ssrs2Contexts::Find(isolate, context);
++            if (!target.IsEmpty())
++            {
++                v8::Context::Scope contextScope(target);
++                (void)Ssrs2HandleValue(isolate, handle).ToLocal(&value);
++            }
++            return value;
++        }
++
++        // A script value as the handler is given one: in place where a direct call's argument is, an object left at
++        // index 1 of the context's handle table and named by that handle.
++        static void Given(v8::Isolate* isolate, int32_t context, v8::Local<v8::Value> value, Chars& chars, Value* given)
++        {
++            *given = Value{ Ssrs2DirectCalls::Undefined, 0, 0, nullptr };
++            if (value.IsEmpty() || value->IsUndefined())
++            {
++                return;
++            }
++            if (value->IsNumber())
++            {
++                given->kind = Ssrs2DirectCalls::Number;
++                given->number = value.As<v8::Number>()->Value();
++            }
++            else if (value->IsBoolean())
++            {
++                given->kind = Ssrs2DirectCalls::Boolean;
++                given->number = value->BooleanValue(isolate) ? 1 : 0;
++            }
++            else if (value->IsNull())
++            {
++                given->kind = Ssrs2DirectCalls::Null;
++            }
++            else if (value->IsString())
++            {
++                given->kind = Ssrs2DirectCalls::String;
++                given->data = chars.Of(isolate, value.As<v8::String>(), &given->length);
++            }
++            else
++            {
++                auto target = Ssrs2Contexts::Find(isolate, context);
++                if (!target.IsEmpty() && Ssrs2HandlePut(target, 1, value))
++                {
++                    given->kind = Ssrs2DirectCalls::Handle;
++                    given->number = 1;
++                }
++                else
++                {
++                    given->kind = Ssrs2DirectCalls::Other;
++                }
++            }
++        }
++
++        // The handler asked: 0 not intercepted (or no handler), 1 its answer in *made, -1 it threw (thrown to the
++        // script, the request handled).
++        template <typename T>
++        static int Ask(const v8::PropertyCallbackInfo<T>& info, int32_t operation, v8::Local<v8::Name> name, int32_t detail, v8::Local<v8::Value> value, v8::Local<v8::Value>* made)
++        {
++            auto handler = g_handler.load();
++            if (handler == nullptr)
++            {
++                return 0;
++            }
++            auto isolate = info.GetIsolate();
++            int32_t context = ContextNumber(info);
++            Chars nameChars, valueChars;
++            const uint16_t* nameAt = nullptr;
++            int32_t nameLength = 0;
++            if (!name.IsEmpty() && name->IsString())
++            {
++                nameAt = nameChars.Of(isolate, name.As<v8::String>(), &nameLength);
++            }
++            Value given;
++            Given(isolate, context, value, valueChars, &given);
++            Value answer{ Ssrs2DirectCalls::Undefined, 0, 0, nullptr };
++            int32_t intercepted = handler(context, ObjectNumber(info), operation, nameAt, nameLength, detail, &given, &answer);
++            // (the host stopped the script while the handler ran script of its own: nothing over the termination)
++            if (isolate->IsExecutionTerminating())
++            {
++                return -1;
++            }
++            if (intercepted == 0)
++            {
++                return 0;
++            }
++            switch (answer.kind)
++            {
++                case Ssrs2DirectCalls::Number:
++                    *made = v8::Number::New(isolate, answer.number);
++                    return 1;
++                case Ssrs2DirectCalls::Boolean:
++                    *made = v8::Boolean::New(isolate, answer.number != 0);
++                    return 1;
++                case Ssrs2DirectCalls::Null:
++                    *made = v8::Null(isolate);
++                    return 1;
++                case Ssrs2DirectCalls::String:
++                case Ssrs2DirectCalls::Error:
++                {
++                    v8::Local<v8::String> text;
++                    if (!v8::String::NewFromTwoByte(isolate, static_cast<const uint16_t*>(answer.data), v8::NewStringType::kNormal, answer.length).ToLocal(&text))
++                    {
++                        return -1;
++                    }
++                    if (answer.kind == Ssrs2DirectCalls::String)
++                    {
++                        *made = text;
++                        return 1;
++                    }
++                    isolate->ThrowException(v8::Exception::Error(text));
++                    return -1;
++                }
++                case Ssrs2DirectCalls::Handle:
++                    *made = Handled(isolate, context, static_cast<int32_t>(answer.number));
++                    return 1;
++                case Ssrs2DirectCalls::Thrown:
++                    isolate->ThrowException(Handled(isolate, context, static_cast<int32_t>(answer.number)));
++                    return -1;
++                default:
++                    *made = v8::Undefined(isolate);
++                    return 1;
++            }
++        }
++
++        static v8::Intercepted Get(v8::Local<v8::Name> name, const v8::PropertyCallbackInfo<v8::Value>& info)
++        {
++            v8::Local<v8::Value> made;
++            int r = Ask(info, kGet, name, 0, v8::Local<v8::Value>(), &made);
++            if (r == 0) return v8::Intercepted::kNo;
++            if (r > 0) info.GetReturnValue().Set(made);
++            return v8::Intercepted::kYes;
++        }
++
++        // (set, delete, define: the answer is whether it succeeded; an answer that is no boolean, that it did)
++        static bool Succeeded(v8::Isolate* isolate, v8::Local<v8::Value> made)
++        {
++            return made->IsUndefined() || made->BooleanValue(isolate);
++        }
++
++        static v8::Intercepted Set(v8::Local<v8::Name> name, v8::Local<v8::Value> value, const v8::PropertyCallbackInfo<v8::Boolean>& info)
++        {
++            v8::Local<v8::Value> made;
++            int r = Ask(info, kSet, name, 0, value, &made);
++            if (r == 0) return v8::Intercepted::kNo;
++            if (r > 0) info.GetReturnValue().Set(Succeeded(info.GetIsolate(), made));
++            return v8::Intercepted::kYes;
++        }
++
++        static v8::Intercepted Query(v8::Local<v8::Name> name, const v8::PropertyCallbackInfo<v8::Integer>& info)
++        {
++            v8::Local<v8::Value> made;
++            int r = Ask(info, kQuery, name, 0, v8::Local<v8::Value>(), &made);
++            if (r == 0) return v8::Intercepted::kNo;
++            if (r > 0)
++            {
++                int32_t attributes = v8::None;
++                if (made->IsNumber()) attributes = made->Int32Value(info.GetIsolate()->GetCurrentContext()).FromMaybe(0) & (v8::ReadOnly | v8::DontEnum | v8::DontDelete);
++                info.GetReturnValue().Set(attributes);
++            }
++            return v8::Intercepted::kYes;
++        }
++
++        static v8::Intercepted Delete(v8::Local<v8::Name> name, const v8::PropertyCallbackInfo<v8::Boolean>& info)
++        {
++            v8::Local<v8::Value> made;
++            int r = Ask(info, kDelete, name, 0, v8::Local<v8::Value>(), &made);
++            if (r == 0) return v8::Intercepted::kNo;
++            if (r > 0) info.GetReturnValue().Set(Succeeded(info.GetIsolate(), made));
++            return v8::Intercepted::kYes;
++        }
++
++        static v8::Intercepted Define(v8::Local<v8::Name> name, const v8::PropertyDescriptor& desc, const v8::PropertyCallbackInfo<v8::Boolean>& info)
++        {
++            // (the descriptor's fields as bits: 1 a value, 2 a getter, 4 a setter, 8 writable given and 16 its
++            // value, 32 enumerable given and 64 its value, 128 configurable given and 256 its value)
++            int32_t detail = (desc.has_value() ? 1 : 0) | (desc.has_get() ? 2 : 0) | (desc.has_set() ? 4 : 0)
++                | (desc.has_writable() ? 8 | (desc.writable() ? 16 : 0) : 0)
++                | (desc.has_enumerable() ? 32 | (desc.enumerable() ? 64 : 0) : 0)
++                | (desc.has_configurable() ? 128 | (desc.configurable() ? 256 : 0) : 0);
++            v8::Local<v8::Value> made;
++            int r = Ask(info, kDefine, name, detail, desc.has_value() ? desc.value() : v8::Local<v8::Value>(), &made);
++            if (r == 0) return v8::Intercepted::kNo;
++            if (r > 0) info.GetReturnValue().Set(Succeeded(info.GetIsolate(), made));
++            return v8::Intercepted::kYes;
++        }
++
++        // (the names, asked one by one by their place until the handler has no more)
++        static void Keys(const v8::PropertyCallbackInfo<v8::Array>& info)
++        {
++            auto isolate = info.GetIsolate();
++            std::vector<v8::Local<v8::Value>> names;
++            for (int32_t at = 0; at < (1 << 24); at++)
++            {
++                v8::Local<v8::Value> made;
++                int r = Ask(info, kEnumerate, v8::Local<v8::Name>(), at, v8::Local<v8::Value>(), &made);
++                if (r < 0) return;
++                if (r == 0 || !made->IsString()) break;
++                names.push_back(made);
++            }
++            info.GetReturnValue().Set(v8::Array::New(isolate, names.data(), names.size()));
++        }
+     }
+ 
++    // (0037) make(prototype, number) of a factory whose named properties the host answers: the object's number, an
++    // int32 of the host's choosing (0 where none is given), is what the handler is told.
++    static void Make(const v8::FunctionCallbackInfo<v8::Value>& info);
++    static void MakeNumbered(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        Make(info);
++        auto made = info.GetReturnValue().Get();
++        if (!made->IsObject()) return;
++        int32_t number = 0;
++        if (info.Length() > 1 && !info[1]->Int32Value(info.GetIsolate()->GetCurrentContext()).To(&number)) return;
++        auto object = made.As<v8::Object>();
++        object->SetInternalField(object->InternalFieldCount() - 1, v8::Integer::New(info.GetIsolate(), number));
++    }
++
+     // make(prototype): a new object of the factory's template, its prototype the one given (an object or null).
+     static void Make(const v8::FunctionCallbackInfo<v8::Value>& info)
+     {
+@@ -3783,7 +4061,7 @@
+         v8::Local<v8::Object> object;
+         if (!info.Data().As<v8::Function>()->NewInstance(context).ToLocal(&object)) return;
+         if (info.Length() > 0 && (info[0]->IsObject() || info[0]->IsNull()) && object->SetPrototype(context, info[0]).IsNothing()) return;
+-        // (0031: an object with a table starts with none; its last field says which factory made it)
++        // (0031: an object with a table starts with none; the field after the table's says which factory made it)
+         if (object->InternalFieldCount() > kTableFields)
+         {
+             for (int i = 0; i < kTableFields; i++) if (i != kTableGuardsData) object->SetInternalField(i, v8::Undefined(isolate));
+@@ -3811,7 +4089,7 @@
+         v8::Local<v8::Object> handler;
+         if (!trapsTemplate->NewInstance(context).ToLocal(&handler)) return;
+         handler->SetInternalField(kHandler, handlerObject);
+-        for (int slot = kGet; slot < kFieldCount; slot++)
++        for (int slot = kGet; slot <= kCall; slot++)
+         {
+             v8::Local<v8::Value> trap;
+             if (!handlerObject->Get(context, v8::String::NewFromUtf8(isolate, kTrapNames[slot]).ToLocalChecked()).ToLocal(&trap)) return;
+@@ -3827,26 +4105,42 @@
+             instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(getter, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
+                 Keys<true>, Define<uint32_t>, Descriptor<uint32_t>, handler));
+         }
++        // (0037: named properties the host answers, flags 2 | 32)
++        bool namedHost = (flags & kNamed) && (flags & kNamedHost);
+         if (flags & kNamed)
+         {
+-            instanceTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(Get<v8::Local<v8::Name>>, Set<v8::Local<v8::Name>>, Query<v8::Local<v8::Name>>,
+-                Delete<v8::Local<v8::Name>>, Keys<false>, Define<v8::Local<v8::Name>>, Descriptor<v8::Local<v8::Name>>, handler,
+-                // (0025, flags 8: the named interceptor asked only for a name neither the object nor its prototype chain
+-                // has, v8::PropertyHandlerFlags::kNonMasking: a document's named properties, found after its own and its
+-                // interfaces' members, which are then read at an ordinary object's speed)
+-                (flags & kNonMasking) ? static_cast<v8::PropertyHandlerFlags>(static_cast<int>(v8::PropertyHandlerFlags::kOnlyInterceptStrings)
+-                    | static_cast<int>(v8::PropertyHandlerFlags::kNonMasking)) : v8::PropertyHandlerFlags::kOnlyInterceptStrings));
++            // (0025, flags 8: the named interceptor asked only for a name neither the object nor its prototype chain
++            // has, v8::PropertyHandlerFlags::kNonMasking: a document's named properties, found after its own and its
++            // interfaces' members, which are then read at an ordinary object's speed)
++            auto namedFlags = (flags & kNonMasking) ? static_cast<v8::PropertyHandlerFlags>(static_cast<int>(v8::PropertyHandlerFlags::kOnlyInterceptStrings)
++                | static_cast<int>(v8::PropertyHandlerFlags::kNonMasking)) : v8::PropertyHandlerFlags::kOnlyInterceptStrings;
++            if (namedHost)
++            {
++                int32_t number = Ssrs2Contexts::NumberOf(isolate, context);
++                if (number == 0) return;
++                handler->SetInternalField(kContextNumber, v8::Integer::New(isolate, number));
++                // (no descriptor callback: V8 makes a property's descriptor of the query's attributes and the getter's value)
++                instanceTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(Host::Get, Host::Set, Host::Query, Host::Delete, Host::Keys, Host::Define, nullptr, handler, namedFlags));
++            }
++            else
++            {
++                instanceTemplate->SetHandler(v8::NamedPropertyHandlerConfiguration(Get<v8::Local<v8::Name>>, Set<v8::Local<v8::Name>>, Query<v8::Local<v8::Name>>,
++                    Delete<v8::Local<v8::Name>>, Keys<false>, Define<v8::Local<v8::Name>>, Descriptor<v8::Local<v8::Name>>, handler, namedFlags));
++            }
+         }
+         if (flags & kUndetectable)
+         {
+             instanceTemplate->MarkAsUndetectable();
+             instanceTemplate->SetCallAsFunctionHandler(Call, handler);
+         }
+-        if ((flags & kIndexedTable) && (flags & kIndexed)) instanceTemplate->SetInternalFieldCount(kTableFields + 1);
++        // (the table's fields, then, 0037, the object's number for the host: its last field)
++        int fields = ((flags & kIndexedTable) && (flags & kIndexed)) ? kTableFields + 1 : 0;
++        if (namedHost) fields++;
++        if (fields > 0) instanceTemplate->SetInternalFieldCount(fields);
+         v8::Local<v8::Function> constructor;
+         v8::Local<v8::Function> make;
+         if (!functionTemplate->GetFunction(context).ToLocal(&constructor)
+-            || !v8::Function::New(context, Make, constructor, 1, v8::ConstructorBehavior::kThrow).ToLocal(&make))
++            || !v8::Function::New(context, namedHost ? MakeNumbered : Make, constructor, namedHost ? 2 : 1, v8::ConstructorBehavior::kThrow).ToLocal(&make))
+         {
+             return;
+         }
+@@ -3888,9 +4182,64 @@
+     {
+         return 0;
+     }
++    // (0037: flags 32 with 2 sends the named properties to the host's handler)
++    if (function->Set(context, v8::String::NewFromUtf8Literal(isolate, "namedHost"), v8::True(isolate)).IsNothing())
++    {
++        return 0;
++    }
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 
++// Interceptor objects whose named properties the host answers (0037): a factory option of 0023's interceptor objects,
++// for objects that stand for something the host holds by a number.
++//
++//   typedef int32_t (*Ssrs2NamedHostHandler)(int32_t context, int32_t object, int32_t operation, const uint16_t* name,
++//       int32_t nameLength, int32_t detail, const Value* value, Value* answer);
++//   int Ssrs2_SetNamedHostHandler(Ssrs2NamedHostHandler handler);
++//
++// Ssrs2_SetNamedHostHandler gives the process its handler (the last one given is the one called; null: none, every
++// request left to V8's ordinary lookup) and answers 1. It needs no isolate. A script then makes a factory with
++// interceptorFactory(handler, flags) where flags has 2 and 32 (the factory says it knows them:
++// interceptorFactory.namedHost): the objects of its make(prototype, number) have their string-named properties
++// answered by the host's handler, no script trap called; number is an int32 of the host's choosing that the handler
++// is told with the number (0032) of the context the factory was made in. The other flags keep their meaning (1 and
++// 16: indexed properties, answered by the script handler and the table as before; 8: the named interceptor asked
++// only for a name neither the object nor its prototype chain has; 4); the script handler given to the factory is
++// asked for nothing named, and may be an empty object.
++//
++// The handler is called on the isolate's thread, from inside the script's property access, with the operation:
++//   0 get: answers the property's value;
++//   1 set: value is what is assigned; answers whether it succeeded (a boolean; no answer: it did);
++//   2 delete: answers whether it succeeded;
++//   3 query (in, hasOwnProperty, getOwnPropertyDescriptor, enumeration): answers the property's attributes as a
++//     number (0, or the sum of 1 read-only, 2 not enumerable, 4 not configurable);
++//   4 enumerate (the object's own keys): no name; detail is a place, 0 then 1 and so on; answers the name at that
++//     place, a string, and returns 0 after the last;
++//   5 define (Object.defineProperty, Reflect.defineProperty): value is the descriptor's value where it has one;
++//     detail the descriptor's fields (1 a value, 2 a getter, 4 a setter, 8 writable given and 16 its value, 32
++//     enumerable given and 64 its value, 128 configurable given and 256 its value); answers whether it succeeded.
++// name is UTF-16, the library's until the handler returns. value is as a direct call's argument (0003: a number, a
++// boolean, a string in place, null, undefined); any other value is left at index 1 of the handle table (0030) of the
++// factory's context and named by that handle (kind 8), or is kind 6 where that context has no table. The handler
++// returns 0 for "not intercepted" (V8's ordinary lookup goes on: the object's own properties, its prototype's; for a
++// set or a define, an ordinary own property is made, V8 asking 3 for the name first) or 1 with its answer, as a direct
++// call's: a number, a boolean, a string (UTF-16 the host keeps until its next answer on the thread), null, undefined,
++// a handle (kind 8: the value at that index of the factory's context's table), an error message thrown as an Error
++// (kind 7), or a value to throw as it is (kind 10, by its handle).
++//
++// The callback's contract. The handler may be entered again before it returns, if it runs script that reads a named
++// property of such an object (it may call Ssrs2_Call and Ssrs2_CallIn; it should not for 3 and 4, which V8 asks while
++// it walks an object's keys); the library keeps nothing of its own across the call. It must leave no script exception
++// pending other than through its answer, must not dispose the context, its engine or the isolate, and must not wait
++// for another thread that needs the isolate. An object outlives its context's engine while a script of another
++// context holds it: the handler is then still called with the number of a context that names nothing any more, and
++// answers 0 or throws.
++NATIVE_ENTRY_POINT(int) Ssrs2_SetNamedHostHandler(void* handler) noexcept
++{
++    Ssrs2Interceptors::Host::g_handler.store(reinterpret_cast<Ssrs2Interceptors::Host::Handler>(handler));
++    return 1;
++}
++
+ // Prototype setup (0024, with V8's 0006, v8::ssrs2::SetPrototypeSetupMode and OptimizePrototype): prototypeSetup(true) has
+ // V8 leave the prototypes whose properties change in dictionary mode on this thread, rather than make each fast again
+ // after each change once inline caches used it (linear in its properties each time: WebIDL's shapes applied to a
+@@ -4896,4 +5245,5 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_ProxyKind=_Ssrs2_ProxyKind@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_ProxyTarget=_Ssrs2_ProxyTarget@12")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetImportHostScheduler=_Ssrs2_SetImportHostScheduler@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetNamedHostHandler=_Ssrs2_SetNamedHostHandler@4")
+ #endif
