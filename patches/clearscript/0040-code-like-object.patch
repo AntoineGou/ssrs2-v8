@@ -1,0 +1,40 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3169,12 +3169,12 @@
+         }
+         else if (isCodeLike)
+         {
+-            flags = kCodeLike;
+-            v8::TryCatch tryCatch(isolate);
+-            if (!source->ToString(context).ToLocal(&text))
+-            {
+-                return result;
+-            }
++            // (0040: a code-like object handed over as an object, at index 1 of the context's table, never converted
++            // here: its text is the host's to give (HostGetCodeForEval reads the object's own data), so a toString a
++            // script put on it is not called; flags 6 = code-like and an object. A host answering 1 has the object's
++            // ToString compiled, as before 0040; 2 its own text; 0 refuses)
++            flags = kCodeLike | kObject;
++            (void)Ssrs2HandlePut(context, 1, source);
+         }
+         else
+         {
+@@ -3209,6 +3209,17 @@
+         {
+             result.modified_source = text;
+         }
++        else if (flags == (kCodeLike | kObject))
++        {
++            // (0040: a code-like object the host let be: its ToString, as V8's own steps take it)
++            v8::TryCatch tryCatch(isolate);
++            if (!source->ToString(context).ToLocal(&text))
++            {
++                result.codegen_allowed = false;
++                return result;
++            }
++            result.modified_source = text;
++        }
+         return result;
+     }
+ 

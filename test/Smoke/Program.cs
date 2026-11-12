@@ -90,6 +90,8 @@ var tableQueries = TableQueries.Check(Directory.GetFiles(AppContext.BaseDirector
 Console.WriteLine($"table queries: {tableQueries}");
 var tokens = SecurityTokens.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"security tokens: {tokens}");
+var codeLikeObjects = CodeLikeObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"code-like objects: {codeLikeObjects}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -100,8 +102,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
-    && tokens == SecurityTokens.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}");
+    && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1237,6 +1239,7 @@ static unsafe class CodeGenHostChecks
             answer->Message = s_noWasm; answer->MessageLength = "no WebAssembly here".Length;
             return 0;
         }
+        // (an object, flags 4, and since 0040 a code-like one, flags 6: no source, the object left at index 1; let be)
         if ((flags & 4) != 0) return source == null && length == 0 ? 1 : 0;
         var text = new string(source, 0, length);
         if (text.Contains("NOPE")) return 0;
@@ -1322,7 +1325,8 @@ static unsafe class CodeGenHostChecks
             """));
         // (how often the check was asked: the plain object counts twice for its direct eval, which V8 resolves and then
         // calls as the global eval, and once as the Function constructor's argument)
-        results.Add($"strings {s_counts[0]} code-like {s_counts[2]} objects {s_counts[4]} wasm {s_counts[1]} nested {s_nested} contexts {s_contexts.Count}");
+        // (since 0040 a code-like object is asked with flags 6, code-like and an object: counted as code-like)
+        results.Add($"strings {s_counts[0]} code-like {s_counts[2] + s_counts[6]} objects {s_counts[4]} wasm {s_counts[1]} nested {s_nested} contexts {s_contexts.Count}");
         // (the check taken away: strings compile unchecked)
         results.Add((string)engine.Evaluate("remove() ? eval('\"NOPE\"') : 'kept'"));
         // (the second context: unchecked, then given the check by its number from the first, then freed of it)
@@ -1347,12 +1351,14 @@ static unsafe class CodeGenHostChecks
 // string refused; a code-like object given to a direct eval (its scope kept) and to the global eval; a Function
 // constructor of one and of two code-like objects (allowed: the arguments, then the source, all flags 2, the source
 // the assembled text); one given a code-like object and a plain string, a plain string alone, nothing, a plain object
-// (refused: the source is flags 0); the async and generator function constructors of code-like objects.
+// (refused: the source is flags 0); the async and generator function constructors of code-like objects. Since 0040 a
+// code-like object is asked with flags 6 (code-like and an object, handed over at index 1, not converted): the
+// arguments 6, the assembled source still 2.
 static unsafe class CodeLikeSources
 {
     public const string Expected =
-        "EvalError 0:2 2:42 2:3 2,2 assembled:5 2,2,2 assembled:EvalError 2,0:EvalError 0:EvalError 0:EvalError 4,0"
-        + ":function 2,2 assembled:function 2,2 assembled";
+        "EvalError 0:2 6:42 6:3 6,2 assembled:5 6,6,2 assembled:EvalError 6,0:EvalError 0:EvalError 0:EvalError 4,0"
+        + ":function 6,2 assembled:function 6,2 assembled";
 
     [StructLayout(LayoutKind.Sequential)]
     struct Answer { public nint Source; public int SourceLength; public nint Message; public int MessageLength; }
@@ -1365,7 +1371,8 @@ static unsafe class CodeLikeSources
     {
         s_flags.Add(flags);
         if (source != null && new string(source, 0, length).Contains(" anonymous(", StringComparison.Ordinal)) s_assembled = flags == 2;
-        return flags == 2 || flags == 4 ? 1 : 0;
+        // (code-like: a source V8 takes as code, flags 2, or since 0040 a code-like object, flags 6, let be: its ToString)
+        return (flags & 2) != 0 || flags == 4 ? 1 : 0;
     }
 
     public static string Check(string library)
@@ -2134,5 +2141,102 @@ static unsafe class SecurityTokens
     static int TokenBad(delegate* unmanaged[Stdcall]<int, char*, int, int> token)
     {
         fixed (char* chars = "one") return token(0, chars, -1);
+    }
+}
+
+// patches/clearscript/0040: the host's code-generation check (0032) is given a code-like object (0013) as an object,
+// flags 6 (code-like and an object), no source, the object left at index 1 of the context's table; the library does
+// not convert it to a string first, so a toString a script put on it is not called unless the host lets the object be.
+// Checked with a toy code-like object holding its own text in a property ("real") and a forged toString that counts
+// its calls: the host answering 2 with the object's own text (read by a script function under handle 3 from the object
+// at index 1): the global eval, a direct eval keeping its scope, a Function constructor of two such objects (their
+// texts, then the assembled source, flags 2) and the generator constructor, the forged toString never called; the
+// host answering 1: the object's toString compiled, as before 0040 (one call); the host answering 0: an EvalError, no
+// call, a Function constructor refused at its first argument (V8 asks no further); the flags and the object handed over.
+static unsafe class CodeLikeObjects
+{
+    public const string Expected =
+        "42 0 6 true:2 0:7 0 6,6,2:1 0:forged 1 6:EvalError 0 6:EvalError 0 6";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Answer { public nint Source; public int SourceLength; public nint Message; public int MessageLength; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct Value { public int Kind; public int Length; public double Number; public nint Data; }
+
+    static delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int> s_call;
+    static readonly List<int> s_flags = new();
+    static int s_mode = 2;
+    static nint s_text;
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int HostCheck(int context, int flags, char* source, int length, Answer* answer)
+    {
+        s_flags.Add(flags);
+        // (a string: allowed when V8 takes it as code, flags 2, an assembled source of code-like objects; else refused)
+        if ((flags & 4) == 0) return flags == 2 ? 1 : 0;
+        // (a plain object: let be)
+        if (flags != 6) return 1;
+        if (source != null || length != 0) return 0;
+        if (s_mode != 2) return s_mode;
+        // (the object's own text, read from the object at index 1 by the script function under handle 3)
+        Value made;
+        if (s_call(3, 0, null, 0, &made) != 1 || made.Kind != 4) return 0;
+        if (s_text != 0) Marshal.FreeHGlobal(s_text);
+        s_text = Marshal.StringToHGlobalUni(new string((char*)made.Data, 0, made.Length));
+        answer->Source = s_text; answer->SourceLength = made.Length;
+        return 2;
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_SetCodeGenHostCheck", 16, out var setExport) || !Export("Ssrs2_InstallHandles", 8, out var handlesExport)
+            || !Export("Ssrs2_Call", 20, out var callExport) || !Export("Ssrs2_InstallCodeLike", 8, out var codeLikeExport)) return "export missing";
+        var set = (delegate* unmanaged[Stdcall]<int, delegate* unmanaged[Cdecl]<int, int, char*, int, Answer*, int>, char*, int, int>)setExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        var codeLike = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)codeLikeExport;
+        s_call = (delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int>)callExport;
+
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8, maker = "codeLike\0"u8)
+            {
+                if (handles(holder, table) != 1 || codeLike(holder, maker) != 1) return false;
+            }
+            return set(0, &HostCheck, null, 0) > 0;
+        }));
+        engine.AddHostObject("mode", new Action<int>(m => s_mode = m));
+        engine.AddHostObject("asked", new Func<string>(() => { var seen = string.Join(",", s_flags); s_flags.Clear(); return seen; }));
+        return (string)engine.Evaluate("""
+            install();
+            const h = __toy.handles;
+            h[3] = () => String(h[1].real);
+            let forged = 0;
+            const code = real => { const o = new __toy.codeLike(); o.real = real; o.toString = () => { forged++; return 'forgedText'; }; return o; };
+            var forgedText = 'forged';
+            const e = f => { forged = 0; let made; try { made = String(f()); } catch (x) { made = x.name; } return made + ' ' + forged; };
+            const GeneratorFunction = Object.getPrototypeOf(function* () { }).constructor;
+            const r = [];
+            // (the host gives the object's own text: no toString called; the object it was given is the one at index 1)
+            const one = code('6 * 7');
+            r.push(e(() => (0, eval)(one)) + ' ' + asked() + ' ' + (h[1] === one));
+            r.push(e(() => (function () { let local = 1; eval(code('local = 2')); return local; })()));
+            asked();
+            r.push(e(() => new Function(code('a'), code('return a + 3'))(4)) + ' ' + asked());
+            r.push(e(() => new GeneratorFunction(code('yield 1'))().next().value));
+            asked();
+            // (the host lets it be: its toString compiled, as before)
+            mode(1);
+            r.push(e(() => (0, eval)(code('1'))) + ' ' + asked());
+            // (the host refuses: an EvalError, no toString called)
+            mode(0);
+            r.push(e(() => (0, eval)(code('1'))) + ' ' + asked());
+            r.push(e(() => new Function(code('return 1'), 'x')) + ' ' + asked());
+            mode(2);
+            r.join(':')
+            """);
     }
 }
