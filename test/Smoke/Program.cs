@@ -1,6 +1,7 @@
 // dotnet Smoke.dll <folder>: runs smoke.js with the ClearScriptV8 library in <folder> and checks its answers against
 // expected.txt, stock V8's (Node's) answers; and that the date's local time is UTC whatever the machine's time zone, as
 // our V8 has it (the workflow sets another zone first).
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.ClearScript;
@@ -75,6 +76,8 @@ var hostCheck = CodeGenHostChecks.Check(Directory.GetFiles(AppContext.BaseDirect
 Console.WriteLine($"code generation host check: {hostCheck}");
 var codeLikeSources = CodeLikeSources.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"code-like sources: {codeLikeSources}");
+var callsIn = CallsInContext.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"calls in a context: {callsIn}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -82,8 +85,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
-    && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}");
+    && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
+    && callsIn == CallsInContext.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1395,5 +1399,157 @@ static unsafe class CodeLikeSources
                 e(() => typeof new GeneratorFunction(code('yield 1'))),
             ].join(':')
             """);
+    }
+}
+
+// patches/clearscript/0033: Ssrs2_CallIn(context, function, this, arguments, count, flags, answer) is Ssrs2_Call's call
+// made in the context a number names, which the library enters itself: from a host call of another context of the
+// isolate, or from no script at all (inside the engine's lock). flags 1 runs a microtask checkpoint after the call. A
+// call the host stops (the engine's interrupt) answers -2, from Ssrs2_Call too, and is not a throw a script could
+// catch. Checked with two toy contexts of one isolate: a function of the second called from a host call of the first
+// (its own global, `this`, an object answered under the second's handle 1, a throw under its handle 2), a job queued
+// by the function run by the checkpoint or left waiting without it, context 0 (the current one), a call from no
+// script at all, one with no isolate entered (refused), an interrupt of a call made from no script (-2, the next call
+// fine), an interrupt of a call made from a direct call (the calling script stopped, its catch not run), and a
+// number whose context is gone.
+static unsafe class CallsInContext
+{
+    public const string Expected = "second:7:object 1 42:threw 0 TypeError no:call:call job job:first:top second -1:-1:-2 second:-2 ScriptInterruptedException undefined:-1";
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct Value { public int Kind; public int Length; public double Number; public nint Data; }
+    const int Undefined = 0, Null = 1, Number = 2, Boolean = 3, String = 4, Error = 7, Handle = 8;
+
+    static delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int> s_call;
+    static int s_spun;
+
+    // (a direct call's dispatcher, 0003: slot 0 calls the function under handle 9 of the current context, which never
+    // returns by itself, and answers an error whatever came of it)
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static void Dispatch(int slot, Value* args, int count, Value* answer)
+    {
+        Value made;
+        s_spun = s_call(9, 0, null, 0, &made);
+        fixed (char* text = "dropped") { answer->Kind = Error; answer->Length = 7; answer->Data = (nint)text; }
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ContextNumber", 0, out var numberExport) || !Export("Ssrs2_InstallHandles", 8, out var handlesExport)
+            || !Export("Ssrs2_Call", 20, out var callExport) || !Export("Ssrs2_CallIn", 28, out var callInExport)
+            || !Export("Ssrs2_InstallDirectCalls", 20, out var directExport)) return "export missing";
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        var handles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)handlesExport;
+        s_call = (delegate* unmanaged[Stdcall]<int, int, Value*, int, Value*, int>)callExport;
+        var callIn = (delegate* unmanaged[Stdcall]<int, int, int, Value*, int, int, Value*, int>)callInExport;
+        var direct = (delegate* unmanaged[Stdcall]<byte*, int, byte**, int*, void*, int>)directExport;
+
+        string Answer(int outcome, Value v) => outcome != 1 ? "failed " + outcome : v.Kind switch
+        {
+            Number => v.Number.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Boolean => v.Number != 0 ? "true" : "false",
+            String => new string((char*)v.Data, 0, v.Length),
+            Null => "null", Undefined => "undefined", Handle => "object " + v.Number, _ => "kind " + v.Kind,
+        };
+        string In(int context, int function, int receiver = 0, int argument = 0, int flags = 0)
+        {
+            Value answer, given = new Value { Kind = Handle, Number = argument };
+            return Answer(callIn(context, function, receiver, argument > 0 ? &given : null, argument > 0 ? 1 : 0, flags, &answer), answer);
+        }
+
+        using var runtime = new V8Runtime();
+        using var first = runtime.CreateScriptEngine();
+        var second = runtime.CreateScriptEngine();
+        int secondNumber = 0;
+        Func<bool> install = () =>
+        {
+            fixed (byte* holder = "__toy\0"u8, table = "handles\0"u8) return handles(holder, table) == 1;
+        };
+        first.AddHostObject("install", install);
+        second.AddHostObject("install", install);
+        second.AddHostObject("number", new Action(() => secondNumber = number()));
+        second.Execute("""
+            install(); number();
+            globalThis.tag = 'second'; globalThis.order = [];
+            const h = __toy.handles;
+            h[3] = () => tag;
+            h[4] = function () { return this.k; }; h[5] = { k: 7 };
+            h[6] = () => ({ answer: 42 }); h[7] = o => o.answer;
+            h[8] = () => { throw new TypeError('no'); }; h[10] = e => e.constructor.name + ' ' + e.message;
+            h[11] = () => { order.push('call'); Promise.resolve().then(() => order.push('job')); };
+            h[12] = () => { const was = order.join(' '); order.length = 0; return was; };
+            h[9] = () => { for (;;) { } };
+            """);
+        var results = new List<string>();
+        first.AddHostObject("run", new Action(() =>
+        {
+            // (the second context's function, its `this`, an object answered, a throw: its own handles 1 and 2)
+            results.Add(In(secondNumber, 3));
+            results.Add(In(secondNumber, 4, receiver: 5));
+            results.Add(In(secondNumber, 6) + " " + In(secondNumber, 7, argument: 1));
+            Value answer;
+            int threw = callIn(secondNumber, 8, 0, null, 0, 0, &answer);
+            results.Add("threw " + threw + " " + In(secondNumber, 10, argument: 2));
+            // (a job the function queues: left waiting under this host call without the checkpoint; the second call's
+            // checkpoint runs it and its own)
+            In(secondNumber, 11);
+            results.Add(In(secondNumber, 12));
+            In(secondNumber, 11, flags: 1);
+            results.Add(In(secondNumber, 12));
+            // (context 0: the current one, as Ssrs2_Call)
+            results.Add(In(0, 3));
+        }));
+        first.Execute("install(); globalThis.tag = 'first'; __toy.handles[3] = () => tag; run();");
+
+        // (from no script at all: inside the engine's lock, which enters the isolate and no context; ClearScript's
+        // managed side keeps that entry internal)
+        var locked = typeof(V8ScriptEngine).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .First(m => m.Name == "ScriptInvoke" && !m.IsGenericMethod && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(Action));
+        void Locked(Action action) => locked.Invoke(first, new object[] { action });
+        Locked(() =>
+        {
+            Value answer;
+            results.Add("top " + In(secondNumber, 3) + " " + s_call(3, 0, null, 0, &answer));
+        });
+        // (no isolate entered on this thread)
+        Value outside;
+        results.Add(callIn(secondNumber, 3, 0, null, 0, 0, &outside).ToString());
+        // (a call from no script, stopped by the engine's interrupt: -2, and the next call runs)
+        Locked(() =>
+        {
+            Value answer;
+            using var timer = new Timer(_ => second.Interrupt(), null, 300, Timeout.Infinite);
+            results.Add(callIn(secondNumber, 9, 0, null, 0, 0, &answer) + " " + In(secondNumber, 3));
+        });
+        // (a call from a direct call of the second context's script, stopped: Ssrs2_Call answers -2, the direct call's
+        // own answer is dropped and the script that made the direct call is stopped, its catch not run)
+        second.AddHostObject("direct", new Func<bool>(() =>
+        {
+            var names = stackalloc byte*[1];
+            int slot = 0;
+            fixed (byte* holder = "__toy\0"u8, name = "spin\0"u8)
+            {
+                names[0] = name;
+                return direct(holder, 1, names, &slot, (delegate* unmanaged[Cdecl]<int, Value*, int, Value*, void>)&Dispatch) == 1;
+            }
+        }));
+        string stopped;
+        using (var timer = new Timer(_ => second.Interrupt(), null, 300, Timeout.Infinite))
+        {
+            try { second.Execute("direct(); try { __toy.spin(); globalThis.after = 'returned'; } catch (e) { globalThis.after = 'caught'; }"); stopped = "ran on"; }
+            catch (Exception e) { stopped = e.GetType().Name; }
+        }
+        results.Add(s_spun + " " + stopped + " " + second.Evaluate("String(globalThis.after)"));
+        // (the second context gone: its number names nothing)
+        second.Dispose();
+        Locked(() =>
+        {
+            Value answer;
+            results.Add(callIn(secondNumber, 3, 0, null, 0, 0, &answer).ToString());
+        });
+        return string.Join(":", results);
     }
 }

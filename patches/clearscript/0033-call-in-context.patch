@@ -1,0 +1,227 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.h b/ClearScriptV8/V8IsolateImpl.h
+--- a/ClearScriptV8/V8IsolateImpl.h
++++ b/ClearScriptV8/V8IsolateImpl.h
+@@ -147,6 +147,10 @@
+ 
+     static V8GlobalFlags GetGlobalFlags();
+     static V8IsolateImpl* GetInstanceFromIsolate(v8::Isolate* pIsolate);
++
++    // SSRS2 (0033): whether a script of this isolate is running under ClearScript's execution scope (the engine's
++    // interrupt reaches it); Ssrs2_CallIn opens a scope where there is none.
++    bool Ssrs2InExecutionScope() { return InExecutionScope(); }
+     static size_t GetInstanceCount();
+ 
+     // SSRS2 (0027): a snapshot blob for the process. Ssrs2MakeSnapshot runs a script in a context of an isolate of its
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2228,6 +2228,12 @@
+         }
+         Value result{ Undefined, 0, 0, nullptr };
+         g_dispatch(slot, args, count, &result);
++        // (0033: the host stopped the script while this call ran script of its own, Ssrs2_Call's -2: nothing is
++        // answered or thrown over the termination, which goes on to the caller)
++        if (isolate->IsExecutionTerminating())
++        {
++            return;
++        }
+         switch (result.kind)
+         {
+             case Number:
+@@ -4141,38 +4147,68 @@
+     }
+ }
+ 
+-// 1: called, *result its answer; 0: it threw (what was thrown is at index 2 of the handle table, *result an Error with
+-// its text where it has one); -1: not inside a host call, or no such function.
+-NATIVE_ENTRY_POINT(int) Ssrs2_Call(int32_t function, int32_t receiver, const Ssrs2DirectCalls::Value* args, int32_t count, Ssrs2DirectCalls::Value* result) noexcept
++namespace Ssrs2Calls
+ {
+-    auto isolate = v8::Isolate::TryGetCurrent();
+-    if (isolate == nullptr || !isolate->InContext() || result == nullptr || count < 0 || count > Ssrs2Calls::MaxArgs || (args == nullptr && count > 0))
+-    {
+-        return -1;
+-    }
+-    v8::HandleScope scope(isolate);
+-    auto context = isolate->GetCurrentContext();
+-    *result = Ssrs2DirectCalls::Value{ Ssrs2DirectCalls::Undefined, 0, 0, nullptr };
+-    v8::Local<v8::Value> callee;
+-    if (!Ssrs2HandleValue(isolate, function).ToLocal(&callee) || !callee->IsFunction())
+-    {
+-        return -1;
+-    }
+-    v8::Local<v8::Value> self = v8::Undefined(isolate);
+-    if (receiver > 0 && !Ssrs2HandleValue(isolate, receiver).ToLocal(&self))
++    enum : int32_t { kCheckpoint = 1 };
++
++    // (0033) The call itself, in the current context, for Ssrs2_Call and Ssrs2_CallIn. The answer is read, and what was
++    // thrown is put under handle 2, only after the microtask checkpoint the caller asked for: a job run there may call
++    // into script through here again.
++    static int Invoke(v8::Isolate* isolate, v8::Local<v8::Context> context, int32_t function, int32_t receiver, const Value* args, int32_t count, int32_t flags, Value* result)
+     {
+-        return -1;
+-    }
+-    v8::Local<v8::Value> made[Ssrs2Calls::MaxArgs];
+-    v8::TryCatch tryCatch(isolate);
+-    bool ready = true;
+-    for (int32_t i = 0; i < count && ready; i++)
+-    {
+-        ready = Ssrs2Calls::ToScript(isolate, context, args[i], &made[i]);
+-    }
+-    v8::Local<v8::Value> answer;
+-    if (ready && callee.As<v8::Function>()->Call(context, self, count, made).ToLocal(&answer))
+-    {
++        *result = Value{ Ssrs2DirectCalls::Undefined, 0, 0, nullptr };
++        v8::Local<v8::Value> callee;
++        if (!Ssrs2HandleValue(isolate, function).ToLocal(&callee) || !callee->IsFunction())
++        {
++            return -1;
++        }
++        v8::Local<v8::Value> self = v8::Undefined(isolate);
++        if (receiver > 0 && !Ssrs2HandleValue(isolate, receiver).ToLocal(&self))
++        {
++            return -1;
++        }
++        v8::Local<v8::Value> made[MaxArgs];
++        v8::Local<v8::Value> answer;
++        v8::Local<v8::Value> thrown;
++        {
++            v8::TryCatch tryCatch(isolate);
++            bool ready = true;
++            for (int32_t i = 0; i < count && ready; i++)
++            {
++                ready = ToScript(isolate, context, args[i], &made[i]);
++            }
++            if (!ready || !callee.As<v8::Function>()->Call(context, self, count, made).ToLocal(&answer))
++            {
++                if (tryCatch.HasTerminated())
++                {
++                    // (the host is stopping the script: nothing is caught. The TryCatch, as it goes, throws the
++                    // termination on to the script frames under this call, where there are any)
++                    return -2;
++                }
++                if (!tryCatch.HasCaught())
++                {
++                    return -1;
++                }
++                // (thrown, by the function or while an argument was made)
++                thrown = tryCatch.Exception();
++            }
++        }
++        if ((flags & kCheckpoint) && isolate->GetMicrotasksPolicy() != v8::MicrotasksPolicy::kScoped)
++        {
++            isolate->PerformMicrotaskCheckpoint();
++            if (isolate->IsExecutionTerminating())
++            {
++                return -2;
++            }
++        }
++        if (!thrown.IsEmpty())
++        {
++            // (kept under handle 2)
++            (void)Ssrs2HandlePut(context, 2, thrown);
++            result->kind = Ssrs2DirectCalls::Error;
++            result->number = 2;
++            return 0;
++        }
+         thread_local std::vector<uint16_t> chars;
+         if (answer->IsNumber())
+         {
+@@ -4204,8 +4240,7 @@
+         else if (!answer->IsUndefined())
+         {
+             // (an object: left under handle 1 for the embedder)
+-            auto data = context->GetEmbedderDataV2(kSsrs2HandlesIndex);
+-            if (!data.IsEmpty() && data->IsValue() && data.As<v8::Value>()->IsArray() && data.As<v8::Array>()->Set(context, 1, answer).IsJust())
++            if (Ssrs2HandlePut(context, 1, answer))
+             {
+                 result->kind = Ssrs2DirectCalls::Handle;
+                 result->number = 1;
+@@ -4217,23 +4252,68 @@
+         }
+         return 1;
+     }
+-    // (thrown, by the function or while an argument was made: kept under handle 2, its text answered where it has one)
+-    if (tryCatch.HasCaught())
++}
++
++// 1: called, *result its answer; 0: it threw (what was thrown is at index 2 of the handle table, *result an Error with
++// its text where it has one); -1: not inside a host call, or no such function; -2 (0033): the host stopped the script
++// while the function ran (v8::Isolate::TerminateExecution, an engine's interrupt): nothing was thrown that a script
++// could catch, the termination goes on through the script frames under the host call, and the host is to return from
++// its own call at once, calling no script; whatever a direct call answers then is dropped.
++NATIVE_ENTRY_POINT(int) Ssrs2_Call(int32_t function, int32_t receiver, const Ssrs2DirectCalls::Value* args, int32_t count, Ssrs2DirectCalls::Value* result) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || result == nullptr || count < 0 || count > Ssrs2Calls::MaxArgs || (args == nullptr && count > 0))
+     {
+-        auto thrown = tryCatch.Exception();
+-        auto data = context->GetEmbedderDataV2(kSsrs2HandlesIndex);
+-        if (!data.IsEmpty() && data->IsValue() && data.As<v8::Value>()->IsArray())
+-        {
+-            (void)data.As<v8::Array>()->Set(context, 2, thrown);
+-        }
+-        tryCatch.Reset();
+-        result->kind = Ssrs2DirectCalls::Error;
+-        result->number = 2;
+-        return 0;
++        return -1;
+     }
+-    return -1;
++    v8::HandleScope scope(isolate);
++    return Ssrs2Calls::Invoke(isolate, isolate->GetCurrentContext(), function, receiver, args, count, 0, result);
+ }
+ 
++// A call into script with the context entered by the library (0033).
++//
++//   int Ssrs2_CallIn(int32_t context, int32_t function, int32_t receiver, const Value* args, int32_t count, int32_t flags, Value* result);
++//
++// Ssrs2_Call's call (0030: the function and the receiver by their handles, the arguments and the answer as a direct
++// call's), made in the context a number names (0032; 0: the current one, as Ssrs2_Call) whichever context is current,
++// or none: the library enters the context, calls the function and leaves. The handles are those of that context's
++// table; an object answered is left at its index 1 and what was thrown at its index 2. For a host that runs, from one
++// context's host call or from no script at all, a task that belongs to another context of the isolate. flags 1: a
++// microtask checkpoint of the isolate after the call, whether it returned or threw, before the answer is read (as
++// Ssrs2_PerformMicrotaskCheckpoint: also under other script frames, where V8 runs none by itself). Answers as
++// Ssrs2_Call: 1, 0, -1 (also: no isolate entered on this thread, or a number that names no context), -2.
++//
++// Threading: the isolate's thread, the isolate entered and locked by the caller (inside a host call, or inside the
++// lock the host's engine takes around its own work); the library takes no lock. Where no script of the isolate is
++// running, the call runs inside ClearScript's execution scope, as a script its engine runs does: the engine's
++// interrupt stops it (-2) and is over when the call returns. Under other script frames (a host call) an interrupt
++// stops those frames too, as it does for Ssrs2_Call. Re-entrancy: the function may call the host, which may call
++// Ssrs2_Call and Ssrs2_CallIn again, for this context or another; each call reads its answer after the calls it
++// contains. The answer's string is the thread's until the next call into script on it; the handles 1 and 2 are the
++// context's until its next call.
++NATIVE_ENTRY_POINT(int) Ssrs2_CallIn(int32_t context, int32_t function, int32_t receiver, const Ssrs2DirectCalls::Value* args, int32_t count, int32_t flags, Ssrs2DirectCalls::Value* result) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || result == nullptr || count < 0 || count > Ssrs2Calls::MaxArgs || (args == nullptr && count > 0))
++    {
++        return -1;
++    }
++    v8::HandleScope scope(isolate);
++    auto target = Ssrs2Contexts::Find(isolate, context);
++    if (target.IsEmpty())
++    {
++        return -1;
++    }
++    v8::Context::Scope contextScope(target);
++    auto isolateImpl = V8IsolateImpl::GetInstanceFromIsolate(isolate);
++    if (isolateImpl != nullptr && !isolateImpl->Ssrs2InExecutionScope())
++    {
++        V8IsolateImpl::ExecutionScope executionScope(*isolateImpl);
++        return Ssrs2Calls::Invoke(isolate, target, function, receiver, args, count, flags, result);
++    }
++    return Ssrs2Calls::Invoke(isolate, target, function, receiver, args, count, flags, result);
++}
++
+ // String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
+ // arena is blocks of memory that never move; an entry is a string's characters, one byte each when all are Latin-1,
+ // else two, numbered from 1 in the order added. The embedder adds a string once (Ssrs2_ArenaAdd) and reads an entry
+@@ -4607,4 +4687,5 @@
+ #pragma comment(linker, "/EXPORT:Ssrs2_ContextNumber=_Ssrs2_ContextNumber@0")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetCodeGenHostCheck=_Ssrs2_SetCodeGenHostCheck@16")
+ #pragma comment(linker, "/EXPORT:Ssrs2_Call=_Ssrs2_Call@20")
++#pragma comment(linker, "/EXPORT:Ssrs2_CallIn=_Ssrs2_CallIn@28")
+ #endif
