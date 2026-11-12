@@ -46,8 +46,11 @@ if (-not (Test-Path ClearScript)) { Invoke-Native 'Cloning ClearScript' { git cl
 Set-Location ClearScript
 $root = (Get-Location).Path
 Invoke-Native 'Checking ClearScript out' { git checkout -q $clearScriptTag }
-# (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed)
-$csPatches = Get-ChildItem (Join-Path $here 'patches\clearscript') -Filter *.patch | Sort-Object Name
+# (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed; the
+# order is that of the names' bytes, 0031 before 0031b: sorted by their bytes written in hexadecimal, since a sort by
+# name follows the culture, and one that passes over the hyphen puts 0031b first)
+$csPatches = Get-ChildItem (Join-Path $here 'patches\clearscript') -Filter *.patch |
+    Sort-Object { [BitConverter]::ToString([Text.Encoding]::ASCII.GetBytes($_.Name)) }
 $csPatched = "$clearScriptTag $((Get-Content -Raw $csPatches.FullName) -join '' | git hash-object --stdin)"
 if (-not (Test-Path .ssrs2-patched) -or (Get-Content .ssrs2-patched) -ne $csPatched) {
     Invoke-Native 'Resetting ClearScript' { git checkout -q HEAD -- ClearScriptV8 Unix/ClearScriptV8/Makefile }

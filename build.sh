@@ -30,11 +30,15 @@ if [[ ! -d ClearScript ]]; then git clone -q https://github.com/microsoft/ClearS
 cd ClearScript
 root="$PWD"
 git checkout -q "$clearscript_tag"
-# (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed)
-cs_patched="$clearscript_tag $(cat "$here"/patches/clearscript/*.patch | git hash-object --stdin)"
+# (the series in order, ClearScript's library ported to V8 15.6 then SSRS2's changes, again whenever it changed; the
+# order is that of the names' bytes, 0031 before 0031b, whatever the locale: a glob sorted by a locale that passes
+# over the hyphen puts 0031b first)
+cs_patches=()
+while IFS= read -r p; do cs_patches+=("$p"); done < <(ls "$here"/patches/clearscript/*.patch | LC_ALL=C sort)
+cs_patched="$clearscript_tag $(cat "${cs_patches[@]}" | git hash-object --stdin)"
 if [[ "$(cat .ssrs2-patched 2>/dev/null || true)" != "$cs_patched" ]]; then
     git checkout -q HEAD -- ClearScriptV8 Unix/ClearScriptV8/Makefile
-    for p in "$here"/patches/clearscript/*.patch; do git apply --3way "$p" || exit 1; done
+    for p in "${cs_patches[@]}"; do git apply --3way "$p" || exit 1; done
     echo "$cs_patched" > .ssrs2-patched
 fi
 
