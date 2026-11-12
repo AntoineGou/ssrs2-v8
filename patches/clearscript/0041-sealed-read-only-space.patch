@@ -1,0 +1,21 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -78,6 +78,17 @@
+         // through the megamorphic stub cache for every point; its optimized code now checks the maps it has seen.
+         flagStrings.push_back("--max-valid-polymorphic-map-count=16");
+         flagStrings.push_back("--no_memory_pool_share_memory_on_teardown");
++        // SSRS2 (0041): the read-only space is never left open for a snapshot creator. The read-only heap is one for
++        // all the process's isolates (V8 built without pointer compression shares it), made by the first isolate and
++        // made again once the last is gone. With V8's default (--extensible-ro-snapshot) an isolate of the snapshot
++        // creator (0027) that is the first leaves that space writable while it lives, so that its contexts may extend
++        // it; isolates made meanwhile share the open space, allocate their internalized strings in it from their own
++        // threads with no lock (heap corruption), and the creator's CreateBlob then seals the space into new shared
++        // pages and deletes the space object those isolates still point to (a range write barrier read its empty page
++        // list: the crashes in WriteBarrier::ForRange). Without it, the creator seals the space it read from the
++        // default blob at once, as every isolate does, and its blob's read-only part is the default one: what it is
++        // already whenever another isolate is alive when the creator starts.
++        flagStrings.push_back("--no-extensible-ro-snapshot");
+ 
+     #ifdef CLEARSCRIPT_TOP_LEVEL_AWAIT_CONTROL
+ 

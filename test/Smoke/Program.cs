@@ -1,6 +1,7 @@
 // dotnet Smoke.dll <folder>: runs smoke.js with the ClearScriptV8 library in <folder> and checks its answers against
 // expected.txt, stock V8's (Node's) answers; and that the date's local time is UTC whatever the machine's time zone, as
 // our V8 has it (the workflow sets another zone first).
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -10,6 +11,9 @@ using Microsoft.ClearScript.V8;
 // (ClearScript loads its library from the app's folder on .NET)
 foreach (var library in Directory.GetFiles(args[0], "ClearScriptV8.*"))
     File.Copy(library, Path.Combine(AppContext.BaseDirectory, Path.GetFileName(library)), overwrite: true);
+// (patches/clearscript/0041's check runs each of its trials in a child process of this program, which does that
+// trial alone: before anything else makes an isolate)
+if (SealedReadOnlySpace.IsChild) return SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First()) == SealedReadOnlySpace.Expected ? 0 : 1;
 // (patches/clearscript/0027, first: a process makes one snapshot blob and every isolate made after it starts from it)
 var snapshot = SnapshotContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"snapshot contexts: {snapshot}");
@@ -92,6 +96,8 @@ var tokens = SecurityTokens.Check(Directory.GetFiles(AppContext.BaseDirectory, "
 Console.WriteLine($"security tokens: {tokens}");
 var codeLikeObjects = CodeLikeObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"code-like objects: {codeLikeObjects}");
+var sealedReadOnly = SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"sealed read-only space: {sealedReadOnly}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -102,8 +108,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
-    && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}");
+    && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2240,3 +2246,86 @@ static unsafe class CodeLikeObjects
             """);
     }
 }
+
+// patches/clearscript/0041: the read-only space V8 shares between a process's isolates is never left writable by the
+// snapshot creator (0027). Before it, a creator that was the process's only isolate when it started (the read-only heap
+// is made again once the last isolate is gone) left the space open while its script ran, isolates made meanwhile
+// allocated in it from their threads with no lock, and its CreateBlob deleted the space object they pointed to: the
+// process died (SIGSEGV or V8's fatal checks) in nearly every such run. A blob is made once a process, so each trial is
+// a child process of this program running this check alone (the variable below set; an empty folder given, so that the
+// child copies no library over the one this process has loaded): a runtime made and disposed (none left alive), the
+// creator started on a thread with a script that runs 150 ms, four threads making engines meanwhile and running scripts
+// that add properties to new objects and compile new names, until 300 ms after the blob is made. Three trials, each
+// child's exit code; 0: the trial ran clean and the blob was made.
+static unsafe class SealedReadOnlySpace
+{
+    public const string Expected = "children 0,0,0";
+    const string ChildVariable = "SSRS2_SMOKE_SEALED_READ_ONLY_CHILD";
+
+    /// <summary>Whether this process is one trial's child: the program then runs this check alone.</summary>
+    public static bool IsChild => Environment.GetEnvironmentVariable(ChildVariable) == "1";
+
+    public static string Check(string library)
+    {
+        if (IsChild) return Trial(library) ? Expected : "no blob";
+        var empty = Directory.CreateTempSubdirectory("sealed-ro-");
+        try
+        {
+            var codes = new List<int>();
+            for (int i = 0; i < 3; i++)
+            {
+                var start = new ProcessStartInfo(Environment.ProcessPath!) { RedirectStandardOutput = true, RedirectStandardError = true };
+                start.ArgumentList.Add(typeof(SealedReadOnlySpace).Assembly.Location);
+                start.ArgumentList.Add(empty.FullName);
+                start.ArgumentList.Add(nameof(SealedReadOnlySpace));
+                start.Environment[ChildVariable] = "1";
+                using var child = Process.Start(start)!;
+                var output = child.StandardOutput.ReadToEndAsync();
+                var errors = child.StandardError.ReadToEndAsync();
+                if (!child.WaitForExit(300_000)) { child.Kill(); codes.Add(-1); continue; }
+                output.Wait(); errors.Wait();
+                codes.Add(child.ExitCode);
+            }
+            return "children " + string.Join(",", codes);
+        }
+        finally { empty.Delete(true); }
+    }
+
+    static bool Trial(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_MakeSnapshot", out var makeExport) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_MakeSnapshot@20", out makeExport)) return false;
+        var make = (delegate* unmanaged[Stdcall]<char*, int, char*, int, byte*, int>)makeExport;
+        // (V8 started by a runtime made and disposed: no isolate is alive when the creator starts)
+        using (new V8Runtime("before")) { }
+        const string code = "globalThis.kept = []; { const end = Date.now() + 150; let n = 0; while (Date.now() < end) { const o = {}; o['m' + (n % 64)] = n; kept.push(o); if (kept.length > 5000) kept.length = 0; n++; } }";
+        int size = 0; int done = 0;
+        var maker = new Thread(() =>
+        {
+            fixed (char* n = "maker.js") fixed (char* c = code) size = make(n, 8, c, code.Length, null);
+            Volatile.Write(ref done, 1);
+        });
+        maker.Start();
+        Thread.Sleep(15);
+        var workers = Enumerable.Range(0, 4).Select(w => new Thread(() =>
+        {
+            using var engine = new V8ScriptEngine();
+            engine.AddHostObject("host", new SealedReadOnlySpaceHost());
+            var after = new Stopwatch(); int round = 0;
+            while (!(after.IsRunning && after.ElapsedMilliseconds > 300))
+            {
+                if (!after.IsRunning && Volatile.Read(ref done) == 1) after.Start();
+                // (new names each round: maps made by transitions, strings the parser internalizes; a host object's
+                // wrapper each time, as the processes that crashed made them)
+                engine.Execute($"var r{w}_{round} = []; for (let i = 0; i < 200; i++) {{ const o = {{ h: host.Make() }}; o['p{w}_{round}_' + i] = i; o.q{round} = i; r{w}_{round}.push(o); }}");
+                round++;
+            }
+        })).ToList();
+        workers.ForEach(t => t.Start());
+        workers.ForEach(t => t.Join());
+        maker.Join();
+        return size > 0;
+    }
+}
+
+public class SealedReadOnlySpaceHost { public object Make() => new SealedReadOnlySpaceHost(); }
