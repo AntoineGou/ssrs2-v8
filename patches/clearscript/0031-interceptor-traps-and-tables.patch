@@ -1,0 +1,295 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3143,31 +3143,125 @@
+ // call: 1 when made, 0 outside a context.
+ namespace Ssrs2Interceptors
+ {
+-    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4, kNonMasking = 8 };
++    enum : int32_t { kIndexed = 1, kNamed = 2, kUndetectable = 4, kNonMasking = 8, kIndexedTable = 16 };
+ 
+     static v8::Local<v8::Value> Key(v8::Isolate*, v8::Local<v8::Name> name) { return name; }
+     static v8::Local<v8::Value> Key(v8::Isolate* isolate, uint32_t index) { return v8::Integer::NewFromUnsigned(isolate, index); }
+ 
++    // (0031) The handler and its traps are read once, when the factory is made, into the internal fields of an object the
++    // callbacks get as their data: a property read made a string of the trap's name and looked it up in the handler at
++    // every call, half of what an indexed read through the interceptor cost. A trap put on the handler later is not
++    // seen; a handler is written whole before its factory is made.
++    enum : int { kHandler = 0, kGet, kSet, kHas, kDelete, kDefine, kDescriptor, kOwnKeys, kCall, kFieldCount };
++    static const char* const kTrapNames[] = { nullptr, "get", "set", "has", "deleteProperty", "defineProperty", "getOwnPropertyDescriptor", "ownKeys", "call" };
++
+     // The handler's trap called: -1 an exception (the request handled: V8 throws it), 0 no trap, 1 its answer in result.
++    static int InvokeTrap(v8::Isolate* isolate, v8::Local<v8::Value> data, int slot, int argc, v8::Local<v8::Value>* argv, v8::Local<v8::Value>& result)
++    {
++        auto traps = data.As<v8::Object>();
++        auto trap = traps->GetInternalField(slot).As<v8::Value>();
++        if (!trap->IsFunction()) return 0;
++        if (!trap.As<v8::Function>()->Call(isolate->GetCurrentContext(), traps->GetInternalField(kHandler).As<v8::Value>(), argc, argv).ToLocal(&result)) return -1;
++        return 1;
++    }
++
+     template <typename T>
+-    static int Invoke(const v8::PropertyCallbackInfo<T>& info, const char* name, int argc, v8::Local<v8::Value>* argv, v8::Local<v8::Value>& result)
++    static int Invoke(const v8::PropertyCallbackInfo<T>& info, int slot, int argc, v8::Local<v8::Value>* argv, v8::Local<v8::Value>& result)
++    {
++        return InvokeTrap(info.GetIsolate(), info.Data(), slot, argc, argv, result);
++    }
++
++    // (0031, flags 16) An object's indexed table: an array of values a script gives it (make.setTable) with up to three
++    // guards, each a cell of an Int32Array and the value it is to hold. While every guard's cell holds its value, an
++    // indexed read below the array's length whose value there is not undefined is answered from the array, the handler
++    // not called (a call into the script from an interceptor costs four times the read itself). The script sets the
++    // table again when what the values were made from has changed; a cell that moved in between sends the read to the
++    // handler's get, as does a value not yet in the array. The object's internal fields: the values; a buffer holding
++    // the guards (each cell's address and expected value) and its address; the guards' arrays, kept alive.
++    enum : int { kTableValues = 0, kTableGuards, kTableGuardsData, kTableView, kTableGuardCount = 3, kTableFields = kTableView + kTableGuardCount };
++    struct TableGuard { const int32_t* cell; int64_t expected; };
++
++    // (the indexed getter of a factory made with flags 16 alone: its objects have the fields)
++    static bool FromTable(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info)
+     {
++        auto holder = info.Holder();
++        auto field = holder->GetInternalField(kTableValues);
++        if (!field->IsValue()) return false;
++        auto values = field.As<v8::Value>();
++        if (!values->IsArray()) return false;
++        auto guards = static_cast<const TableGuard*>(holder->GetAlignedPointerFromInternalField(info.GetIsolate(), kTableGuardsData, v8::kEmbedderDataTypeTagDefault));
++        if (guards != nullptr)
++        {
++            for (int g = 0; g < kTableGuardCount && guards[g].cell != nullptr; g++)
++            {
++                if (*guards[g].cell != static_cast<int32_t>(guards[g].expected)) return false;
++            }
++        }
++        auto array = values.As<v8::Array>();
++        if (index >= array->Length()) return false;
++        v8::Local<v8::Value> value;
++        if (!array->Get(info.GetIsolate()->GetCurrentContext(), index).ToLocal(&value) || value->IsUndefined()) return false;
++        info.GetReturnValue().Set(value);
++        return true;
++    }
++
++    // make.setTable(object, values, array, index, expected, ...): the object's table set (values an array), or taken
++    // away (values anything else). True when set.
++    static void SetTable(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
+         auto isolate = info.GetIsolate();
+         auto context = isolate->GetCurrentContext();
+-        auto handler = info.Data().template As<v8::Object>();
+-        v8::Local<v8::Value> trap;
+-        if (!handler->Get(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked()).ToLocal(&trap)) return -1;
+-        if (!trap->IsFunction()) return 0;
+-        if (!trap.As<v8::Function>()->Call(context, handler, argc, argv).ToLocal(&result)) return -1;
+-        return 1;
++        info.GetReturnValue().Set(false);
++        // (an object of this factory: its constructor is the function's data)
++        if (info.Length() < 2 || !info[0]->IsObject()) return;
++        auto object = info[0].As<v8::Object>();
++        if (object->InternalFieldCount() <= kTableFields || !object->GetInternalField(kTableFields).As<v8::Value>()->StrictEquals(info.Data())) return;
++        object->SetInternalField(kTableValues, v8::Undefined(isolate));
++        if (!info[1]->IsArray()) return;
++        TableGuard guards[kTableGuardCount] = {};
++        v8::Local<v8::Value> views[kTableGuardCount];
++        int count = 0;
++        for (int at = 2; at + 2 < info.Length() && count < kTableGuardCount; at += 3)
++        {
++            if (!info[at]->IsInt32Array()) return;
++            auto view = info[at].As<v8::Int32Array>();
++            int64_t index, expected;
++            if (!info[at + 1]->IntegerValue(context).To(&index) || !info[at + 2]->IntegerValue(context).To(&expected)) return;
++            if (index < 0 || static_cast<uint64_t>(index) >= view->Length()) return;
++            auto base = static_cast<const uint8_t*>(view->Buffer()->Data());
++            if (base == nullptr) return;
++            guards[count].cell = reinterpret_cast<const int32_t*>(base + view->ByteOffset()) + index;
++            guards[count].expected = expected;
++            views[count++] = view;
++        }
++        // (more guards than the table holds: no table, every read the handler's)
++        if (info.Length() > 2 + 3 * kTableGuardCount) return;
++        auto buffer = v8::ArrayBuffer::New(isolate, sizeof(guards));
++        memcpy(buffer->Data(), guards, sizeof(guards));
++        object->SetInternalField(kTableGuards, buffer);
++        object->SetAlignedPointerInInternalField(kTableGuardsData, buffer->Data(), v8::kEmbedderDataTypeTagDefault);
++        for (int g = 0; g < kTableGuardCount; g++)
++        {
++            if (g < count) object->SetInternalField(kTableView + g, views[g]); else object->SetInternalField(kTableView + g, v8::Undefined(isolate));
++        }
++        object->SetInternalField(kTableValues, info[1]);
++        info.GetReturnValue().Set(true);
+     }
+ 
+     template <typename K>
++    static v8::Intercepted Get(K key, const v8::PropertyCallbackInfo<v8::Value>& info);
++
++    static v8::Intercepted GetTabled(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info)
++    {
++        return FromTable(index, info) ? v8::Intercepted::kYes : Get<uint32_t>(index, info);
++    }
++
++    template <typename K>
+     static v8::Intercepted Get(K key, const v8::PropertyCallbackInfo<v8::Value>& info)
+     {
+         v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key) };
+         v8::Local<v8::Value> result;
+-        int r = Invoke(info, "get", 2, argv, result);
++        int r = Invoke(info, kGet, 2, argv, result);
+         if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
+         if (r > 0) info.GetReturnValue().Set(result);
+         return v8::Intercepted::kYes;
+@@ -3178,7 +3272,7 @@
+     {
+         v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key), value };
+         v8::Local<v8::Value> result;
+-        int r = Invoke(info, "set", 3, argv, result);
++        int r = Invoke(info, kSet, 3, argv, result);
+         if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
+         if (r > 0) info.GetReturnValue().Set(result->BooleanValue(info.GetIsolate()));
+         return v8::Intercepted::kYes;
+@@ -3190,7 +3284,7 @@
+         auto isolate = info.GetIsolate();
+         v8::Local<v8::Value> argv[] = { info.Holder(), Key(isolate, key) };
+         v8::Local<v8::Value> result;
+-        int r = Invoke(info, "has", 2, argv, result);
++        int r = Invoke(info, kHas, 2, argv, result);
+         if (r == 0 || (r > 0 && (result->IsUndefined() || result->IsFalse()))) return v8::Intercepted::kNo;
+         if (r > 0)
+         {
+@@ -3206,7 +3300,7 @@
+     {
+         v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key) };
+         v8::Local<v8::Value> result;
+-        int r = Invoke(info, "deleteProperty", 2, argv, result);
++        int r = Invoke(info, kDelete, 2, argv, result);
+         if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
+         if (r > 0) info.GetReturnValue().Set(result->BooleanValue(info.GetIsolate()));
+         return v8::Intercepted::kYes;
+@@ -3237,7 +3331,7 @@
+         if (!DescriptorObject(isolate, isolate->GetCurrentContext(), desc, descriptor)) return v8::Intercepted::kYes;
+         v8::Local<v8::Value> argv[] = { info.Holder(), Key(isolate, key), descriptor };
+         v8::Local<v8::Value> result;
+-        int r = Invoke(info, "defineProperty", 3, argv, result);
++        int r = Invoke(info, kDefine, 3, argv, result);
+         if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
+         if (r > 0) info.GetReturnValue().Set(result->BooleanValue(isolate));
+         return v8::Intercepted::kYes;
+@@ -3248,7 +3342,7 @@
+     {
+         v8::Local<v8::Value> argv[] = { info.Holder(), Key(info.GetIsolate(), key) };
+         v8::Local<v8::Value> result;
+-        int r = Invoke(info, "getOwnPropertyDescriptor", 2, argv, result);
++        int r = Invoke(info, kDescriptor, 2, argv, result);
+         if (r == 0 || (r > 0 && result->IsUndefined())) return v8::Intercepted::kNo;
+         if (r > 0) info.GetReturnValue().Set(result);
+         return v8::Intercepted::kYes;
+@@ -3260,28 +3354,18 @@
+         auto isolate = info.GetIsolate();
+         v8::Local<v8::Value> argv[] = { info.Holder(), v8::Boolean::New(isolate, Indexed) };
+         v8::Local<v8::Value> result;
+-        if (Invoke(info, "ownKeys", 2, argv, result) > 0 && result->IsArray()) info.GetReturnValue().Set(result.As<v8::Array>());
++        if (Invoke(info, kOwnKeys, 2, argv, result) > 0 && result->IsArray()) info.GetReturnValue().Set(result.As<v8::Array>());
+     }
+ 
+     static void Call(const v8::FunctionCallbackInfo<v8::Value>& info)
+     {
+         auto isolate = info.GetIsolate();
+-        auto context = isolate->GetCurrentContext();
+-        auto handler = info.Data().As<v8::Object>();
+-        v8::Local<v8::Value> trap;
+-        if (!handler->Get(context, v8::String::NewFromUtf8Literal(isolate, "call")).ToLocal(&trap)) return;
+-        if (!trap->IsFunction())
+-        {
+-            isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "The object is not callable")));
+-            return;
+-        }
+         std::vector<v8::Local<v8::Value>> args;
+         for (int i = 0; i < info.Length(); i++) args.push_back(info[i]);
+         v8::Local<v8::Value> result;
+-        if (trap.As<v8::Function>()->Call(context, handler, static_cast<int>(args.size()), args.data()).ToLocal(&result))
+-        {
+-            info.GetReturnValue().Set(result);
+-        }
++        int r = InvokeTrap(isolate, info.Data(), kCall, static_cast<int>(args.size()), args.data(), result);
++        if (r == 0) isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "The object is not callable")));
++        else if (r > 0) info.GetReturnValue().Set(result);
+     }
+ 
+     // make(prototype): a new object of the factory's template, its prototype the one given (an object or null).
+@@ -3292,6 +3376,13 @@
+         v8::Local<v8::Object> object;
+         if (!info.Data().As<v8::Function>()->NewInstance(context).ToLocal(&object)) return;
+         if (info.Length() > 0 && (info[0]->IsObject() || info[0]->IsNull()) && object->SetPrototype(context, info[0]).IsNothing()) return;
++        // (0031: an object with a table starts with none; its last field says which factory made it)
++        if (object->InternalFieldCount() > kTableFields)
++        {
++            for (int i = 0; i < kTableFields; i++) if (i != kTableGuardsData) object->SetInternalField(i, v8::Undefined(isolate));
++            object->SetAlignedPointerInInternalField(kTableGuardsData, nullptr, v8::kEmbedderDataTypeTagDefault);
++            object->SetInternalField(kTableFields, info.Data());
++        }
+         info.GetReturnValue().Set(object);
+     }
+ 
+@@ -3304,14 +3395,26 @@
+             isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "interceptorFactory(handler, flags): handler is not an object")));
+             return;
+         }
+-        auto handler = info[0].As<v8::Object>();
++        auto handlerObject = info[0].As<v8::Object>();
+         int32_t flags = 0;
+         if (info.Length() > 1 && !info[1]->Int32Value(context).To(&flags)) return;
++        // (0031: the handler and its traps as they are now, in an object's internal fields)
++        auto trapsTemplate = v8::ObjectTemplate::New(isolate);
++        trapsTemplate->SetInternalFieldCount(kFieldCount);
++        v8::Local<v8::Object> handler;
++        if (!trapsTemplate->NewInstance(context).ToLocal(&handler)) return;
++        handler->SetInternalField(kHandler, handlerObject);
++        for (int slot = kGet; slot < kFieldCount; slot++)
++        {
++            v8::Local<v8::Value> trap;
++            if (!handlerObject->Get(context, v8::String::NewFromUtf8(isolate, kTrapNames[slot]).ToLocalChecked()).ToLocal(&trap)) return;
++            handler->SetInternalField(slot, trap);
++        }
+         auto functionTemplate = v8::FunctionTemplate::New(isolate);
+         auto instanceTemplate = functionTemplate->InstanceTemplate();
+         if (flags & kIndexed)
+         {
+-            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(Get<uint32_t>, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
++            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration((flags & kIndexedTable) ? GetTabled : Get<uint32_t>, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
+                 Keys<true>, Define<uint32_t>, Descriptor<uint32_t>, handler));
+         }
+         if (flags & kNamed)
+@@ -3329,6 +3432,7 @@
+             instanceTemplate->MarkAsUndetectable();
+             instanceTemplate->SetCallAsFunctionHandler(Call, handler);
+         }
++        if ((flags & kIndexedTable) && (flags & kIndexed)) instanceTemplate->SetInternalFieldCount(kTableFields + 1);
+         v8::Local<v8::Function> constructor;
+         v8::Local<v8::Function> make;
+         if (!functionTemplate->GetFunction(context).ToLocal(&constructor)
+@@ -3336,6 +3440,15 @@
+         {
+             return;
+         }
++        if ((flags & kIndexedTable) && (flags & kIndexed))
++        {
++            v8::Local<v8::Function> setTable;
++            if (!v8::Function::New(context, SetTable, constructor, 2, v8::ConstructorBehavior::kThrow).ToLocal(&setTable)
++                || make->Set(context, v8::String::NewFromUtf8Literal(isolate, "setTable"), setTable).IsNothing())
++            {
++                return;
++            }
++        }
+         info.GetReturnValue().Set(make);
+     }
+ }
+@@ -3360,6 +3473,11 @@
+     {
+         return 0;
+     }
++    // (0031: the handler's traps are read once, and flags 16 gives the objects an indexed table)
++    if (function->Set(context, v8::String::NewFromUtf8Literal(isolate, "tables"), v8::True(isolate)).IsNothing())
++    {
++        return 0;
++    }
+     return object->Set(context, v8::String::NewFromUtf8(isolate, name).ToLocalChecked(), function).IsJust() ? 1 : 0;
+ }
+ 

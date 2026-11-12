@@ -67,14 +67,16 @@ var arena = StringArenas.Check(Directory.GetFiles(AppContext.BaseDirectory, "Cle
 Console.WriteLine($"string arena: {arena}");
 var handleCalls = HandlesAndCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"handles and calls: {handleCalls}");
+var tables = InterceptorTables.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"interceptor tables: {tables}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
     && codeGen == CodeGenChecks.Expected && entry == EntryContexts.Expected && immutable == ImmutableGlobals.Expected
     && immutablePrototype == ImmutablePrototypes.Expected && interceptors == InterceptorObjects.Expected
     && prototypeSetup == PrototypeSetups.Expected && scriptIds == FunctionScriptIds.Expected && digests == TextDigests.Expected && snapshot == SnapshotContexts.Expected
-    && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}");
+    && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1046,5 +1048,50 @@ static unsafe class HandlesAndCalls
         Value outside;
         results.Add(call(3, 0, null, 0, &outside).ToString());
         return string.Join(":", results);
+    }
+}
+
+// patches/clearscript/0031: the interceptor objects of 0023 read their handler's traps once, when the factory is made
+// (a trap's name was made a string and looked up in the handler at every call), and a factory made with flags 16 gives
+// its objects an indexed table: make.setTable(object, values, array, index, expected, ...) hands an array of values
+// and up to three guards, each a cell of an Int32Array and the value it is to hold; while every cell holds its value,
+// an indexed read below the array's length whose value there is not undefined is answered from the array without
+// calling the handler. The factory says so: interceptorFactory.tables. Checked with a toy handler that counts its
+// calls: a read from the table, one past its length, one of an undefined value, one after a guard's cell moved and
+// after it moved back, the table taken away, an object of another factory refused, and a trap put on the handler
+// after its factory was made, which is not seen.
+static unsafe class InterceptorTables
+{
+    public const string Expected = "true:a0 b0 t2,1 u3,2:t1,3 b3:t1,4 false:late undefined:true";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallInterceptors", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_InstallInterceptors@8", out export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            var h = System.Text.Encoding.UTF8.GetBytes("__toy\0"); var n = System.Text.Encoding.UTF8.GetBytes("interceptorFactory\0");
+            fixed (byte* hp = h, np = n) return install(hp, np) == 1;
+        }));
+        return (string)engine.Evaluate("""
+            install();
+            const factory = __toy.interceptorFactory, out = [String(factory.tables === true)];
+            let calls = 0;
+            const handler = { get(o, i) { calls++; return 't' + i; } };
+            const make = factory(handler, 1 | 16), o = make(null), cells = new Int32Array([0, 7]);
+            out.push([String(make.setTable(o, ['a', 'b', undefined], cells, 1, 7) && o[0]) + calls, o[1] + calls, o[2] + ',' + calls, (o[3], 'u' + 3) + ',' + calls].join(' '));
+            cells[1] = 8; const moved = o[1] + ',' + calls; cells[1] = 7;
+            out.push(moved + ' ' + o[1] + calls);
+            make.setTable(o, null);
+            out.push(o[1] + ',' + calls + ' ' + String(make.setTable(factory(handler, 1)(null), ['x'])));
+            // (a trap put on the handler later is not seen: the traps are read when the factory is made)
+            handler.set = () => { throw new Error('set seen'); }; o[5] = 'late';
+            out.push(o[5] === 't5' ? 'late undefined' : 'late ' + o[5]);
+            // (a factory without the flag: no setTable, its reads the handler's)
+            out.push(String(factory(handler, 1).setTable === undefined && factory(handler, 1)(null)[4] === 't4'));
+            out.join(':');
+            """);
     }
 }
