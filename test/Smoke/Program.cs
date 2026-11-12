@@ -86,6 +86,8 @@ var hostScheduler = ImportHostSchedulers.Check(Directory.GetFiles(AppContext.Bas
 Console.WriteLine($"import host scheduler: {hostScheduler}");
 var namedHost = NamedHostInterceptors.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"named host interceptors: {namedHost}");
+var tableQueries = TableQueries.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"table queries: {tableQueries}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -95,8 +97,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && arena == StringArenas.Expected && handleCalls == HandlesAndCalls.Expected && tables == InterceptorTables.Expected
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
-    && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}");
+    && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -1963,5 +1965,64 @@ static unsafe class NamedHostInterceptors
             r.join(':')
             """);
         return answer + ":" + (s_contexts.Count == 1 && s_contexts.Contains(own) && own > 0).ToString().ToLowerInvariant();
+    }
+}
+
+// patches/clearscript/0038: an interceptor object's indexed table (0031, flags 16) answers whether the object has an
+// index, as it answers the index's read, where the handler has a number as its tableAttributes when the factory is
+// made (the attributes its has trap would answer for a property the table holds); the has trap is then not called
+// for such an index. The factory says so: interceptorFactory.tableQueries. Checked with a toy handler that counts its
+// has and get calls: `in` for indices the table holds (no call), for an undefined value, an index past the values and
+// one the object has not (the trap's answer); hasOwn and propertyIsEnumerable; Array.prototype.indexOf called on the
+// object, over the table (no call) and past it; a guard's cell moved and moved back; the table taken away;
+// attributes that say not enumerable; a handler without tableAttributes and one whose tableAttributes is no number
+// (every query the trap's, as before); tableAttributes changed after the factory was made (not seen).
+static unsafe class TableQueries
+{
+    public const string Expected = "true:true true 0:true true false 3:true true 0:1 0 0:3 2 2:true 1 true 1:true 1:false true:true 1:true 1:true";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallInterceptors", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_InstallInterceptors@8", out export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, name = "interceptorFactory\0"u8) return install(holder, name) == 1;
+        }));
+        return (string)engine.Evaluate("""
+            install();
+            const f = __toy.interceptorFactory, out = [String(f.tableQueries === true)];
+            let has = 0, get = 0;
+            const handler = { get(o, i) { get++; return i < 4 ? 't' + i : undefined; }, has(o, i) { has++; return i < 4 ? 1 : false; }, tableAttributes: 1 };
+            const make = f(handler, 1 | 16), o = make({ length: 4 }), cells = new Int32Array([0, 7]);
+            make.setTable(o, ['a', 'b', undefined], cells, 1, 7);
+            out.push([0 in o, 1 in o, has].join(' '));
+            out.push([2 in o, 3 in o, 9 in o, has].join(' '));
+            has = 0; out.push([Object.hasOwn(o, 0), Object.prototype.propertyIsEnumerable.call(o, 1), has].join(' '));
+            has = 0; get = 0; out.push([Array.prototype.indexOf.call(o, 'b'), has, get].join(' '));
+            has = 0; get = 0; out.push([Array.prototype.indexOf.call(o, 't3'), has, get].join(' '));
+            cells[1] = 8; has = 0; const moved = (0 in o) + ' ' + has; cells[1] = 7;
+            out.push(moved + ' ' + (0 in o) + ' ' + has);
+            make.setTable(o, null); has = 0; out.push((0 in o) + ' ' + has);
+            // (attributes 2: not enumerable)
+            const hidden = f({ get() { return 'x'; }, has() { return 1; }, tableAttributes: 2 }, 1 | 16), h = hidden(null);
+            hidden.setTable(h, ['a']);
+            out.push(Object.prototype.propertyIsEnumerable.call(h, 0) + ' ' + (0 in h));
+            // (no tableAttributes, and one that is no number: every query the trap's)
+            let asked = 0;
+            const plain = f({ get() { return 'x'; }, has() { asked++; return 1; } }, 1 | 16), p = plain(null);
+            plain.setTable(p, ['a']);
+            out.push((0 in p) + ' ' + asked);
+            asked = 0;
+            const odd = f({ get() { return 'x'; }, has() { asked++; return 1; }, tableAttributes: 'yes' }, 1 | 16), q = odd(null);
+            odd.setTable(q, ['a']);
+            out.push((0 in q) + ' ' + asked);
+            // (changed after the factory was made: not seen, the first factory's objects still answer attributes 1)
+            handler.tableAttributes = 2; make.setTable(o, ['a'], cells, 1, 7);
+            out.push(String(Object.prototype.propertyIsEnumerable.call(o, 0)));
+            out.join(':')
+            """);
     }
 }

@@ -1,0 +1,112 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3546,7 +3546,8 @@
+     // seen; a handler is written whole before its factory is made.
+     // (0037: the last field is the number of the context the factory was made in, for a factory whose named
+     // properties the host answers)
+-    enum : int { kHandler = 0, kGet, kSet, kHas, kDelete, kDefine, kDescriptor, kOwnKeys, kCall, kContextNumber, kFieldCount };
++    // (0038: and the attributes the indexed table answers a query with, where the handler gives them)
++    enum : int { kHandler = 0, kGet, kSet, kHas, kDelete, kDefine, kDescriptor, kOwnKeys, kCall, kContextNumber, kTableAttributes, kFieldCount };
+     static const char* const kTrapNames[] = { nullptr, "get", "set", "has", "deleteProperty", "defineProperty", "getOwnPropertyDescriptor", "ownKeys", "call" };
+ 
+     // The handler's trap called: -1 an exception (the request handled: V8 throws it), 0 no trap, 1 its answer in result.
+@@ -3590,15 +3591,16 @@
+         std::shared_ptr<v8::BackingStore> stores[kTableGuardCount];
+     };
+ 
+-    // (the indexed getter of a factory made with flags 16 alone: its objects have the fields)
+-    static bool FromTable(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info)
++    // What the object's table has for an index: false for an object without a table, a guard's cell that moved, an
++    // index at or past the values' length, or a value there that is undefined. (The objects of a factory made with
++    // flags 16 alone have the fields.)
++    static bool TableValue(v8::Isolate* isolate, v8::Local<v8::Object> holder, uint32_t index, v8::Local<v8::Value>* value)
+     {
+-        auto holder = info.Holder();
+         auto field = holder->GetInternalField(kTableValues);
+         if (!field->IsValue()) return false;
+         auto values = field.As<v8::Value>();
+         if (!values->IsArray()) return false;
+-        auto guards = static_cast<const TableGuard*>(holder->GetAlignedPointerFromInternalField(info.GetIsolate(), kTableGuardsData, v8::kEmbedderDataTypeTagDefault));
++        auto guards = static_cast<const TableGuard*>(holder->GetAlignedPointerFromInternalField(isolate, kTableGuardsData, v8::kEmbedderDataTypeTagDefault));
+         if (guards != nullptr)
+         {
+             for (int g = 0; g < kTableGuardCount && guards[g].cell != nullptr; g++)
+@@ -3608,8 +3610,14 @@
+         }
+         auto array = values.As<v8::Array>();
+         if (index >= array->Length()) return false;
++        return array->Get(isolate->GetCurrentContext(), index).ToLocal(value) && !(*value)->IsUndefined();
++    }
++
++    // (the indexed getter of a factory made with flags 16)
++    static bool FromTable(uint32_t index, const v8::PropertyCallbackInfo<v8::Value>& info)
++    {
+         v8::Local<v8::Value> value;
+-        if (!array->Get(info.GetIsolate()->GetCurrentContext(), index).ToLocal(&value) || value->IsUndefined()) return false;
++        if (!TableValue(info.GetIsolate(), info.Holder(), index, &value)) return false;
+         info.GetReturnValue().Set(value);
+         return true;
+     }
+@@ -3713,6 +3721,24 @@
+         return v8::Intercepted::kYes;
+     }
+ 
++    // (0038, flags 16 and a handler with tableAttributes) An index's query answered from the table. Whether an object
++    // has an index (in, hasOwnProperty, propertyIsEnumerable, the HasProperty of Array.prototype.indexOf, includes,
++    // forEach and the like called on the object) went to the handler's has trap at every ask, though the read that
++    // follows is answered from the table. A handler that has a number as its tableAttributes when its factory is
++    // made (read once, as its traps are) says what its has trap would answer for a property the table holds: 0, or
++    // the sum of 1 read-only, 2 not enumerable, 4 not configurable. While the table would answer a read of the index
++    // (its guards hold, the index is below the values' length, the value there is not undefined), the query is
++    // answered with those attributes and the has trap is not called; any other index's query goes to the has trap
++    // as before. A handler without tableAttributes, or with one that is no number, is asked every query, as before.
++    static v8::Intercepted QueryTabled(uint32_t index, const v8::PropertyCallbackInfo<v8::Integer>& info)
++    {
++        v8::Local<v8::Value> value;
++        if (!TableValue(info.GetIsolate(), info.Holder(), index, &value)) return Query<uint32_t>(index, info);
++        // (the field is the factory's own, a small integer: set before the template that names this callback is made)
++        info.GetReturnValue().Set(info.Data().As<v8::Object>()->GetInternalField(kTableAttributes).As<v8::Int32>()->Value());
++        return v8::Intercepted::kYes;
++    }
++
+     template <typename K>
+     static v8::Intercepted Delete(K key, const v8::PropertyCallbackInfo<v8::Boolean>& info)
+     {
+@@ -4110,8 +4136,22 @@
+         {
+             // (0031b: the getter named by its type first: a compiler need not pick a template's instance inside ?:)
+             v8::Intercepted (*getter)(uint32_t, const v8::PropertyCallbackInfo<v8::Value>&) = Get<uint32_t>;
+-            if (flags & kIndexedTable) getter = GetTabled;
+-            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(getter, Set<uint32_t>, Query<uint32_t>, Delete<uint32_t>,
++            v8::Intercepted (*query)(uint32_t, const v8::PropertyCallbackInfo<v8::Integer>&) = Query<uint32_t>;
++            if (flags & kIndexedTable)
++            {
++                getter = GetTabled;
++                // (0038: the handler's tableAttributes, a number: the table answers an index's query too)
++                v8::Local<v8::Value> attributes;
++                if (!handlerObject->Get(context, v8::String::NewFromUtf8Literal(isolate, "tableAttributes")).ToLocal(&attributes)) return;
++                if (attributes->IsNumber())
++                {
++                    int32_t given = 0;
++                    if (!attributes->Int32Value(context).To(&given)) return;
++                    handler->SetInternalField(kTableAttributes, v8::Integer::New(isolate, given & (v8::ReadOnly | v8::DontEnum | v8::DontDelete)));
++                    query = QueryTabled;
++                }
++            }
++            instanceTemplate->SetHandler(v8::IndexedPropertyHandlerConfiguration(getter, Set<uint32_t>, query, Delete<uint32_t>,
+                 Keys<true>, Define<uint32_t>, Descriptor<uint32_t>, handler));
+         }
+         // (0037: named properties the host answers, flags 2 | 32)
+@@ -4188,6 +4228,11 @@
+     }
+     // (0031: the handler's traps are read once, and flags 16 gives the objects an indexed table)
+     if (function->Set(context, v8::String::NewFromUtf8Literal(isolate, "tables"), v8::True(isolate)).IsNothing())
++    {
++        return 0;
++    }
++    // (0038: a handler's tableAttributes has the table answer an index's query)
++    if (function->Set(context, v8::String::NewFromUtf8Literal(isolate, "tableQueries"), v8::True(isolate)).IsNothing())
+     {
+         return 0;
+     }
