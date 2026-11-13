@@ -228,9 +228,6 @@ ClearScript's project is built with V8's clang-cl and lld-link in place of Visua
 too. Pointer compression and V8's sandbox stay off (ClearScript's array buffers and external memory live outside any
 cage).
 
-On SSRS2's pages, against the build before it (same V8 and patches, macOS arm64): about 3% fewer instructions once warm,
-2% less at a first render, 1.5 to 2% less time, with the same output.
-
 ### Profile
 
 `profiles/ClearScriptV8.profdata.xz` is a profile of the instrumented library (`chrome_pgo_phase=1`, and ClearScript's
