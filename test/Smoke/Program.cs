@@ -102,6 +102,8 @@ var recording = RecordingFunctions.Check(Directory.GetFiles(AppContext.BaseDirec
 Console.WriteLine($"recording functions: {recording}");
 var directInPlace = DirectCallsInPlace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"direct calls in place: {directInPlace}");
+var typedCalls = TypedCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"typed calls: {typedCalls}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -113,8 +115,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
-    && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}");
+    && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2608,5 +2610,73 @@ static unsafe class DirectCallsInPlace
             out.join(':')
             """);
         return string.Join("|", s_seen) + ":" + answered;
+    }
+}
+
+// patches/clearscript/0044: Ssrs2_InstallTypedCalls, host functions of declared signatures (an int32, double or boolean
+// answer; int32 and double arguments) called with the slot the host gave first, from V8's fast calls in optimized code
+// and from the slow callback elsewhere. Checked: "dii" (a double of two int32s and the slot), "iid" (an int32 of an
+// int32 and a double, the host's chosen value INT32_MIN for a negative double), "bd" (a boolean), "d" (no argument);
+// arguments that are no int32 (1.5, -1.5, 2^32 + 3, NaN, a string '7', an object with valueOf, too few: ToInt32 or
+// NaN as the slow path converts them); answers as numbers of their kind (-0, a whole double as a small integer); a
+// loop hot enough for TurboFan with the same answers; a signature refused (an answer letter it does not know, seven
+// arguments).
+
+static unsafe class TypedCalls
+{
+    public const string Expected = "true:17.5 slot 9:1,2,-2147483648,-1,3,0,7,4,5:true,false,false:-0 true:hot 100000 999950000000 50000 5000:0 0";
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static double Add(int slot, int a, int b) => a + b + slot / 10.0;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static int Pick(int slot, int a, double b) => b < 0 ? int.MinValue : a;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static byte Positive(int slot, double v) => (byte)(v > 0 ? 1 : 0);
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static double Zero(int slot) => -0.0;
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallTypedCalls", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_InstallTypedCalls@24", out export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, int, byte**, byte**, int*, void**, int>)export;
+        using var engine = new V8ScriptEngine();
+        bool Install(string[] names, string[] signatures, int[] slots, void*[] functions)
+        {
+            var nb = names.Select(n => System.Text.Encoding.UTF8.GetBytes(n + "\0")).ToArray();
+            var sb = signatures.Select(n => System.Text.Encoding.UTF8.GetBytes(n + "\0")).ToArray();
+            var handles = nb.Concat(sb).Select(b => GCHandle.Alloc(b, GCHandleType.Pinned)).ToArray();
+            try
+            {
+                byte** np = stackalloc byte*[names.Length]; byte** sp = stackalloc byte*[names.Length];
+                for (int i = 0; i < names.Length; i++) { np[i] = (byte*)handles[i].AddrOfPinnedObject(); sp[i] = (byte*)handles[names.Length + i].AddrOfPinnedObject(); }
+                fixed (byte* holder = "__typed\0"u8) fixed (int* sl = slots) fixed (void** fp = functions)
+                    return install(holder, names.Length, np, sp, sl, fp) == 1;
+            }
+            finally { foreach (var h in handles) h.Free(); }
+        }
+        engine.AddHostObject("install", new Func<bool>(() => Install(["add", "pick", "positive", "zero"], ["dii", "iid", "bd", "d"], [5, 0, 0, 0],
+            [(delegate* unmanaged[Cdecl]<int, int, int, double>)&Add, (delegate* unmanaged[Cdecl]<int, int, double, int>)&Pick,
+             (delegate* unmanaged[Cdecl]<int, double, byte>)&Positive, (delegate* unmanaged[Cdecl]<int, double>)&Zero])));
+        engine.AddHostObject("refused", new Func<string>(() =>
+            (Install(["x"], ["q"], [0], [(delegate* unmanaged[Cdecl]<int, double>)&Zero]) ? 1 : 0) + " "
+            + (Install(["y"], ["diiiiiii"], [0], [(delegate* unmanaged[Cdecl]<int, double>)&Zero]) ? 1 : 0)));
+        return (string)engine.Evaluate("""
+            const out = [String(install())];
+            const t = __typed;
+            out.push(t.add(8, 9) + ' slot ' + t.add.length * 4.5);
+            out.push([t.pick(1, 2), t.pick(2, 0.5), t.pick(3, -1), t.pick(-1.5, 1), t.pick(4294967299, 1), t.pick(NaN, 1), t.pick('7', 1), t.pick({ valueOf() { return 4; } }, 1), t.pick(5)].join(','));
+            out.push([t.positive(3), t.positive(-3), t.positive(NaN)].join(','));
+            const z = t.zero(); out.push((Object.is(z, -0) ? '-0' : String(z)) + ' ' + (1 / z === -Infinity));
+            let sum = 0, picks = 0, neg = 0;
+            function hot(n) { for (let i = 0; i < n; i++) { sum += t.add(i, i); picks += t.pick(i & 1, 0.5); if (t.pick(i, -1) === -2147483648 && (i % 20) === 0) neg++; } }
+            for (let k = 0; k < 10; k++) hot(10000);
+            out.push('hot ' + 100000 + ' ' + Math.round(sum * 1000) / 1000 * 1000 + ' ' + picks * 1 + ' ' + neg);
+            out.push(refused());
+            out.join(':')
+            """);
     }
 }

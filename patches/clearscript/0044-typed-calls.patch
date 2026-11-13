@@ -1,0 +1,227 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index b52d897..d4a02b0 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -5587,6 +5587,9 @@ namespace Ssrs2Recording
+         bool numberMapChecked = false;
+         std::vector<std::unique_ptr<PlanTemplates>> plans;
+         std::unordered_set<Recorder*> live;
++        // (0044: the typed calls' templates, Ssrs2TypedCalls::Cache, freed with the isolate)
++        void* typed = nullptr;
++        void (*typedGone)(void*) = nullptr;
+     };
+ 
+     struct Recorder
+@@ -6515,6 +6518,7 @@ namespace Ssrs2Recording
+                 for (auto& t : kind.setters) t.Reset();
+             }
+         }
++        if (all->typed != nullptr && all->typedGone != nullptr) all->typedGone(all->typed);
+         delete all;
+         isolate->SetData(kIsolateSlot, nullptr);
+     }
+@@ -6743,6 +6747,198 @@ NATIVE_ENTRY_POINT(int) Ssrs2_RecordingReserve(void* recorder, int32_t depth) no
+     return Ssrs2Recording::Reserve(reinterpret_cast<Ssrs2Recording::Recorder*>(recorder)->shared, depth) ? 1 : 0;
+ }
+ 
++#include <limits>
++#include <map>
++#include <tuple>
++#include <type_traits>
++
++//-----------------------------------------------------------------------------
++// SSRS2 (0044): typed calls. Functions of a holder object, each a host function pointer of a declared signature (its
++// answer an int32, a double or a boolean; its arguments int32s and doubles, six at most) called with a slot the host
++// gives first: V8's fast API call from optimized code, the slow callback elsewhere, both reading the arguments in place.
++// The answer is handed to the script as it is: a host that wants the script to take another way answers a value of its
++// choosing that its script tests (an int32 such as INT32_MIN, or a double the function never answers otherwise: not a
++// NaN of its own bits, which V8 may make any NaN). The host's functions are cdecl.
++//
++//   int Ssrs2_InstallTypedCalls(const char* holder, int32_t count, const char* const* names, const char* const* signatures,
++//       const int32_t* slots, void* const* functions);
++//
++// signatures[i]: the answer's letter then the arguments' ('i' int32, 'd' double; answer 'i', 'd' or 'b'), "dii" for
++// double f(int32 slot, int32, int32). In a host call only; 0 for a signature it does not take, no isolate or context.
++//-----------------------------------------------------------------------------
++
++namespace Ssrs2TypedCalls
++{
++    struct Entry { void* function; int32_t slot; void (*body)(const struct Entry&, const v8::FunctionCallbackInfo<v8::Value>&); };
++    constexpr int32_t kMost = 1 << 16;
++    static Entry g_entries[kMost];
++    static std::atomic<int32_t> g_count { 0 };
++    static std::mutex g_mutex;
++    static std::map<std::tuple<void*, int32_t, std::string>, int32_t> g_known;
++
++    static inline const Entry& EntryOf(v8::Local<v8::Value> data)
++    {
++        int32_t at = Ssrs2Recording::SmiAt(v8::internal::ValueHelper::ValueAsAddress(*data));
++        return g_entries[static_cast<uint32_t>(at) < static_cast<uint32_t>(kMost) ? at : 0];
++    }
++
++    template <typename T> static inline T Read(v8::Isolate* isolate, v8::internal::Address map, const v8::FunctionCallbackInfo<v8::Value>& info, int i)
++    {
++        using I = v8::internal::Internals;
++        double v = std::numeric_limits<double>::quiet_NaN();
++        if (i < info.Length())
++        {
++            auto value = info[i];
++            auto a = v8::internal::ValueHelper::ValueAsAddress(*value);
++            // (a small integer, the common argument: as it is)
++            if (!I::HasHeapObjectTag(a))
++            {
++                if constexpr (std::is_same_v<T, int32_t>) return I::SmiValue(a);
++                else return I::SmiValue(a);
++            }
++            if (map != 0 && I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset) == map)
++                v = I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address)));
++            else if (!Ssrs2Recording::NumberIn(isolate, value, v)) v = value->NumberValue(isolate->GetCurrentContext()).FromMaybe(std::numeric_limits<double>::quiet_NaN());
++        }
++        if constexpr (std::is_same_v<T, int32_t>)
++        {
++            // (ECMAScript's ToInt32)
++            if (v >= -2147483648.0 && v <= 2147483647.0) return static_cast<int32_t>(v);
++            if (!std::isfinite(v)) return 0;
++            double t = std::trunc(v);
++            double m = std::fmod(t, 4294967296.0);
++            if (m < 0) m += 4294967296.0;
++            return static_cast<int32_t>(static_cast<uint32_t>(m));
++        }
++        else return v;
++    }
++
++    template <typename R> static inline void Answer(const v8::FunctionCallbackInfo<v8::Value>& info, R r)
++    {
++        if constexpr (std::is_same_v<R, bool>) info.GetReturnValue().Set(r);
++        else if constexpr (std::is_same_v<R, int32_t>) info.GetReturnValue().Set(r);
++        else
++        {
++            if (r >= -2147483648.0 && r <= 2147483647.0 && r == static_cast<double>(static_cast<int32_t>(r)) && !(r == 0 && std::signbit(r)))
++                info.GetReturnValue().Set(static_cast<int32_t>(r));
++            else info.GetReturnValue().Set(r);
++        }
++    }
++
++    template <typename R, typename... A>
++    struct Typed
++    {
++        using F = R (*)(int32_t, A...);
++        static R Fast(v8::Local<v8::Object>, A... a, v8::FastApiCallbackOptions& options)
++        {
++            auto& e = EntryOf(options.data);
++            return reinterpret_cast<F>(e.function)(e.slot, a...);
++        }
++        template <size_t... K> static R Call(const Entry& e, v8::Isolate* isolate, const v8::FunctionCallbackInfo<v8::Value>& info, std::index_sequence<K...>)
++        {
++            auto map = Ssrs2NumberMap(isolate);
++            (void)map;
++            return reinterpret_cast<F>(e.function)(e.slot, Read<A>(isolate, map, info, static_cast<int>(K))...);
++        }
++        // (the slow callback's body: an answer set during a termination is dropped by V8 as any answer)
++        static void Body(const Entry& e, const v8::FunctionCallbackInfo<v8::Value>& info)
++        {
++            Answer<R>(info, Call(e, info.GetIsolate(), info, std::index_sequence_for<A...>{}));
++        }
++    };
++
++    struct Made { const v8::CFunction* fast; void (*body)(const Entry&, const v8::FunctionCallbackInfo<v8::Value>&); int length; };
++
++    // (each entry's slow callback knows its place: a table of them, V8's data read only past it)
++    template <int K> static void Indexed(const v8::FunctionCallbackInfo<v8::Value>& info) { auto& e = g_entries[K]; e.body(e, info); }
++    static void ByData(const v8::FunctionCallbackInfo<v8::Value>& info) { auto& e = EntryOf(info.Data()); e.body(e, info); }
++    template <size_t... I> static constexpr std::array<v8::FunctionCallback, sizeof...(I)> Callbacks(std::index_sequence<I...>) { return { { &Indexed<static_cast<int>(I)>... } }; }
++    static constexpr auto kCallbacks = Callbacks(std::make_index_sequence<2048>{});
++    static v8::FunctionCallback CallbackOf(int32_t at) { return at >= 0 && static_cast<size_t>(at) < kCallbacks.size() ? kCallbacks[static_cast<size_t>(at)] : ByData; }
++
++    template <typename R, typename... A>
++    static bool Pick(const char* rest, Made& made)
++    {
++        if (*rest == 0)
++        {
++            static const v8::CFunction c = v8::CFunction::Make(&Typed<R, A...>::Fast);
++            made = Made { &c, &Typed<R, A...>::Body, static_cast<int>(sizeof...(A)) };
++            return true;
++        }
++        if constexpr (sizeof...(A) < 6)
++        {
++            if (*rest == 'i') return Pick<R, A..., int32_t>(rest + 1, made);
++            if (*rest == 'd') return Pick<R, A..., double>(rest + 1, made);
++        }
++        return false;
++    }
++
++    static bool Signature(const char* s, Made& made)
++    {
++        if (s == nullptr) return false;
++        switch (*s)
++        {
++            case 'i': return Pick<int32_t>(s + 1, made);
++            case 'd': return Pick<double>(s + 1, made);
++            case 'b': return Pick<bool>(s + 1, made);
++            default: return false;
++        }
++    }
++
++    struct Cache { std::unordered_map<int32_t, v8::Global<v8::FunctionTemplate>> templates; };
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallTypedCalls(const char* holder, int32_t count, const char* const* names, const char* const* signatures, const int32_t* slots, void* const* functions) noexcept
++{
++    using namespace Ssrs2TypedCalls;
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || count < 0) return 0;
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto object = Ssrs2Holder(isolate, context, holder);
++    if (object.IsEmpty()) return 0;
++    auto all = Ssrs2Recording::IsolatesOf(isolate, true);
++    Ssrs2Recording::NumberMapOf(isolate);
++    if (all->typed == nullptr)
++    {
++        all->typed = new Cache();
++        all->typedGone = [](void* p) { auto c = static_cast<Cache*>(p); for (auto& t : c->templates) t.second.Reset(); delete c; };
++    }
++    auto cache = static_cast<Cache*>(all->typed);
++    for (int32_t i = 0; i < count; i++)
++    {
++        Made made {};
++        if (names[i] == nullptr || functions[i] == nullptr || !Signature(signatures[i], made)) return 0;
++        int32_t at;
++        {
++            std::lock_guard<std::mutex> lock(g_mutex);
++            auto key = std::make_tuple(functions[i], slots[i], std::string(signatures[i]));
++            auto found = g_known.find(key);
++            if (found != g_known.end()) at = found->second;
++            else
++            {
++                at = g_count.fetch_add(1);
++                if (at >= kMost) return 0;
++                g_entries[at] = Entry { functions[i], slots[i], made.body };
++                g_known.emplace(key, at);
++            }
++        }
++        auto& slot = cache->templates[at];
++        v8::Local<v8::FunctionTemplate> t;
++        if (slot.IsEmpty())
++        {
++            t = v8::FunctionTemplate::New(isolate, CallbackOf(at), v8::Integer::New(isolate, at), v8::Local<v8::Signature>(), made.length,
++                v8::ConstructorBehavior::kThrow, v8::SideEffectType::kHasSideEffect, made.fast);
++            slot.Reset(isolate, t);
++        }
++        else t = slot.Get(isolate);
++        v8::Local<v8::Function> function;
++        if (!t->GetFunction(context).ToLocal(&function)
++            || object->Set(context, v8::String::NewFromUtf8(isolate, names[i]).ToLocalChecked(), function).IsNothing()) return 0;
++    }
++    return 1;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -6788,4 +6984,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_RecordingReserve(void* recorder, int32_t depth) no
+ #pragma comment(linker, "/EXPORT:Ssrs2_RecordingRelease=_Ssrs2_RecordingRelease@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_RecordingReserve=_Ssrs2_RecordingReserve@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_RecordingTrim=_Ssrs2_RecordingTrim@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallTypedCalls=_Ssrs2_InstallTypedCalls@24")
+ #endif
