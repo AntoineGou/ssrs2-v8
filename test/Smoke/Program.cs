@@ -98,6 +98,8 @@ var codeLikeObjects = CodeLikeObjects.Check(Directory.GetFiles(AppContext.BaseDi
 Console.WriteLine($"code-like objects: {codeLikeObjects}");
 var sealedReadOnly = SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"sealed read-only space: {sealedReadOnly}");
+var recording = RecordingFunctions.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"recording functions: {recording}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -108,8 +110,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && guards == InterceptorTableGuards.Expected && hostCheck == CodeGenHostChecks.Expected && codeLikeSources == CodeLikeSources.Expected
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
-    && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}");
+    && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
+    && recording == RecordingFunctions.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2329,3 +2332,217 @@ static unsafe class SealedReadOnlySpace
 }
 
 public class SealedReadOnlySpaceHost { public object Make() => new SealedReadOnlySpaceHost(); }
+
+// patches/clearscript/0042: recording functions. A toy plan of one kind ("Toy": the prototype of globalThis.Toy, a class
+// whose own methods and accessors count their calls: the delegates) with a state of nine slots (a ratio, a matrix, a
+// barrier flag, a label) and members of each sort: pair(x, y) a fast call appending two numbers, ignored when one is
+// not finite; push and pop a stack of states (three at most; pop delegated when the saved state's barrier is set); mul
+// a matrix multiplied in place; span(x, n, flag) delegated for a negative n; mark(side) taking a keyword or none,
+// delegated when the barrier of the current state is set; a ratio accessor (a number within [0, 1], read back); a label
+// setter answered by the host once per text (ok, ignored, or delegated and never kept); a keyword setter and a boolean
+// one. Checked: the functions' names, lengths and attributes as the replaced ones; an object made of the kind (the host
+// told, its number and kind); the buffer and the state read in place by the host after each step; a loop hot enough
+// for the optimizing compilers (its calls the fast call's); arguments that are no numbers, too few or too many, all
+// delegated with their receiver; an object of no kind refused with V8's "Illegal invocation"; the host's state written
+// back when it says so (dirty); the label's text asked once; the cap.
+static unsafe class RecordingFunctions
+{
+    public const string Expected =
+        "pair 2 2 0:true,true,true;true,true,true:made 1 65 0:13 1 2 13 5 6:delegated pair:3,4 pair:5 pair:1,2,3 pair:x,y:TypeError Illegal invocation:TypeError Illegal invocation"
+        + ":hot 100000 0:pushed 1 1 2 1:popped 2 2 0 1 0:mul 2 0 0 3 5 10:span 16 1 2 0 delegated span:-1:mark 30 0 -1 30 0 -1 delegated mark:x mark:up:barrier 1 1 pop"
+        + ":ratio 0.25 48 0.25 0.25 1 ratio=x:label 40 0 7 asked 1 ignored 2 delegated label=skip,label=skip asked 4:keywords 43 0 58 0 58 1 mode=5 jsmode:synced 0.5 0:cap 0 1 100001";
+
+    // (the recorder as the library lays it out on every target: each pointer in 8 bytes)
+    [StructLayout(LayoutKind.Explicit, Size = 72)]
+    struct Shared
+    {
+        [FieldOffset(0)] public double* Ops; [FieldOffset(8)] public long Count; [FieldOffset(16)] public long Capacity;
+        [FieldOffset(24)] public double* Levels; [FieldOffset(32)] public long Tag;
+        [FieldOffset(40)] public int Depth; [FieldOffset(44)] public int Room; [FieldOffset(48)] public int Slots; [FieldOffset(52)] public int Dirty;
+        [FieldOffset(56)] public int Changed; [FieldOffset(60)] public int Full; [FieldOffset(64)] public int Generation; [FieldOffset(68)] public int Kind;
+    }
+
+    static Shared* s_recorder;
+    static int s_made, s_number = -1, s_kind = -1, s_asked, s_synced;
+    static double s_syncRatio = -1;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static long Made(int context, int number, int kind, Shared* recorder) { s_made++; s_number = number; s_kind = kind; s_recorder = recorder; return 77; }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static void Sync(long tag, Shared* recorder)
+    {
+        s_synced++;
+        if (s_syncRatio >= 0) recorder->Levels[recorder->Depth * recorder->Slots] = s_syncRatio;
+        recorder->Dirty = 0;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static int Answer(long tag, int context, int member, char* text, int length, double* values)
+    {
+        s_asked++;
+        var t = new string(text, 0, length);
+        if (t == "one") { values[0] = 7; return 2; }
+        if (t == "bad") return 1;
+        return 0;
+    }
+
+    // The plan: numbers and names (its format: the comment at the top of 0042's code).
+    static (double[] Plan, byte[] Names) Plan()
+    {
+        var names = new List<string>();
+        int N(string s) { names.Add(s); return names.Count - 1; }
+        var p = new List<double> { 1, 300000 /* cap */, 9, 1, 1, 0, 0, 1, 0, 0, 0, -1 };
+        // keywords: one list, up 1 and down 0, absent 0
+        p.AddRange([1, 2, N("up"), 1, N("down"), 0, 1, 0]);
+        // one kind, six operations, four accessors
+        p.AddRange([1, N("Toy"), 6, 4]);
+        // pair(x, y): code 13, two numbers, both required, finite, no rule, no effect, records both, fast
+        p.AddRange([N("pair"), 13, 2, -1, -1, 2, 1, 0, 0, 2, 0, 0, 0, 1, 1]);
+        // push(): code 1, saved copy's barrier 0, three at most; fast
+        p.AddRange([N("push"), 1, 0, 0, 0, 0, 1, 3, 1, 7, 2, 0, 0, 1]);
+        // pop(): code 2, barrier slot 7
+        p.AddRange([N("pop"), 2, 0, 0, 0, 0, 2, 7, 0, 0]);
+        // mul(a..f): code 6, multiply slots 1-6, records the six; fast
+        p.AddRange([N("mul"), 6, 6, -1, -1, -1, -1, -1, -1, 6, 1, 0, 3, 1, 0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 6, 0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 1]);
+        // span(x, n, flag): code 16, n < 0 delegated
+        p.AddRange([N("span"), 16, 3, -1, -1, -2, 2, 1, 1, 1, 1, 0, 0, 3, 0, 0, 0, 1, 0, 2, 0]);
+        // mark(side): code 30, keyword list 0 optional, delegated when slot 7 is not 0; records the side and -1
+        p.AddRange([N("mark"), 30, 1, 0, 0, 0, 1, 2, 7, 0, 0, 2, 0, 0, 2, -1, 0]);
+        // ratio: getter slot 0, setter a number, finite, [0, 1], code 48, records it, slot 0 set
+        p.AddRange([N("ratio"), 0, 1, 1, 1, 0, 1, 1, 48, 1, 0, 0, 1, 0, 0, 0]);
+        // label: the existing getter, setter a text with one answer, code 40, records 0 and the answer, slot 8 set
+        p.AddRange([N("label"), -1, 2, 1, 40, 2, 2, 0, 3, 0, 1, 8, 3, 0]);
+        // mode: the existing getter, setter a keyword of list 0, code 43, records it, slot 8 set
+        p.AddRange([N("mode"), -1, 3, 0, 43, 1, 0, 0, 1, 8, 0, 0]);
+        // on: the existing getter, setter a boolean, code 58, records it, slot 8 set
+        p.AddRange([N("on"), -1, 4, 58, 1, 0, 0, 1, 8, 0, 0]);
+        var bytes = new List<byte>();
+        foreach (var n in names) { bytes.AddRange(System.Text.Encoding.UTF8.GetBytes(n)); bytes.Add(0); }
+        return (p.ToArray(), bytes.ToArray());
+    }
+
+    static string Ops()
+    {
+        var r = s_recorder;
+        var parts = new List<string>();
+        for (long i = 0; i < r->Count; i++) parts.Add(r->Ops[i].ToString(System.Globalization.CultureInfo.InvariantCulture));
+        r->Count = 0;
+        return string.Join(' ', parts);
+    }
+
+    static string Slots(int level)
+    {
+        var r = s_recorder;
+        var parts = new List<string>();
+        for (int i = 0; i < r->Slots; i++) parts.Add(r->Levels[level * r->Slots + i].ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return string.Join(' ', parts);
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallRecording", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_InstallRecording@32", out export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, double*, int, byte*, int, void*, void*, void*, int>)export;
+        var (plan, names) = Plan();
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__toy\0"u8, n = names) fixed (double* pl = plan)
+                return install(holder, pl, plan.Length, n, names.Length,
+                    (delegate* unmanaged[Cdecl]<int, int, int, Shared*, long>)&Made, (delegate* unmanaged[Cdecl]<long, Shared*, void>)&Sync,
+                    (delegate* unmanaged[Cdecl]<long, int, int, char*, int, double*, int>)&Answer) == 1;
+        }));
+        engine.AddHostObject("note", new Func<string, string>(step => step switch
+        {
+            "ops" => Ops(),
+            "count" => s_recorder->Count.ToString(),
+            "depth" => s_recorder->Depth + " " + s_recorder->Changed,
+            "slots" => Slots(s_recorder->Depth),
+            "made" => $"{s_made} {s_number} {s_kind}",
+            "dirty" => (s_recorder->Dirty = 1).ToString(),
+            "clean" => (s_recorder->Changed = 0).ToString(),
+            "asked" => s_asked.ToString(),
+            "synced" => s_synced.ToString(),
+            "syncRatio" => (s_syncRatio = 0.5).ToString(),
+            "full" => s_recorder->Full.ToString(),
+            "barrier" => (s_recorder->Levels[s_recorder->Depth * s_recorder->Slots + 7] = 1).ToString(),
+            "barrierSaved" => (s_recorder->Levels[(s_recorder->Depth - 1) * s_recorder->Slots + 7] = 1).ToString(),
+            "unbarrier" => (s_recorder->Levels[(s_recorder->Depth - 1) * s_recorder->Slots + 7] = 0).ToString(),
+            _ => "?",
+        }));
+        string js = """
+            const calls = [];
+            globalThis.Toy = class Toy {
+              pair(x, y) { calls.push('pair:' + Array.from(arguments).join(',')); }
+              push() { calls.push('push'); } pop() { calls.push('pop'); } mul(a, b, c, d, e, f) { calls.push('mul'); }
+              span(x, n, flag) { calls.push('span:' + n); } mark(side) { calls.push('mark:' + Array.from(arguments).join(',')); }
+              get ratio() { return 'js'; } set ratio(v) { calls.push('ratio=' + v); }
+              get label() { return 'jslabel'; } set label(v) { calls.push('label=' + v); }
+              get mode() { return 'jsmode'; } set mode(v) { calls.push('mode=' + v); }
+              get on() { return 'js'; } set on(v) { calls.push('on=' + v); }
+            };
+            const P = Toy.prototype, before = {};
+            for (const k of ['pair', 'push', 'mul', 'ratio']) before[k] = Object.getOwnPropertyDescriptor(P, k);
+            const out = ['pair ' + P.pair.length + ' ' + P.mul.length / 3 + ' 0'];
+            install();
+            const same = k => { const a = before[k], b = Object.getOwnPropertyDescriptor(P, k); return a.enumerable === b.enumerable && a.configurable === b.configurable && (('value' in a) ? a.writable === b.writable : true); };
+            out.push([same('pair'), P.pair.name === 'pair', P.pair.length === 2].join(',') + ';' + [same('ratio'), Object.getOwnPropertyDescriptor(P, 'ratio').get.name === 'get ratio', P.mul.length === 6].join(','));
+            const o = __toy.recordedObject('Toy', P, 65);
+            out.push('made ' + note('made'));
+            o.pair(1, 2); o.pair(NaN, 1); o.pair(5, 6);
+            out.push(note('ops'));
+            o.pair('3', 4); o.pair(5); o.pair(1, 2, 3); o.pair({ valueOf() { return 'x'; } }, 'y');
+            out.push('delegated ' + calls.splice(0).join(' ').replace('[object Object]', 'x'));
+            let e1 = 'none', e2 = 'none';
+            try { P.pair.call({}, 1, 2); } catch (e) { e1 = e.constructor.name + ' ' + e.message; }
+            try { Object.create(P).pair(1, 2); } catch (e) { e2 = e.constructor.name + ' ' + e.message; }
+            out.push(e1); out.push(e2);
+            note('ops');
+            function hot(n) { for (let i = 0; i < n; i++) o.pair(i, i + 0.5); }
+            for (let k = 0; k < 10; k++) hot(10000);
+            out.push('hot ' + Number(note('count')) / 3 + ' ' + calls.length);
+            note('ops');
+            o.push(); o.push();
+            out.push('pushed ' + note('ops') + ' ' + note('depth').split(' ')[0] + ' ' + note('depth').split(' ')[1]);
+            note('clean'); o.pop(); o.pop(); o.pop();
+            out.push('popped ' + note('ops') + ' ' + note('depth') + ' ' + calls.length);
+            o.mul(2, 0, 0, 3, 5, 10);
+            out.push('mul ' + note('slots').split(' ').slice(1, 7).join(' '));
+            note('ops');
+            o.span(1, 2); o.span(1, -1, true);
+            out.push('span ' + note('ops') + ' delegated ' + calls.splice(0).join(' '));
+            o.mark(); o.mark('down'); o.mark('x');
+            const marked = note('ops');
+            note('barrier'); o.mark('up');
+            out.push('mark ' + marked + ' delegated ' + calls.splice(0).join(' '));
+            o.push(); note('barrierSaved'); o.pop();
+            out.push('barrier ' + note('ops') + ' ' + note('depth').split(' ')[0] + ' ' + calls.splice(0).join(' '));
+            note('unbarrier'); o.pop(); note('ops');
+            o.ratio = 0.25; o.ratio = 2; o.ratio = NaN;
+            const r1 = note('ops');
+            o.ratio = 'x';
+            out.push('ratio ' + o.ratio + ' ' + r1 + ' ' + note('slots').split(' ')[0] + ' ' + calls.length + ' ' + calls.splice(0).join(' '));
+            o.label = 'one'; o.label = 'one';
+            const l1 = note('ops');
+            const asked1 = note('asked');
+            o.label = 'bad'; o.label = 'bad';
+            const asked2 = note('asked');
+            const l2 = note('ops');
+            o.label = 'skip'; o.label = 'skip';
+            out.push('label ' + l1.split(' ').slice(0, 3).join(' ') + ' asked ' + asked1 + ' ignored ' + asked2 + (l2 === '' ? '' : ' recorded!') + ' delegated ' + calls.splice(0).join(',') + ' asked ' + note('asked'));
+            note('ops');
+            o.mode = 'down'; o.mode = 'x'; o.mode = 5; o.on = 0; o.on = 'yes';
+            out.push('keywords ' + note('ops') + ' ' + calls.splice(0).join(',') + ' ' + o.mode);
+            note('syncRatio'); note('dirty');
+            const syncedBefore = Number(note('synced'));
+            out.push('synced ' + o.ratio + ' ' + (Number(note('synced')) - syncedBefore - 1));
+            note('ops');
+            const fullBefore = note('full');
+            hot(100005);
+            out.push('cap ' + fullBefore + ' ' + note('full') + ' ' + Number(note('count')) / 3);
+            out.join(':')
+            """;
+        return (string)engine.Evaluate(js);
+    }
+}

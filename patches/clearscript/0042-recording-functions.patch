@@ -1,0 +1,1380 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index ef6546f..df1fa0e 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -3038,9 +3038,13 @@ void Ssrs2ContextGone(v8::Isolate* isolate, v8::Local<v8::Context> context)
+     }
+ }
+ 
++// (0042: the recording functions' data of the isolate, below)
++static void Ssrs2RecordingIsolateGone(v8::Isolate* isolate);
++
+ // (V8IsolateImpl's destructor, the isolate still there: its table freed)
+ void Ssrs2IsolateGone(v8::Isolate* isolate)
+ {
++    Ssrs2RecordingIsolateGone(isolate);
+     delete Ssrs2Contexts::TableOf(isolate, false);
+     isolate->SetData(Ssrs2Contexts::kIsolateSlot, nullptr);
+ }
+@@ -5332,6 +5336,1351 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallArena(const char* holder, const char* name,
+     return 1;
+ }
+ 
++//-----------------------------------------------------------------------------
++// SSRS2 (0042): recording functions. The host declares, for kinds of objects (each named by a global constructor whose
++// prototype, global[name].prototype, gets them), functions and state accessors whose native bodies append an operation
++// (a code and numbers) to a growable buffer of the receiver's own, keep a copy of a state of numbers (slots) with a
++// stack of saved states, and answer the state's getters, all without calling the host. The host takes the buffer and
++// the state by reading the recorder's memory in place. A member the library does not take as it is called (an
++// argument of another type, a count it was not declared with, a condition the host named) calls the function it
++// replaced on the prototype (the delegate), with the same receiver and arguments: what that function does stays the
++// answer for every such call.
++//
++//   int Ssrs2_InstallRecording(const char* holder, const double* plan, int32_t planLength, const char* names,
++//       int32_t namesLength, void* made, void* sync, void* answer);
++//   int Ssrs2_RecordingRetain(void* recorder); int Ssrs2_RecordingRelease(void* recorder);
++//   int Ssrs2_RecordingReserve(void* recorder, int32_t depth); int Ssrs2_RecordingTrim(void* recorder);
++//
++// The plan: numbers, a name given by its place in `names` (NUL-separated UTF-8), every count within its bound, nothing
++// left over (else the install answers 0):
++//   1 (the format), cap, slots S (256 at most), S default values;
++//   keyword lists (64 at most), each: count (64), that many (name, value), has-absent (0 or 1), absent value;
++//   kinds (16 at most, one at least), each: name, operations O (256), accessors A (256), the O operations, the A accessors.
++//   An operation: name, code (-1: nothing recorded), arguments n (8 at most), n types (-1 a number, -2 a boolean, k a
++//     keyword of list k), required (n at most), finite (1: a call with a number argument that is not finite does
++//     nothing), rules (16 at most) each (1, argument, bound: delegated when the argument is below the bound; or 2, slot,
++//     value: delegated when the slot holds another value), effect, record, fast (1: also a V8 fast call, taken where the
++//     arguments are all numbers, all required, six at most, no rule and no pop). Effect: 0 none; 1 push, then most
++//     (2^20), assigns (made on the new state); 2 pop, then a barrier slot or -1 (delegated when the state popped to has
++//     it not 0); 3 multiply, then a first slot and six sources m: the six slots from it, a 2x3 matrix a b c d e f, times
++//     m; 4 set, then assigns (every source read before a slot is written). A push past its most or a pop of nothing is
++//     not recorded.
++//   An accessor: name, getter slot (-1: the existing getter kept), setter: 0 the existing setter kept; 1 a number, then
++//     finite, low rule (0 none, 1 >=, 2 >), low, high rule (0 none, 1 <=, 2 <), high (a number outside: nothing); 2 a
++//     text the host answers, then answers (4 at most); 3 a keyword, then its list (another text: nothing); 4 a boolean
++//     (any value). A setter other than 0 then has: code, record, assigns.
++//   record: count (64), that many sources; assigns: count (64), that many (slot, source); a source: (0, argument),
++//     (1, slot), (2, a constant) or (3, one of the host's answers).
++// A call recorded appends its code, then its record's values. Members are numbered in the plan's order (an operation
++// one, an accessor two: getter, setter). The host's callbacks (cdecl): made(context, number, kind, recorder) answers
++// the recorder's tag when an object is made (globalThis[holder].recordedObject(kindName, prototype, number);
++// recordedNames lists the kinds installed); sync(tag, recorder) is asked to write the state first where the host set
++// `dirty`; answer(tag, context, member, text, length, values) answers a text setter's value once per text and
++// recorder: 0 delegated, 1 nothing, 2 its values.
++// Threading: the isolate's thread for the install and every call of the members; the host may read and write a
++// recorder's shared fields (Shared below) from that thread while no script runs, and Retain/Release from any thread.
++//-----------------------------------------------------------------------------
++
++#include <cmath>
++#include <cstddef>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <array>
++#include <unordered_set>
++#include <utility>
++
++namespace Ssrs2Recording
++{
++    // (what the host reads and writes in place: the layout is fixed, the same on every target: each pointer in 8 bytes,
++    // the 32-bit targets' upper half unused)
++    struct Shared
++    {
++        double* ops;                    // the numbers recorded and not taken yet
++        alignas(8) int64_t count;       // how many (the host sets it to 0 when it took them)
++        int64_t capacity;
++        double* levels;                 // (depth + 1) states of `slots` numbers: the saved ones, then the current one
++        alignas(8) int64_t tag;         // the host's, as its `made` callback answered
++        int32_t depth;          // saved states
++        int32_t room;           // states `levels` holds
++        int32_t slots;
++        int32_t dirty;          // the host: the state is to be written again (the `sync` callback) before it is read
++        int32_t changed;        // the library: the state changed since the host last wrote or read it
++        int32_t full;           // the library: a call was not recorded, the buffer past the plan's cap
++        int32_t generation;     // the host: the answers of the text setters are forgotten when it changes
++        int32_t kind;           // the kind's place in the plan
++    };
++    static_assert(offsetof(Shared, count) == 8 && offsetof(Shared, capacity) == 16 && offsetof(Shared, levels) == 24 && offsetof(Shared, tag) == 32
++        && offsetof(Shared, depth) == 40 && offsetof(Shared, kind) == 68 && sizeof(Shared) == 72, "the recorder's layout the host reads");
++
++    using Made = int64_t (*)(int32_t context, int32_t number, int32_t kind, Shared* recorder);
++    using Sync = void (*)(int64_t tag, Shared* recorder);
++    using Answer = int32_t (*)(int64_t tag, int32_t context, int32_t member, const uint16_t* text, int32_t length, double* values);
++
++    static std::atomic<Made> g_made { nullptr };
++    static std::atomic<Sync> g_sync { nullptr };
++    static std::atomic<Answer> g_answer { nullptr };
++
++    // (an object made here has three internal fields, each a small integer: a mark, then its recorder's address in two
++    // halves: read in place by the fast calls, which may not make handles. A small integer has 31 bits on a 32-bit
++    // target: the mark is below 2^30 and a 32-bit address is cut in halves of 16 bits)
++    constexpr int kMarkField = 0, kLowField = 1, kHighField = 2, kFields = 3, kDelegatesIndex = 6, kMaxArgs = 8, kMaxAnswers = 4;
++    constexpr int32_t kMark = 0x12454330;
++    constexpr int kHalfBits = sizeof(uintptr_t) == 8 ? 32 : 16;
++    constexpr uint64_t kHalfMask = (static_cast<uint64_t>(1) << kHalfBits) - 1;
++    constexpr uint32_t kIsolateSlot = 1;
++
++    struct Source { int32_t type; double value; };   // 0 argument, 1 slot, 2 constant, 3 the host's answer
++    struct Assign { int32_t slot; Source source; };
++    struct Rule { int32_t type; int32_t index; double bound; };   // 1 argument below bound, 2 slot not equal to bound
++
++    struct Keywords
++    {
++        std::vector<std::u16string> texts;
++        std::vector<double> values;
++        double absent = 0;
++        bool hasAbsent = false;
++    };
++
++    struct Operation
++    {
++        std::string name;
++        int32_t code = -1;
++        std::vector<int32_t> args;         // -1 a number, -2 a boolean, k >= 0 a keyword of list k
++        int32_t required = 0;
++        bool finite = false;
++        std::vector<Rule> rules;
++        int32_t effect = 0;                // 0 none, 1 push, 2 pop, 3 multiply six slots, 4 set slots
++        int32_t effectSlot = -1;
++        int32_t effectMax = 0;
++        std::vector<Source> matrix;
++        std::vector<Assign> assigns;
++        std::vector<Source> record;
++        bool fast = false;
++        int32_t member = 0;                // its place among the plan's members (delegate's place in each context)
++        bool stateful = false;             // reads or changes the state (the host's copy made current first)
++        bool plain = false;                // no state, no rule: its numbers recorded as given, in their order
++        bool numbers = false;              // its arguments all numbers, all required
++        uint32_t finiteMask = 0;           // the arguments that must be finite numbers
++    };
++
++    struct Accessor
++    {
++        std::string name;
++        int32_t getSlot = -1;              // -1: the existing getter kept
++        int32_t setKind = 0;               // 0 the existing setter kept, 1 a number, 2 a text the host answers, 3 a
++                                           // keyword of a list (another text: nothing), 4 a boolean (any value)
++        int32_t keywords = -1;             // (3) the list
++        bool finite = false;
++        int32_t loRule = 0, hiRule = 0;    // 0 none, 1 inclusive, 2 exclusive
++        double lo = 0, hi = 0;
++        int32_t answers = 0;
++        int32_t code = -1;
++        std::vector<Source> record;
++        std::vector<Assign> assigns;
++        int32_t member = 0;                // getter's delegate at member, setter's at member + 1
++    };
++
++    struct Plan;
++    struct MemberRef { Plan* plan; int32_t kind; int32_t index; int32_t part; const Operation* operation; int32_t at = -1; };   // part: 0 operation, 1 getter, 2 setter
++
++    // (the members' templates carry a small integer, their place here: the process's, plans being kept for the isolate's
++    // life and their places never given again)
++    constexpr int32_t kMostMembers = 1 << 16;
++    static const MemberRef* g_members[kMostMembers];
++    static std::atomic<int32_t> g_memberCount { 0 };
++    static int32_t Register(const MemberRef* ref);
++
++    static inline int32_t SmiAt(v8::internal::Address value) { return (value & 1) == 0 ? v8::internal::Internals::SmiValue(value) : INT32_MIN; }
++
++    struct Kind
++    {
++        std::string name;
++        std::vector<Operation> operations;
++        std::vector<Accessor> accessors;
++        std::vector<MemberRef> operationRefs, getterRefs, setterRefs;
++    };
++
++    struct Plan
++    {
++        std::vector<double> raw;
++        std::string names;
++        int64_t cap = 0;
++        int32_t slots = 0;
++        std::vector<double> defaults;
++        std::vector<Keywords> keywords;
++        std::vector<Kind> kinds;
++        int32_t members = 0;
++    };
++
++    // (plans are the process's, parsed once and kept: their members' places in g_members never given again; each
++    // isolate has its own templates of them)
++    static std::mutex g_plansMutex;
++    static std::vector<std::unique_ptr<Plan>> g_plans;
++
++    struct KindTemplates
++    {
++        v8::Global<v8::FunctionTemplate> type;
++        std::vector<v8::Global<v8::FunctionTemplate>> operations, getters, setters;
++    };
++
++    struct PlanTemplates
++    {
++        Plan* plan;
++        std::vector<KindTemplates> kinds;
++        v8::Global<v8::FunctionTemplate> maker;
++    };
++
++    struct Recorder;
++
++    struct Isolates
++    {
++        std::vector<std::unique_ptr<PlanTemplates>> plans;
++        std::unordered_set<Recorder*> live;
++        // (the heap number map as this isolate's numbers have it: a number argument read in place; 0 where it could not
++        // be checked, every number then read through the API)
++        v8::internal::Address heapNumberMap = 0;
++    };
++
++    struct Recorder
++    {
++        Shared shared {};
++        std::atomic<int32_t> refs { 1 };
++        v8::Global<v8::Object> self;
++        Isolates* owner = nullptr;
++        int32_t answersGeneration = 0;
++        struct Answered { int32_t kind; double values[kMaxAnswers]; };
++        std::unordered_map<std::u16string, Answered> answered;
++        // (the last text each of four setters was given, by identity, with its answer: a script sets the same few
++        // strings over and over; let go on the isolate's thread, with the object)
++        struct Last { int32_t member = -1; int32_t generation = 0; v8::Global<v8::String> text; Answered answer {}; };
++        Last last[4];
++        void LetGo() { self.Reset(); for (auto& l : last) { l.text.Reset(); l.member = -1; } }
++    };
++
++    static void Release(Recorder* r)
++    {
++        if (r->refs.fetch_sub(1) == 1)
++        {
++            std::free(r->shared.ops);
++            std::free(r->shared.levels);
++            delete r;
++        }
++    }
++
++    static bool Reserve(Shared& s, int32_t depth)
++    {
++        // (a depth the room's doubling cannot reach in 31 bits, or whose bytes a size_t cannot count: refused)
++        if (depth < 0 || depth >= (1 << 30))
++        {
++            return false;
++        }
++        if (depth + 1 <= s.room)
++        {
++            return true;
++        }
++        int32_t room = s.room < 4 ? 4 : s.room;
++        while (room < depth + 1)
++        {
++            room *= 2;
++        }
++        uint64_t bytes = sizeof(double) * static_cast<uint64_t>(room) * static_cast<uint64_t>(s.slots > 0 ? s.slots : 1);
++        if (bytes > SIZE_MAX)
++        {
++            return false;
++        }
++        auto levels = static_cast<double*>(std::realloc(s.levels, static_cast<size_t>(bytes)));
++        if (levels == nullptr)
++        {
++            return false;
++        }
++        s.levels = levels;
++        s.room = room;
++        return true;
++    }
++
++    // ---- the plan, read from the host's numbers ----
++
++    struct Reader
++    {
++        const double* at;
++        const double* end;
++        bool failed = false;
++        double Next() { if (at >= end) { failed = true; return 0; } return *at++; }
++        int32_t Int() { double v = Next(); if (!(v >= -1e9 && v <= 1e9) || v != std::floor(v)) { failed = true; return 0; } return static_cast<int32_t>(v); }
++        int32_t Count(int32_t most) { int32_t n = Int(); if (n < 0 || n > most) { failed = true; return 0; } return n; }
++    };
++
++    static Source ReadSource(Reader& r) { Source s; s.type = r.Int(); s.value = r.Next(); if (s.type < 0 || s.type > 3) r.failed = true; return s; }
++
++    static void ReadAssigns(Reader& r, std::vector<Assign>& into, int32_t slots)
++    {
++        int32_t n = r.Count(64);
++        for (int32_t i = 0; i < n && !r.failed; i++)
++        {
++            Assign a; a.slot = r.Int(); a.source = ReadSource(r);
++            if (a.slot < 0 || a.slot >= slots) r.failed = true;
++            into.push_back(a);
++        }
++    }
++
++    static void ReadSources(Reader& r, std::vector<Source>& into)
++    {
++        int32_t n = r.Count(64);
++        for (int32_t i = 0; i < n && !r.failed; i++) into.push_back(ReadSource(r));
++    }
++
++    // (each source within what it reads: an argument the member takes, a slot of the state, an answer the host gives)
++    static bool Within(const std::vector<Source>& sources, size_t args, int32_t slots, int32_t answers)
++    {
++        for (auto& s : sources)
++        {
++            if (s.type == 0 && !(s.value >= 0 && s.value < static_cast<double>(args))) return false;
++            if (s.type == 1 && !(s.value >= 0 && s.value < slots)) return false;
++            if (s.type == 3 && !(s.value >= 0 && s.value < answers)) return false;
++            if (s.type != 2 && s.value != std::floor(s.value)) return false;
++        }
++        return true;
++    }
++
++    static std::unique_ptr<Plan> Parse(const double* numbers, int32_t length, const char* names, int32_t namesLength)
++    {
++        auto plan = std::make_unique<Plan>();
++        plan->raw.assign(numbers, numbers + length);
++        plan->names.assign(names, static_cast<size_t>(namesLength));
++        std::vector<std::string> list;
++        for (size_t start = 0; start < plan->names.size(); )
++        {
++            size_t stop = plan->names.find('\0', start);
++            if (stop == std::string::npos) stop = plan->names.size();
++            list.push_back(plan->names.substr(start, stop - start));
++            start = stop + 1;
++        }
++        Reader r { numbers, numbers + length };
++        auto name = [&](int32_t i) -> std::string { if (i < 0 || static_cast<size_t>(i) >= list.size()) { r.failed = true; return std::string(); } return list[static_cast<size_t>(i)]; };
++        if (r.Int() != 1) return nullptr;
++        plan->cap = static_cast<int64_t>(r.Next());
++        plan->slots = r.Count(256);
++        for (int32_t i = 0; i < plan->slots; i++) plan->defaults.push_back(r.Next());
++        int32_t lists = r.Count(64);
++        for (int32_t k = 0; k < lists && !r.failed; k++)
++        {
++            Keywords w;
++            int32_t n = r.Count(64);
++            for (int32_t i = 0; i < n && !r.failed; i++)
++            {
++                auto text = name(r.Int());
++                std::u16string wide;
++                for (unsigned char c : text) wide.push_back(c);   // (keywords are ASCII)
++                w.texts.push_back(wide);
++                w.values.push_back(r.Next());
++            }
++            w.hasAbsent = r.Int() != 0;
++            w.absent = r.Next();
++            plan->keywords.push_back(std::move(w));
++        }
++        int32_t kinds = r.Count(16);
++        int32_t member = 0;
++        for (int32_t k = 0; k < kinds && !r.failed; k++)
++        {
++            Kind kind;
++            kind.name = name(r.Int());
++            int32_t operations = r.Count(256), accessors = r.Count(256);
++            for (int32_t i = 0; i < operations && !r.failed; i++)
++            {
++                Operation op;
++                op.name = name(r.Int());
++                op.code = r.Int();
++                int32_t args = r.Count(kMaxArgs);
++                for (int32_t a = 0; a < args; a++)
++                {
++                    int32_t kindOf = r.Int();
++                    if (kindOf < -2 || kindOf >= lists) r.failed = true;
++                    op.args.push_back(kindOf);
++                }
++                op.required = r.Count(args);
++                op.finite = r.Int() != 0;
++                int32_t rules = r.Count(16);
++                for (int32_t a = 0; a < rules && !r.failed; a++)
++                {
++                    Rule rule; rule.type = r.Int(); rule.index = r.Int(); rule.bound = r.Next();
++                    if (rule.type == 1 ? !(rule.index >= 0 && rule.index < args) : rule.type == 2 ? !(rule.index >= 0 && rule.index < plan->slots) : true) r.failed = true;
++                    op.rules.push_back(rule);
++                }
++                op.effect = r.Int();
++                switch (op.effect)
++                {
++                    case 0: break;
++                    case 1: op.effectMax = r.Count(1 << 20); ReadAssigns(r, op.assigns, plan->slots); break;
++                    case 2: op.effectSlot = r.Int(); if (op.effectSlot < -1 || op.effectSlot >= plan->slots) r.failed = true; break;
++                    case 3:
++                        op.effectSlot = r.Int();
++                        if (op.effectSlot < 0 || op.effectSlot + 6 > plan->slots) r.failed = true;
++                        for (int a = 0; a < 6; a++) op.matrix.push_back(ReadSource(r));
++                        break;
++                    case 4: ReadAssigns(r, op.assigns, plan->slots); break;
++                    default: r.failed = true; break;
++                }
++                ReadSources(r, op.record);
++                op.fast = r.Int() != 0;
++                bool numbers = true;
++                for (auto a : op.args) if (a != -1) numbers = false;
++                // (a fast call takes numbers only, all of them, and never calls the delegate)
++                if (op.fast && (!numbers || op.required != args || !op.rules.empty() || op.effect == 2 || args > 6)) op.fast = false;
++                if (!Within(op.record, op.args.size(), plan->slots, 0) || !Within(op.matrix, op.args.size(), plan->slots, 0)) r.failed = true;
++                for (auto& a : op.assigns) if (!Within({ a.source }, op.args.size(), plan->slots, 0)) r.failed = true;
++                op.member = member++;
++                op.stateful = op.effect != 0 || !op.rules.empty();
++                for (auto& source : op.record) if (source.type == 1) op.stateful = true;
++                for (size_t a = 0; a < op.args.size(); a++) if (op.finite && op.args[a] == -1) op.finiteMask |= 1u << a;
++                op.plain = !op.stateful && op.code >= 0 && op.record.size() == op.args.size();
++                op.numbers = op.required == static_cast<int32_t>(op.args.size());
++                for (auto a : op.args) if (a != -1) op.numbers = false;
++                for (size_t a = 0; a < op.record.size() && op.plain; a++) if (op.record[a].type != 0 || op.record[a].value != static_cast<double>(a)) op.plain = false;
++                kind.operations.push_back(std::move(op));
++            }
++            for (int32_t i = 0; i < accessors && !r.failed; i++)
++            {
++                Accessor ac;
++                ac.name = name(r.Int());
++                ac.getSlot = r.Int();
++                if (ac.getSlot < -1 || ac.getSlot >= plan->slots) r.failed = true;
++                ac.setKind = r.Int();
++                if (ac.setKind == 1)
++                {
++                    ac.finite = r.Int() != 0;
++                    ac.loRule = r.Int(); ac.lo = r.Next();
++                    ac.hiRule = r.Int(); ac.hi = r.Next();
++                }
++                else if (ac.setKind == 2)
++                {
++                    ac.answers = r.Count(kMaxAnswers);
++                }
++                else if (ac.setKind == 3)
++                {
++                    ac.keywords = r.Int();
++                    if (ac.keywords < 0 || ac.keywords >= lists) r.failed = true;
++                }
++                else if (ac.setKind != 0 && ac.setKind != 4) r.failed = true;
++                if (ac.setKind != 0)
++                {
++                    ac.code = r.Int();
++                    ReadSources(r, ac.record);
++                    ReadAssigns(r, ac.assigns, plan->slots);
++                    if (!Within(ac.record, 1, plan->slots, ac.answers)) r.failed = true;
++                    for (auto& a : ac.assigns) if (!Within({ a.source }, 1, plan->slots, ac.answers)) r.failed = true;
++                }
++                ac.member = member;
++                member += 2;
++                kind.accessors.push_back(std::move(ac));
++            }
++            plan->kinds.push_back(std::move(kind));
++        }
++        if (r.failed || r.at != r.end || plan->kinds.empty()) return nullptr;
++        plan->members = member;
++        for (size_t k = 0; k < plan->kinds.size(); k++)
++        {
++            auto& kind = plan->kinds[k];
++            for (size_t i = 0; i < kind.operations.size(); i++) kind.operationRefs.push_back(MemberRef { plan.get(), static_cast<int32_t>(k), static_cast<int32_t>(i), 0, &kind.operations[i] });
++            for (size_t i = 0; i < kind.accessors.size(); i++)
++            {
++                kind.getterRefs.push_back(MemberRef { plan.get(), static_cast<int32_t>(k), static_cast<int32_t>(i), 1, nullptr });
++                kind.setterRefs.push_back(MemberRef { plan.get(), static_cast<int32_t>(k), static_cast<int32_t>(i), 2, nullptr });
++            }
++        }
++        for (auto& kind : plan->kinds)
++        {
++            for (auto* refs : { &kind.operationRefs, &kind.getterRefs, &kind.setterRefs })
++                for (auto& ref : *refs)
++                    if ((ref.at = Register(&ref)) < 0) return nullptr;
++        }
++        return plan;
++    }
++
++    // ---- the members' bodies ----
++
++    // (a field of an object of the library's templates, read as V8's own inline GetInternalField reads it: no handle)
++    static inline v8::internal::Address FieldAt(v8::internal::Address object, int index)
++    {
++        using I = v8::internal::Internals;
++        return I::ReadRawField<v8::internal::Address>(object, I::kJSAPIObjectWithEmbedderSlotsHeaderSize + I::kEmbedderDataSlotSize * index);
++    }
++
++    // (the recorder of an object made here: its fields read in place; null for any other value)
++    static inline Recorder* InPlace(v8::internal::Address object)
++    {
++        using I = v8::internal::Internals;
++        // (an API object, as the templates make them: no plain object of a script, whose properties could stand where
++        // the fields are; every caller is a member whose signature V8 checked already)
++        int type = I::GetInstanceType(object);
++        if (type < I::kFirstJSApiObjectType || type > I::kLastJSApiObjectType || SmiAt(FieldAt(object, kMarkField)) != kMark) return nullptr;
++        uint64_t low = static_cast<uint32_t>(SmiAt(FieldAt(object, kLowField))), high = static_cast<uint32_t>(SmiAt(FieldAt(object, kHighField)));
++        return reinterpret_cast<Recorder*>(static_cast<uintptr_t>((high << kHalfBits) | low));
++    }
++
++    // (the receiver of a slow callback: V8 checked it against the kind's template where the member has a signature; the
++    // fields read in place, an object of any other shape answering null)
++    static Recorder* RecorderOf(v8::Local<v8::Object> receiver)
++    {
++        if (receiver.IsEmpty()) return nullptr;
++        auto object = v8::internal::ValueHelper::ValueAsAddress(*receiver);
++        if (v8::internal::Internals::HasHeapObjectTag(object) == false) return nullptr;
++        return InPlace(object);
++    }
++
++    static inline double* Current(Shared& s) { return s.levels + static_cast<size_t>(s.depth) * static_cast<size_t>(s.slots); }
++
++    // (the state as the host last wrote it: asked again where the host said it changed it)
++    static inline void Ready(Recorder* r)
++    {
++        if (r->shared.dirty != 0)
++        {
++            auto sync = g_sync.load();
++            if (sync != nullptr) sync(r->shared.tag, &r->shared);
++        }
++    }
++
++    static inline double ValueOf(const Source& s, const double* args, const double* state, const double* answers)
++    {
++        switch (s.type)
++        {
++            case 0: return args[static_cast<int>(s.value)];
++            case 1: return state[static_cast<int>(s.value)];
++            case 3: return answers[static_cast<int>(s.value)];
++            default: return s.value;
++        }
++    }
++
++    // (an operation past the cap is not recorded: the count before it above the cap, as the host's own recording)
++    static void Append(Recorder* r, int32_t code, const std::vector<Source>& record, const double* args, const double* answers, int64_t cap)
++    {
++        if (code < 0) return;
++        auto& s = r->shared;
++        if (s.count > cap) { s.full = 1; return; }
++        int64_t need = s.count + 1 + static_cast<int64_t>(record.size());
++        if (need > s.capacity)
++        {
++            int64_t capacity = s.capacity < 1024 ? 1024 : s.capacity;
++            while (capacity < need) capacity *= 2;
++            // (more numbers than a size_t counts the bytes of, on a 32-bit target: as a failed allocation)
++            if (static_cast<uint64_t>(capacity) > SIZE_MAX / sizeof(double)) { s.full = 1; return; }
++            auto ops = static_cast<double*>(std::realloc(s.ops, sizeof(double) * static_cast<size_t>(capacity)));
++            if (ops == nullptr) { s.full = 1; return; }
++            s.ops = ops;
++            s.capacity = capacity;
++        }
++        double* at = s.ops + s.count;
++        *at++ = code;
++        bool inOrder = true;
++        for (size_t i = 0; i < record.size(); i++) if (record[i].type != 0 || record[i].value != static_cast<double>(i)) { inOrder = false; break; }
++        if (inOrder)
++        {
++            switch (record.size())
++            {
++                case 8: at[7] = args[7]; [[fallthrough]];
++                case 7: at[6] = args[6]; [[fallthrough]];
++                case 6: at[5] = args[5]; [[fallthrough]];
++                case 5: at[4] = args[4]; [[fallthrough]];
++                case 4: at[3] = args[3]; [[fallthrough]];
++                case 3: at[2] = args[2]; [[fallthrough]];
++                case 2: at[1] = args[1]; [[fallthrough]];
++                case 1: at[0] = args[0]; [[fallthrough]];
++                case 0: break;
++                default: std::memcpy(at, args, sizeof(double) * record.size()); break;
++            }
++        }
++        else
++        {
++            const double* state = Current(s);
++            for (auto& source : record) *at++ = ValueOf(source, args, state, answers);
++        }
++        s.count = need;
++    }
++
++    // (six slots, a 2x3 matrix a b c d e f, multiplied by m in the order the host computes it, no fused operations)
++    static void Multiply(double* a, const double* m)
++    {
++#pragma clang fp contract(off)
++        double r0 = a[0] * m[0] + a[2] * m[1];
++        double r1 = a[1] * m[0] + a[3] * m[1];
++        double r2 = a[0] * m[2] + a[2] * m[3];
++        double r3 = a[1] * m[2] + a[3] * m[3];
++        double r4 = a[0] * m[4] + a[2] * m[5] + a[4];
++        double r5 = a[1] * m[4] + a[3] * m[5] + a[5];
++        a[0] = r0; a[1] = r1; a[2] = r2; a[3] = r3; a[4] = r4; a[5] = r5;
++    }
++
++    enum Outcome { Done = 0, Delegated = 1 };
++    enum Step { Took = 0, Nothing = 1, Handoff = 2 };
++
++    // (the state's effects of an operation, out of the path of those that have none)
++    static V8_NOINLINE Step Effect(const Operation& op, Shared& s, const double* args)
++    {
++        double* state = Current(s);
++        switch (op.effect)
++        {
++            case 1:
++            {
++                if (s.depth >= op.effectMax || !Reserve(s, s.depth + 1)) return Nothing;
++                double* saved = Current(s);
++                std::memcpy(saved + s.slots, saved, sizeof(double) * static_cast<size_t>(s.slots));
++                for (auto& a : op.assigns) saved[a.slot] = ValueOf(a.source, args, saved, nullptr);
++                s.depth++;
++                break;
++            }
++            case 2:
++            {
++                if (s.depth == 0) return Nothing;
++                double* top = state - s.slots;
++                if (op.effectSlot >= 0 && top[op.effectSlot] != 0) return Handoff;
++                s.depth--;
++                break;
++            }
++            case 3:
++            {
++                double m[6];
++                for (int i = 0; i < 6; i++) m[i] = ValueOf(op.matrix[static_cast<size_t>(i)], args, state, nullptr);
++                Multiply(state + op.effectSlot, m);
++                break;
++            }
++            case 4:
++            {
++                double values[64];
++                size_t n = op.assigns.size();
++                for (size_t i = 0; i < n; i++) values[i] = ValueOf(op.assigns[i].source, args, state, nullptr);
++                for (size_t i = 0; i < n; i++) state[op.assigns[i].slot] = values[i];
++                break;
++            }
++            default:
++                return Took;
++        }
++        s.changed = 1;
++        return Took;
++    }
++
++    // Done: taken (recorded, or nothing to do); Delegated: the delegate's.
++    static inline Outcome Run(const Plan& plan, const Operation& op, Recorder* r, const double* args)
++    {
++        for (uint32_t mask = op.finiteMask, i = 0; mask != 0; mask >>= 1, i++)
++        {
++            if ((mask & 1) != 0 && !std::isfinite(args[i])) return Done;
++        }
++        if (op.stateful)
++        {
++            Ready(r);
++            const double* state = Current(r->shared);
++            for (auto& rule : op.rules)
++            {
++                if (rule.type == 1 && args[rule.index] < rule.bound) return Delegated;
++                if (rule.type == 2 && state[rule.index] != rule.bound) return Delegated;
++            }
++            if (op.effect != 0)
++            {
++                Step step = Effect(op, r->shared, args);
++                if (step == Handoff) return Delegated;
++                // (a push past the most, a pop of nothing: not recorded)
++                if (step == Nothing) return Done;
++            }
++        }
++        Append(r, op.code, op.record, args, nullptr, plan.cap);
++        return Done;
++    }
++
++    static void Delegate(const v8::FunctionCallbackInfo<v8::Value>& info, int32_t member)
++    {
++        auto isolate = info.GetIsolate();
++        auto context = isolate->GetCurrentContext();
++        v8::Local<v8::Value> function;
++        if (context->GetNumberOfEmbedderDataFields() > static_cast<uint32_t>(kDelegatesIndex))
++        {
++            auto data = context->GetEmbedderDataV2(kDelegatesIndex);
++            if (!data.IsEmpty() && data->IsValue() && data.As<v8::Value>()->IsArray())
++            {
++                if (!data.As<v8::Array>()->Get(context, static_cast<uint32_t>(member)).ToLocal(&function)) return;
++            }
++        }
++        if (function.IsEmpty() || !function->IsFunction())
++        {
++            isolate->ThrowException(v8::Exception::TypeError(v8::String::NewFromUtf8Literal(isolate, "Illegal invocation")));
++            return;
++        }
++        int argc = info.Length();
++        std::vector<v8::Local<v8::Value>> argv(static_cast<size_t>(argc));
++        for (int i = 0; i < argc; i++) argv[static_cast<size_t>(i)] = info[i];
++        v8::Local<v8::Value> result;
++        if (function.As<v8::Function>()->Call(context, info.This(), argc, argv.data()).ToLocal(&result)) info.GetReturnValue().Set(result);
++    }
++
++    static bool Keyword(const Keywords& list, v8::Isolate* isolate, v8::Local<v8::Value> value, double& out)
++    {
++        if (!value->IsString()) return false;
++        auto text = value.As<v8::String>();
++        uint32_t length = static_cast<uint32_t>(text->Length());
++        if (length > 64) return false;
++        uint16_t chars[64];
++        bool written = false;
++        for (size_t i = 0; i < list.texts.size(); i++)
++        {
++            auto& t = list.texts[i];
++            if (t.size() != length) continue;
++            if (!written) { text->WriteV2(isolate, 0, length, chars); written = true; }
++            if (std::memcmp(chars, t.data(), sizeof(uint16_t) * length) == 0) { out = list.values[i]; return true; }
++        }
++        return false;
++    }
++
++    // (a number argument read in place: a small integer, or a heap number of the isolate's map; any other value asked
++    // through the API)
++    static inline bool NumberIn(v8::Isolate* isolate, v8::Local<v8::Value> value, double& out)
++    {
++        using I = v8::internal::Internals;
++        auto a = v8::internal::ValueHelper::ValueAsAddress(*value);
++        if (!I::HasHeapObjectTag(a)) { out = I::SmiValue(a); return true; }
++        auto all = static_cast<Isolates*>(isolate->GetData(kIsolateSlot));
++        if (all != nullptr && all->heapNumberMap != 0 && I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset) == all->heapNumberMap)
++        {
++            out = I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address)));
++            return true;
++        }
++        if (!value->IsNumber()) return false;
++        out = value.As<v8::Number>()->Value();
++        return true;
++    }
++
++    static void OperationCall(const MemberRef& ref, const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto& plan = *ref.plan;
++        auto& op = *ref.operation;
++        auto r = RecorderOf(info.This());
++        int argc = info.Length();
++        // (numbers only, as many as declared: read in place, appended as the fast call appends them)
++        if (op.numbers && r != nullptr && argc == static_cast<int>(op.args.size()))
++        {
++            using I = v8::internal::Internals;
++            auto all = static_cast<Isolates*>(info.GetIsolate()->GetData(kIsolateSlot));
++            auto map = all != nullptr ? all->heapNumberMap : 0;
++            double args[kMaxArgs];
++            bool read = true;
++            for (int i = 0; i < argc && read; i++)
++            {
++                auto a = v8::internal::ValueHelper::ValueAsAddress(*info[i]);
++                if (!I::HasHeapObjectTag(a)) args[i] = I::SmiValue(a);
++                else if (map != 0 && I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset) == map)
++                    args[i] = I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address)));
++                else read = NumberIn(info.GetIsolate(), info[i], args[i]);
++            }
++            if (read)
++            {
++                auto& s = r->shared;
++                if (op.plain && s.count <= plan.cap && s.count + 1 + argc <= s.capacity)
++                {
++                    for (int i = 0; i < argc; i++)
++                    {
++                        if ((op.finiteMask >> i & 1) != 0 && !std::isfinite(args[i])) return;
++                    }
++                    double* to = s.ops + s.count;
++                    to[0] = op.code;
++                    // (a copy of a few numbers: no call of memcpy)
++                    switch (argc)
++                    {
++                        case 8: to[8] = args[7]; [[fallthrough]];
++                        case 7: to[7] = args[6]; [[fallthrough]];
++                        case 6: to[6] = args[5]; [[fallthrough]];
++                        case 5: to[5] = args[4]; [[fallthrough]];
++                        case 4: to[4] = args[3]; [[fallthrough]];
++                        case 3: to[3] = args[2]; [[fallthrough]];
++                        case 2: to[2] = args[1]; [[fallthrough]];
++                        case 1: to[1] = args[0]; [[fallthrough]];
++                        default: break;
++                    }
++                    s.count += 1 + argc;
++                    return;
++                }
++                if (Run(plan, op, r, args) == Done) return;
++            }
++            Delegate(info, op.member);
++            return;
++        }
++        bool ok = r != nullptr && argc >= op.required && argc <= static_cast<int>(op.args.size());
++        double args[kMaxArgs] = {};
++        auto isolate = info.GetIsolate();
++        for (size_t i = 0; ok && i < op.args.size(); i++)
++        {
++            int32_t kindOf = op.args[i];
++            if (static_cast<int>(i) >= argc)
++            {
++                if (kindOf == -2) args[i] = 0;
++                else if (kindOf >= 0 && plan.keywords[static_cast<size_t>(kindOf)].hasAbsent) args[i] = plan.keywords[static_cast<size_t>(kindOf)].absent;
++                else ok = false;
++                continue;
++            }
++            auto value = info[static_cast<int>(i)];
++            if (kindOf == -1) ok = NumberIn(isolate, value, args[i]);
++            else if (kindOf == -2) args[i] = value->BooleanValue(isolate) ? 1 : 0;
++            else ok = Keyword(plan.keywords[static_cast<size_t>(kindOf)], isolate, value, args[i]);
++        }
++        if (ok && Run(plan, op, r, args) == Done) return;
++        Delegate(info, op.member);
++    }
++
++    static void GetterCall(const MemberRef& ref, const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto& ac = ref.plan->kinds[static_cast<size_t>(ref.kind)].accessors[static_cast<size_t>(ref.index)];
++        auto r = RecorderOf(info.This());
++        if (r == nullptr) { Delegate(info, ac.member); return; }
++        Ready(r);
++        info.GetReturnValue().Set(Current(r->shared)[ac.getSlot]);
++    }
++
++    static void SetterCall(const MemberRef& ref, const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto& plan = *ref.plan;
++        auto& ac = plan.kinds[static_cast<size_t>(ref.kind)].accessors[static_cast<size_t>(ref.index)];
++        auto r = RecorderOf(info.This());
++        if (r == nullptr || info.Length() < 1) { Delegate(info, ac.member + 1); return; }
++        auto value = info[0];
++        double args[1] = { 0 };
++        double answers[kMaxAnswers] = {};
++        if (ac.setKind == 1)
++        {
++            double v;
++            if (!NumberIn(info.GetIsolate(), value, v)) { Delegate(info, ac.member + 1); return; }
++            if (ac.finite && !std::isfinite(v)) return;
++            if (ac.loRule == 1 ? !(v >= ac.lo) : ac.loRule == 2 ? !(v > ac.lo) : false) return;
++            if (ac.hiRule == 1 ? !(v <= ac.hi) : ac.hiRule == 2 ? !(v < ac.hi) : false) return;
++            args[0] = v;
++        }
++        else if (ac.setKind == 3)
++        {
++            // (a keyword: another text changes nothing)
++            if (!value->IsString()) { Delegate(info, ac.member + 1); return; }
++            if (!Keyword(plan.keywords[static_cast<size_t>(ac.keywords)], info.GetIsolate(), value, args[0])) return;
++        }
++        else if (ac.setKind == 4)
++        {
++            args[0] = value->BooleanValue(info.GetIsolate()) ? 1 : 0;
++        }
++        else
++        {
++            if (!value->IsString()) { Delegate(info, ac.member + 1); return; }
++            auto isolate = info.GetIsolate();
++            auto text = value.As<v8::String>();
++            auto& last = r->last[static_cast<size_t>(ac.member) & 3];
++            if (last.member == ac.member && last.generation == r->shared.generation && last.text.Get(isolate) == text)
++            {
++                if (last.answer.kind == 1) return;
++                std::memcpy(answers, last.answer.values, sizeof(answers));
++                goto answered;
++            }
++            {
++            thread_local std::u16string key;
++            int length = text->Length();
++            key.assign(static_cast<size_t>(length) + 1, u'\0');
++            key[0] = static_cast<char16_t>(ac.member);
++            text->WriteV2(isolate, 0, static_cast<uint32_t>(length), reinterpret_cast<uint16_t*>(&key[1]));
++            if (r->answersGeneration != r->shared.generation) { r->answered.clear(); r->answersGeneration = r->shared.generation; }
++            auto found = r->answered.find(key);
++            Recorder::Answered got {};
++            if (found != r->answered.end()) got = found->second;
++            else
++            {
++                auto answer = g_answer.load();
++                int32_t context = Ssrs2Contexts::Stored(isolate->GetCurrentContext());
++                got.kind = answer == nullptr ? 0 : answer(r->shared.tag, context, ac.member + 1, reinterpret_cast<const uint16_t*>(&key[1]), length, got.values);
++                if (r->answersGeneration != r->shared.generation) { r->answered.clear(); r->answersGeneration = r->shared.generation; }
++                if (got.kind != 0 && r->answered.size() < 4096) r->answered.emplace(key, got);
++            }
++            if (got.kind == 0) { Delegate(info, ac.member + 1); return; }
++            last.member = ac.member;
++            last.generation = r->shared.generation;
++            last.text.Reset(isolate, text);
++            last.answer = got;
++            if (got.kind == 1) return;
++            std::memcpy(answers, got.values, sizeof(answers));
++            }
++        }
++    answered:
++        Ready(r);
++        auto& s = r->shared;
++        double* state = Current(s);
++        for (auto& a : ac.assigns) state[a.slot] = ValueOf(a.source, args, state, answers);
++        if (!ac.assigns.empty()) s.changed = 1;
++        Append(r, ac.code, ac.record, args, answers, plan.cap);
++    }
++
++    // (V8's fast calls: numbers only, never the delegate; TurboFan and Maglev call these where their arguments are numbers)
++    // (each member's callback knows its place: a function of a table of them, the data V8 keeps for it read only by
++    // the members past the table)
++    static void Dispatch(int32_t at, const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto& ref = *g_members[at];
++        switch (ref.part)
++        {
++            case 0: OperationCall(ref, info); break;
++            case 1: GetterCall(ref, info); break;
++            default: SetterCall(ref, info); break;
++        }
++    }
++    template <int K> static void Indexed(const v8::FunctionCallbackInfo<v8::Value>& info) { Dispatch(K, info); }
++    static void ByData(const v8::FunctionCallbackInfo<v8::Value>& info) { Dispatch(info.Data().As<v8::Int32>()->Value(), info); }
++    template <size_t... I> static constexpr std::array<v8::FunctionCallback, sizeof...(I)> Callbacks(std::index_sequence<I...>) { return { { &Indexed<static_cast<int>(I)>... } }; }
++    static constexpr auto kCallbacks = Callbacks(std::make_index_sequence<512>{});
++    static v8::FunctionCallback CallbackOf(int32_t at) { return at >= 0 && static_cast<size_t>(at) < kCallbacks.size() ? kCallbacks[static_cast<size_t>(at)] : ByData; }
++
++    // (a fast call: the member by the small integer its template carries, the recorder by the receiver's fields, both
++    // read in place (V8 checked the receiver against the kind's template: the signature); an operation that records its
++    // numbers as given is appended here, the others run as the slow callback runs them)
++    struct FastEntry { const Operation* op; const Plan* plan; int64_t cap; double code; uint32_t finite; uint32_t plain; };
++    static FastEntry g_fast[kMostMembers];
++
++    static V8_INLINE Recorder* FastRecorder(v8::Local<v8::Object> receiver)
++    {
++        auto object = v8::internal::ValueHelper::ValueAsAddress(*receiver);
++        uint64_t low = static_cast<uint32_t>(SmiAt(FieldAt(object, kLowField))), high = static_cast<uint32_t>(SmiAt(FieldAt(object, kHighField)));
++        return reinterpret_cast<Recorder*>(static_cast<uintptr_t>((high << kHalfBits) | low));
++    }
++
++    static V8_INLINE const FastEntry* FastEntryOf(v8::FastApiCallbackOptions& options)
++    {
++        uint32_t at = static_cast<uint32_t>(SmiAt(v8::internal::ValueHelper::ValueAsAddress(*options.data)));
++        return at < static_cast<uint32_t>(kMostMembers) ? &g_fast[at] : nullptr;
++    }
++
++    static int32_t Register(const MemberRef* ref)
++    {
++        int32_t at = g_memberCount.fetch_add(1);
++        if (at >= kMostMembers) return -1;
++        g_members[at] = ref;
++        if (auto op = ref->operation)
++            g_fast[at] = FastEntry { op, ref->plan, ref->plan->cap, static_cast<double>(op->code), op->finiteMask, op->plain ? 1u : 0u };
++        return at;
++    }
++
++    static V8_NOINLINE void FastSlow(const FastEntry* e, Recorder* r, const double* args) { Run(*e->plan, *e->op, r, args); }
++    __attribute__((no_stack_protector)) static void Fast0(v8::Local<v8::Object> o, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 1 <= s.capacity)
++        {
++            if (false) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code;
++            s.count += 1;
++            return;
++        }
++        double a[] = { 0 };
++        FastSlow(e, r, a);
++    }
++    __attribute__((no_stack_protector)) static void Fast1(v8::Local<v8::Object> o, double a0, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 2 <= s.capacity)
++        {
++            if (((e->finite >> 0 & 1) != 0 && !std::isfinite(a0))) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code; to[1] = a0;
++            s.count += 2;
++            return;
++        }
++        double a[] = { a0 };
++        FastSlow(e, r, a);
++    }
++    __attribute__((no_stack_protector)) static void Fast2(v8::Local<v8::Object> o, double a0, double a1, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 3 <= s.capacity)
++        {
++            if (((e->finite >> 0 & 1) != 0 && !std::isfinite(a0)) || ((e->finite >> 1 & 1) != 0 && !std::isfinite(a1))) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code; to[1] = a0; to[2] = a1;
++            s.count += 3;
++            return;
++        }
++        double a[] = { a0, a1 };
++        FastSlow(e, r, a);
++    }
++    __attribute__((no_stack_protector)) static void Fast3(v8::Local<v8::Object> o, double a0, double a1, double a2, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 4 <= s.capacity)
++        {
++            if (((e->finite >> 0 & 1) != 0 && !std::isfinite(a0)) || ((e->finite >> 1 & 1) != 0 && !std::isfinite(a1)) || ((e->finite >> 2 & 1) != 0 && !std::isfinite(a2))) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code; to[1] = a0; to[2] = a1; to[3] = a2;
++            s.count += 4;
++            return;
++        }
++        double a[] = { a0, a1, a2 };
++        FastSlow(e, r, a);
++    }
++    __attribute__((no_stack_protector)) static void Fast4(v8::Local<v8::Object> o, double a0, double a1, double a2, double a3, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 5 <= s.capacity)
++        {
++            if (((e->finite >> 0 & 1) != 0 && !std::isfinite(a0)) || ((e->finite >> 1 & 1) != 0 && !std::isfinite(a1)) || ((e->finite >> 2 & 1) != 0 && !std::isfinite(a2)) || ((e->finite >> 3 & 1) != 0 && !std::isfinite(a3))) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code; to[1] = a0; to[2] = a1; to[3] = a2; to[4] = a3;
++            s.count += 5;
++            return;
++        }
++        double a[] = { a0, a1, a2, a3 };
++        FastSlow(e, r, a);
++    }
++    __attribute__((no_stack_protector)) static void Fast5(v8::Local<v8::Object> o, double a0, double a1, double a2, double a3, double a4, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 6 <= s.capacity)
++        {
++            if (((e->finite >> 0 & 1) != 0 && !std::isfinite(a0)) || ((e->finite >> 1 & 1) != 0 && !std::isfinite(a1)) || ((e->finite >> 2 & 1) != 0 && !std::isfinite(a2)) || ((e->finite >> 3 & 1) != 0 && !std::isfinite(a3)) || ((e->finite >> 4 & 1) != 0 && !std::isfinite(a4))) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code; to[1] = a0; to[2] = a1; to[3] = a2; to[4] = a3; to[5] = a4;
++            s.count += 6;
++            return;
++        }
++        double a[] = { a0, a1, a2, a3, a4 };
++        FastSlow(e, r, a);
++    }
++    __attribute__((no_stack_protector)) static void Fast6(v8::Local<v8::Object> o, double a0, double a1, double a2, double a3, double a4, double a5, v8::FastApiCallbackOptions& f)
++    {
++        auto e = FastEntryOf(f);
++        auto r = FastRecorder(o);
++        if (e == nullptr || r == nullptr) return;
++        auto& s = r->shared;
++        if (e->plain != 0 && s.count <= e->cap && s.count + 7 <= s.capacity)
++        {
++            if (((e->finite >> 0 & 1) != 0 && !std::isfinite(a0)) || ((e->finite >> 1 & 1) != 0 && !std::isfinite(a1)) || ((e->finite >> 2 & 1) != 0 && !std::isfinite(a2)) || ((e->finite >> 3 & 1) != 0 && !std::isfinite(a3)) || ((e->finite >> 4 & 1) != 0 && !std::isfinite(a4)) || ((e->finite >> 5 & 1) != 0 && !std::isfinite(a5))) return;
++            double* to = s.ops + s.count;
++            to[0] = e->code; to[1] = a0; to[2] = a1; to[3] = a2; to[4] = a3; to[5] = a4; to[6] = a5;
++            s.count += 7;
++            return;
++        }
++        double a[] = { a0, a1, a2, a3, a4, a5 };
++        FastSlow(e, r, a);
++    }
++
++    static const v8::CFunction* FastOf(size_t arity)
++    {
++        static const v8::CFunction c0 = v8::CFunction::Make(Fast0), c1 = v8::CFunction::Make(Fast1), c2 = v8::CFunction::Make(Fast2),
++            c3 = v8::CFunction::Make(Fast3), c4 = v8::CFunction::Make(Fast4), c5 = v8::CFunction::Make(Fast5), c6 = v8::CFunction::Make(Fast6);
++        static const v8::CFunction* all[] = { &c0, &c1, &c2, &c3, &c4, &c5, &c6 };
++        return arity <= 6 ? all[arity] : nullptr;
++    }
++
++    // ---- objects ----
++
++    static void Collected(const v8::WeakCallbackInfo<Recorder>& info)
++    {
++        auto r = info.GetParameter();
++        r->LetGo();
++        if (r->owner != nullptr) r->owner->live.erase(r);
++        Release(r);
++    }
++
++    static Isolates* IsolatesOf(v8::Isolate* isolate, bool make)
++    {
++        auto all = static_cast<Isolates*>(isolate->GetData(kIsolateSlot));
++        if (all == nullptr && make)
++        {
++            all = new Isolates();
++            isolate->SetData(kIsolateSlot, all);
++        }
++        return all;
++    }
++
++    // recordedObject(name, prototype, number): a new object of the kind named, of that prototype, with its recorder; the
++    // host told (made); undefined for a name the plan has no kind for or a prototype that is no object.
++    static void MakeObject(const v8::FunctionCallbackInfo<v8::Value>& info)
++    {
++        auto isolate = info.GetIsolate();
++        auto templates = static_cast<PlanTemplates*>(info.Data().As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
++        auto plan = templates->plan;
++        if (info.Length() < 3 || !info[0]->IsString() || !info[1]->IsObject()) return;
++        v8::String::Utf8Value name(isolate, info[0]);
++        int32_t k = -1;
++        for (size_t i = 0; i < plan->kinds.size(); i++) if (*name != nullptr && plan->kinds[i].name == *name) k = static_cast<int32_t>(i);
++        if (k < 0) return;
++        auto context = isolate->GetCurrentContext();
++        auto& kind = templates->kinds[static_cast<size_t>(k)];
++        if (kind.type.IsEmpty()) return;
++        v8::Local<v8::Object> object;
++        if (!kind.type.Get(isolate)->InstanceTemplate()->NewInstance(context).ToLocal(&object)) return;
++        if (object->SetPrototype(context, info[1]).IsNothing()) return;
++        auto r = new Recorder();
++        auto& s = r->shared;
++        s.slots = plan->slots;
++        s.kind = k;
++        s.dirty = 1;
++        if (!Reserve(s, 0)) { delete r; return; }
++        std::memcpy(s.levels, plan->defaults.data(), sizeof(double) * static_cast<size_t>(plan->slots));
++        uint64_t address = reinterpret_cast<uintptr_t>(r);
++        object->SetInternalField(kMarkField, v8::Integer::New(isolate, kMark));
++        object->SetInternalField(kLowField, v8::Integer::New(isolate, static_cast<int32_t>(static_cast<uint32_t>(address & kHalfMask))));
++        object->SetInternalField(kHighField, v8::Integer::New(isolate, static_cast<int32_t>(static_cast<uint32_t>(address >> kHalfBits))));
++        r->owner = IsolatesOf(isolate, true);
++        r->owner->live.insert(r);
++        r->self.Reset(isolate, object);
++        r->self.SetWeak(r, Collected, v8::WeakCallbackType::kParameter);
++        auto made = g_made.load();
++        int32_t number = info[2]->IsInt32() ? info[2].As<v8::Int32>()->Value() : 0;
++        if (made != nullptr) s.tag = made(Ssrs2Contexts::NumberOf(isolate, context), number, k, &s);
++        info.GetReturnValue().Set(object);
++    }
++
++    // (the isolate going: each recorder's object let go, the host's references kept until it releases them)
++    static void IsolateGone(v8::Isolate* isolate)
++    {
++        auto all = IsolatesOf(isolate, false);
++        if (all == nullptr) return;
++        for (auto r : all->live)
++        {
++            r->LetGo();
++            r->owner = nullptr;
++            Release(r);
++        }
++        all->live.clear();
++        for (auto& plan : all->plans)
++        {
++            plan->maker.Reset();
++            for (auto& kind : plan->kinds)
++            {
++                kind.type.Reset();
++                for (auto& t : kind.operations) t.Reset();
++                for (auto& t : kind.getters) t.Reset();
++                for (auto& t : kind.setters) t.Reset();
++            }
++        }
++        delete all;
++        isolate->SetData(kIsolateSlot, nullptr);
++    }
++
++    static v8::Local<v8::FunctionTemplate> MemberTemplate(v8::Isolate* isolate, KindTemplates& kind, v8::Global<v8::FunctionTemplate>& slot, const MemberRef& ref,
++        const std::string& name, int length, const v8::CFunction* fast)
++    {
++        if (!slot.IsEmpty()) return slot.Get(isolate);
++        if (ref.at < 0) return v8::Local<v8::FunctionTemplate>();
++        auto t = v8::FunctionTemplate::New(isolate, CallbackOf(ref.at), v8::Integer::New(isolate, ref.at),
++            v8::Signature::New(isolate, kind.type.Get(isolate)), length, v8::ConstructorBehavior::kThrow, v8::SideEffectType::kHasSideEffect, fast);
++        t->SetClassName(v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked());
++        slot.Reset(isolate, t);
++        return t;
++    }
++
++    static int Length(v8::Local<v8::Context> context, v8::Local<v8::Value> function)
++    {
++        v8::Local<v8::Value> length;
++        if (!function->IsFunction() || !function.As<v8::Object>()->Get(context, v8::String::NewFromUtf8Literal(v8::Isolate::GetCurrent(), "length")).ToLocal(&length) || !length->IsInt32()) return 0;
++        return length.As<v8::Int32>()->Value();
++    }
++
++    static bool Flag(v8::Local<v8::Context> context, v8::Local<v8::Object> descriptor, const char* name)
++    {
++        v8::Local<v8::Value> v;
++        return descriptor->Get(context, v8::String::NewFromUtf8(v8::Isolate::GetCurrent(), name).ToLocalChecked()).ToLocal(&v) && v->BooleanValue(v8::Isolate::GetCurrent());
++    }
++
++    static v8::Local<v8::Value> Field(v8::Local<v8::Context> context, v8::Local<v8::Object> descriptor, const char* name)
++    {
++        v8::Local<v8::Value> v;
++        if (!descriptor->Get(context, v8::String::NewFromUtf8(v8::Isolate::GetCurrent(), name).ToLocalChecked()).ToLocal(&v)) return v8::Undefined(v8::Isolate::GetCurrent());
++        return v;
++    }
++
++    // (a kind's members on its prototype: each one the prototype has now as its own replaced, its function kept as its
++    // delegate; none added that it has not)
++    static bool InstallKind(v8::Isolate* isolate, v8::Local<v8::Context> context, Plan& plan, Kind& kind, KindTemplates& kt, v8::Local<v8::Array> delegates)
++    {
++        if (kt.type.IsEmpty())
++        {
++            auto t = v8::FunctionTemplate::New(isolate);
++            t->SetClassName(v8::String::NewFromUtf8(isolate, kind.name.c_str()).ToLocalChecked());
++            t->InstanceTemplate()->SetInternalFieldCount(kFields);
++            kt.type.Reset(isolate, t);
++            kt.operations.resize(kind.operations.size());
++            kt.getters.resize(kind.accessors.size());
++            kt.setters.resize(kind.accessors.size());
++        }
++        v8::Local<v8::Value> constructor, prototypeValue;
++        if (!context->Global()->Get(context, v8::String::NewFromUtf8(isolate, kind.name.c_str()).ToLocalChecked()).ToLocal(&constructor) || !constructor->IsFunction()) return false;
++        if (!constructor.As<v8::Object>()->Get(context, v8::String::NewFromUtf8Literal(isolate, "prototype")).ToLocal(&prototypeValue) || !prototypeValue->IsObject()) return false;
++        auto prototype = prototypeValue.As<v8::Object>();
++        for (size_t i = 0; i < kind.operations.size(); i++)
++        {
++            auto& op = kind.operations[i];
++            auto key = v8::String::NewFromUtf8(isolate, op.name.c_str()).ToLocalChecked();
++            v8::Local<v8::Value> d;
++            if (!prototype->GetOwnPropertyDescriptor(context, key).ToLocal(&d) || !d->IsObject()) continue;
++            auto descriptor = d.As<v8::Object>();
++            auto existing = Field(context, descriptor, "value");
++            if (!existing->IsFunction()) continue;
++            auto t = MemberTemplate(isolate, kt, kt.operations[i], kind.operationRefs[i], op.name, Length(context, existing), op.fast ? FastOf(op.args.size()) : nullptr);
++            v8::Local<v8::Function> function;
++            if (t.IsEmpty() || !t->GetFunction(context).ToLocal(&function)) return false;
++            v8::PropertyDescriptor replaced(function, Flag(context, descriptor, "writable"));
++            replaced.set_enumerable(Flag(context, descriptor, "enumerable"));
++            replaced.set_configurable(Flag(context, descriptor, "configurable"));
++            if (delegates->Set(context, static_cast<uint32_t>(op.member), existing).IsNothing()) return false;
++            if (prototype->DefineProperty(context, key, replaced).IsNothing()) return false;
++        }
++        for (size_t i = 0; i < kind.accessors.size(); i++)
++        {
++            auto& ac = kind.accessors[i];
++            auto key = v8::String::NewFromUtf8(isolate, ac.name.c_str()).ToLocalChecked();
++            v8::Local<v8::Value> d;
++            if (!prototype->GetOwnPropertyDescriptor(context, key).ToLocal(&d) || !d->IsObject()) continue;
++            auto descriptor = d.As<v8::Object>();
++            auto get = Field(context, descriptor, "get"), set = Field(context, descriptor, "set");
++            if (!get->IsFunction() || (ac.setKind != 0 && !set->IsFunction())) continue;
++            v8::Local<v8::Value> newGet = get, newSet = set;
++            if (ac.getSlot >= 0)
++            {
++                v8::Local<v8::Function> f;
++                auto mt = MemberTemplate(isolate, kt, kt.getters[i], kind.getterRefs[i], "get " + ac.name, 0, nullptr);
++                if (mt.IsEmpty() || !mt->GetFunction(context).ToLocal(&f)) return false;
++                newGet = f;
++            }
++            if (ac.setKind != 0)
++            {
++                v8::Local<v8::Function> f;
++                auto mt = MemberTemplate(isolate, kt, kt.setters[i], kind.setterRefs[i], "set " + ac.name, 1, nullptr);
++                if (mt.IsEmpty() || !mt->GetFunction(context).ToLocal(&f)) return false;
++                newSet = f;
++            }
++            v8::PropertyDescriptor replaced(newGet, newSet);
++            replaced.set_enumerable(Flag(context, descriptor, "enumerable"));
++            replaced.set_configurable(Flag(context, descriptor, "configurable"));
++            if (delegates->Set(context, static_cast<uint32_t>(ac.member), get).IsNothing() || delegates->Set(context, static_cast<uint32_t>(ac.member + 1), set).IsNothing()) return false;
++            if (prototype->DefineProperty(context, key, replaced).IsNothing()) return false;
++        }
++        return true;
++    }
++}
++
++// (V8IsolateImpl's destructor through Ssrs2IsolateGone: the recording's per-isolate data freed)
++static void Ssrs2RecordingIsolateGone(v8::Isolate* isolate) { Ssrs2Recording::IsolateGone(isolate); }
++
++NATIVE_ENTRY_POINT(int) Ssrs2_InstallRecording(const char* holder, const double* plan, int32_t planLength, const char* names, int32_t namesLength, void* made, void* sync, void* answer) noexcept
++{
++    using namespace Ssrs2Recording;
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || holder == nullptr || plan == nullptr || planLength <= 0 || names == nullptr || namesLength < 0) return 0;
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    auto all = IsolatesOf(isolate, true);
++    Plan* found = nullptr;
++    {
++        std::lock_guard<std::mutex> lock(g_plansMutex);
++        for (auto& p : g_plans)
++        {
++            if (p->raw.size() == static_cast<size_t>(planLength) && std::memcmp(p->raw.data(), plan, sizeof(double) * static_cast<size_t>(planLength)) == 0
++                && p->names.size() == static_cast<size_t>(namesLength) && std::memcmp(p->names.data(), names, static_cast<size_t>(namesLength)) == 0)
++            {
++                found = p.get();
++            }
++        }
++        if (found == nullptr)
++        {
++            auto parsed = Parse(plan, planLength, names, namesLength);
++            if (parsed == nullptr) return 0;
++            found = parsed.get();
++            g_plans.push_back(std::move(parsed));
++        }
++    }
++    PlanTemplates* templates = nullptr;
++    for (auto& t : all->plans) if (t->plan == found) templates = t.get();
++    if (templates == nullptr)
++    {
++        all->plans.push_back(std::make_unique<PlanTemplates>());
++        templates = all->plans.back().get();
++        templates->plan = found;
++        templates->kinds.resize(found->kinds.size());
++    }
++    if (all->heapNumberMap == 0)
++    {
++        // (a heap number read in place where its map and value are where V8's own layout says: else through the API)
++        using I = v8::internal::Internals;
++        const double probe = 0.1234567;
++        auto number = v8::Number::New(isolate, probe);
++        auto a = v8::internal::ValueHelper::ValueAsAddress(*number);
++        if (I::HasHeapObjectTag(a) && I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address))) == probe)
++            all->heapNumberMap = I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset);
++    }
++    g_made.store(reinterpret_cast<Made>(made));
++    g_sync.store(reinterpret_cast<Sync>(sync));
++    g_answer.store(reinterpret_cast<Answer>(answer));
++    auto delegates = v8::Array::New(isolate, found->members);
++    auto kinds = v8::Object::New(isolate, v8::Null(isolate), nullptr, nullptr, 0);
++    for (size_t k = 0; k < found->kinds.size(); k++)
++    {
++        auto& kind = found->kinds[k];
++        if (InstallKind(isolate, context, *found, kind, templates->kinds[k], delegates)
++            && kinds->Set(context, v8::String::NewFromUtf8(isolate, kind.name.c_str()).ToLocalChecked(), v8::True(isolate)).IsNothing()) return 0;
++    }
++    context->SetEmbedderDataV2(kDelegatesIndex, delegates);
++    auto object = Ssrs2Holder(isolate, context, holder);
++    if (object.IsEmpty()) return 0;
++    if (templates->maker.IsEmpty())
++    {
++        templates->maker.Reset(isolate, v8::FunctionTemplate::New(isolate, MakeObject, v8::External::New(isolate, templates, v8::kExternalPointerTypeTagDefault),
++            v8::Local<v8::Signature>(), 3, v8::ConstructorBehavior::kThrow));
++    }
++    v8::Local<v8::Function> maker;
++    if (!templates->maker.Get(isolate)->GetFunction(context).ToLocal(&maker)) return 0;
++    if (object->Set(context, v8::String::NewFromUtf8Literal(isolate, "recordedObject"), maker).IsNothing()
++        || object->Set(context, v8::String::NewFromUtf8Literal(isolate, "recordedNames"), kinds).IsNothing()) return 0;
++    return 1;
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_RecordingRetain(void* recorder) noexcept
++{
++    if (recorder == nullptr) return 0;
++    reinterpret_cast<Ssrs2Recording::Recorder*>(recorder)->refs.fetch_add(1);
++    return 1;
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_RecordingRelease(void* recorder) noexcept
++{
++    if (recorder == nullptr) return 0;
++    Ssrs2Recording::Release(reinterpret_cast<Ssrs2Recording::Recorder*>(recorder));
++    return 1;
++}
++
++// (the buffer's memory given back where nothing is in it: the host took a large recording and keeps its own copy)
++NATIVE_ENTRY_POINT(int) Ssrs2_RecordingTrim(void* recorder) noexcept
++{
++    if (recorder == nullptr) return 0;
++    auto& s = reinterpret_cast<Ssrs2Recording::Recorder*>(recorder)->shared;
++    if (s.count != 0) return 0;
++    std::free(s.ops);
++    s.ops = nullptr;
++    s.capacity = 0;
++    return 1;
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_RecordingReserve(void* recorder, int32_t depth) noexcept
++{
++    if (recorder == nullptr) return 0;
++    return Ssrs2Recording::Reserve(reinterpret_cast<Ssrs2Recording::Recorder*>(recorder)->shared, depth) ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -5372,4 +6721,9 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallArena(const char* holder, const char* name,
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetImportHostScheduler=_Ssrs2_SetImportHostScheduler@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetNamedHostHandler=_Ssrs2_SetNamedHostHandler@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_SetSecurityToken=_Ssrs2_SetSecurityToken@12")
++#pragma comment(linker, "/EXPORT:Ssrs2_InstallRecording=_Ssrs2_InstallRecording@32")
++#pragma comment(linker, "/EXPORT:Ssrs2_RecordingRetain=_Ssrs2_RecordingRetain@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_RecordingRelease=_Ssrs2_RecordingRelease@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_RecordingReserve=_Ssrs2_RecordingReserve@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_RecordingTrim=_Ssrs2_RecordingTrim@4")
+ #endif
