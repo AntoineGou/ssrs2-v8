@@ -1,6 +1,8 @@
 # SSRS2's V8 for ClearScript on Windows: ClearScript's native library (ClearScriptV8.win-<cpu>.dll) built from
 # ClearScript 7.5.1.1's sources with patches\clearscript\*.patch, around V8 15.6.75.33 with
-# patches/v8\*.patch (README.md says what they change).
+# patches/v8\*.patch and patches\v8-build\*.patch (README.md says what they change). V8 is an official build with
+# ThinLTO (no profile on Windows: README.md, "Profile"); the library's own code is compiled by V8's clang-cl and linked
+# by its lld-link, optimised with V8 at the link.
 #
 #   ./build.ps1 <work folder> [cpu]     cpu: x64 (the default), x86 or arm64, all built on an x64 host
 #
@@ -68,7 +70,8 @@ if (-not (Test-Path depot_tools)) {
 $env:PATH = "$((Get-Location).Path)\depot_tools;$env:PATH"
 if (-not (Test-Path .gclient)) { Invoke-Native 'gclient config' { gclient config https://chromium.googlesource.com/v8/v8 } 'config.log' }
 $v8Patches = Get-ChildItem (Join-Path $here 'patches\v8') -Filter *.patch | Sort-Object Name
-$patched = "$v8Revision $((Get-Content -Raw $v8Patches.FullName) -join '' | git hash-object --stdin)"
+$v8BuildPatches = Get-ChildItem (Join-Path $here 'patches\v8-build') -Filter *.patch | Sort-Object Name
+$patched = "$v8Revision $((Get-Content -Raw (@($v8Patches.FullName) + @($v8BuildPatches.FullName))) -join '' | git hash-object --stdin)"
 if (-not (Test-Path v8\.ssrs2-patched) -or (Get-Content v8\.ssrs2-patched) -ne $patched) {
     Write-Host "Downloading V8 $v8Revision and its dependencies"
     # (three tries: V8's download hooks run at once, and on Windows depot_tools' lock on gsutil's folder is a file opened
@@ -84,6 +87,10 @@ if (-not (Test-Path v8\.ssrs2-patched) -or (Get-Content v8\.ssrs2-patched) -ne $
     git config user.email clearscript@clearfoundry.net
     # (the series in order: ClearScript's changes ported to this V8, then SSRS2's)
     foreach ($p in $v8Patches) { Write-Host "Applying $($p.Name)"; Invoke-Native "Applying $($p.Name)" { git apply --3way --index $p.FullName } }
+    # (V8's build files, //build, are a repository of their own inside V8's)
+    Push-Location build
+    foreach ($p in $v8BuildPatches) { Write-Host "Applying build/$($p.Name)"; Invoke-Native "Applying build/$($p.Name)" { git apply --3way --index $p.FullName } }
+    Pop-Location
     # (not ClearScript's BuildPatch.txt: it only changes Linux builds)
     Set-Location third_party\icu
     Invoke-Native 'Patching ICU' { git apply --index --ignore-whitespace "$root\V8\ICUPatch.txt" }
@@ -121,12 +128,18 @@ if (-not (Test-Path "$sdks\$sdkVersion\um\windows.h")) {
 }
 Write-Host "Building V8 ($Cpu)"
 $out = "out\$platform\Release"
-# (in args.gn: PowerShell drops the quotes inside an argument given to a batch file, as gn is)
+# (in args.gn: PowerShell drops the quotes inside an argument given to a batch file, as gn is. ClearScript's settings,
+# then the build for speed: an official build, link-time optimised (ThinLTO), no symbols, no bounds and return traps or
+# zeroed stack variables (v8-build/0001). No profile: chrome_pgo_phase would otherwise default to Chrome's own for an
+# official Windows build, which a V8 checkout does not have. Microsoft's C++ library, as ClearScript's projects use it:
+# V8's API hands C++ library types across, so V8 and the library need the same one)
 $gnArgs = 'fatal_linker_warnings=false', 'is_cfi=false', 'is_component_build=false', 'is_debug=false', "target_cpu=`"$Cpu`"",
-    'use_clang_modules=false', 'use_custom_libcxx=false', 'use_thin_lto=false', 'v8_embedder_string="-ClearScript"',
+    'use_clang_modules=false', 'use_custom_libcxx=false', 'v8_embedder_string="-ClearScript"',
     'v8_enable_fuzztest=false', 'v8_enable_pointer_compression=false', 'v8_enable_31bit_smis_on_64bit_arch=false',
     'v8_enable_temporal_support=false', 'v8_monolithic=true', 'v8_use_external_startup_data=false', "v8_target_cpu=`"$Cpu`"",
-    'v8_disallow_js_in_api_interrupts_is_checked=false'
+    'v8_disallow_js_in_api_interrupts_is_checked=false', 'is_official_build=true', 'use_thin_lto=true',
+    'thin_lto_enable_optimizations=true', 'chrome_pgo_phase=0', 'symbol_level=0', 'v8_symbol_level=0', 'init_stack_vars=false',
+    'v8_enable_maglev_graph_printer=false'
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Content "$out\args.gn" ($gnArgs -join "`n")
 Invoke-Native 'gn gen' { gn gen $out } 'gn.log'
@@ -150,10 +163,17 @@ Copy-Item "$out\icudtl.dat" "$root\V8\icudtl.dat"
 Write-Host "Linking ClearScriptV8.win-$Cpu.dll"
 Set-Location $root
 $project = "ClearScriptV8\win-$Cpu\ClearScriptV8.win-$Cpu.vcxproj"
-# (as the Unix makefile: V8 15.6 deprecates APIs ClearScript 7.5.1.1 still calls, and the projects treat warnings as
-# errors; clang-cl adds _CL_'s options to every compile)
-$env:_CL_ = '-Wno-deprecated-declarations'
-Invoke-Native 'MSBuild' { msbuild $project -p:Configuration=Release -p:Platform=$platform "-p:SolutionDir=$root\" -m -v:minimal -nologo }
+# ClearScript's project with V8's clang-cl and lld-link in place of Visual Studio's (ClangCL's LLVMInstallDir): V8's
+# objects are LLVM bitcode of that compiler's version, which only its own linker reads, and the library's code becomes
+# part of the optimised program with V8's (ThinLTO: the project's own whole-program optimisation is a full LTO of its
+# code alone). clang-cl adds _CL_'s options to every compile, lld-link _LINK_'s to the link. As the Unix makefile: V8
+# 15.6 deprecates APIs ClearScript 7.5.1.1 still calls; and a newer compiler than the projects were written for warns
+# more, which they would treat as errors.
+$llvm = "$root\V8\build\v8\third_party\llvm-build\Release+Asserts"
+$llvmVersion = (Get-ChildItem "$llvm\lib\clang" -Directory | Select-Object -First 1).Name
+$env:_CL_ = '-Wno-deprecated-declarations -Wno-error -flto=thin -fsplit-lto-unit'
+$env:_LINK_ = '/opt:lldltojobs=all -mllvm:-import-instr-limit=30'
+Invoke-Native 'MSBuild' { msbuild $project -p:Configuration=Release -p:Platform=$platform "-p:SolutionDir=$root\" "-p:LLVMInstallDir=$llvm" -p:LLVMToolsVersion=$llvmVersion -p:UseLldLink=true -m -v:minimal -nologo }
 $dll = "$root\bin\Release\ClearScriptV8.win-$Cpu.dll"
 New-Item -ItemType Directory -Force "$Work\out" | Out-Null
 Copy-Item $dll "$Work\out\"
