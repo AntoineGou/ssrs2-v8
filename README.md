@@ -211,6 +211,48 @@ nestable tasks and its own calls from its interrupt callback). Apart from local 
 checks a set of them against Node's on every platform, and SSRS2's output matched the one with ClearScript's own library
 byte for byte.
 
+## How it is built
+
+V8 is built as an official build (`is_official_build=true`) with ThinLTO, no symbols and without zeroed stack
+variables (`init_stack_vars=false`); `patches/v8-build` changes V8's build files (`//build`, a repository of its own in a
+V8 checkout): `0001-official-build-no-hardening.patch` leaves out, in an official build, the stack protector (macOS
+and Linux), the array-bounds and return traps (`-fsanitize=array-bounds,return` with `-fsanitize-trap`) and
+`-fwhole-program-vtables` (with which V8 15.6's monolith's mksnapshot fails to link: an undefined vtable). On macOS and
+Linux V8 has its own C++ library (`use_custom_libcxx=true`, libc++ and libc++abi of V8's tree, built beside the monolith
+and linked into the library), without libc++'s hardening (`patches/v8/0007-no-libcxx-hardening.patch`); the library's
+own code (ClearScript's, `Unix/ClearScriptV8/Makefile`) is compiled by V8's clang against that libc++ as ThinLTO
+bitcode too and linked by V8's lld, so that V8 and the library are optimised as one program at the link. The library
+needs no C++ library of the system (`build.sh` checks it); Linux's links GCC's runtime statically, as before. On
+Windows V8 keeps Microsoft's C++ library, which ClearScript's projects use (V8's API hands C++ library types across):
+ClearScript's project is built with V8's clang-cl and lld-link in place of Visual Studio's, its code ThinLTO bitcode
+too. Pointer compression and V8's sandbox stay off (ClearScript's array buffers and external memory live outside any
+cage).
+
+On SSRS2's pages, against the build before it (same V8 and patches, macOS arm64): about 3% fewer instructions once warm,
+2% less at a first render, 1.5 to 2% less time, with the same output.
+
+### Profile
+
+`profiles/ClearScriptV8.profdata.xz` is a profile of the instrumented library (`chrome_pgo_phase=1`, and ClearScript's
+code compiled and linked with `-fprofile-generate`), recorded on macOS arm64 on a corpus of real pages with the
+library's main embedder, merged with `llvm-profdata` of the same clang revision as V8's (Chromium's `coverage_tools`
+package: `tools/clang/scripts/update.py --package=coverage_tools --output-dir=<folder>`). It names ClearScript's
+functions by `ClearScriptV8/<file>.cpp` and V8's by their sources from a folder three levels down (`out/<cpu>/Release`),
+as the build compiles them. 36 MB unpacked (`sha256 a2c8f0ce843ba7c76019a549227403f3b151034ef97e561d48312ea0a2524f0f`),
+3.3 MB packed with xz; `build.sh` unpacks it into the work folder and V8 and the library are compiled with it
+(`chrome_pgo_phase=2`, `pgo_data_path`, `-fprofile-use`).
+
+It applies where a function's name and control flow are those it was recorded with: all of it on osx-arm64; most of
+it on osx-x64, linux-x64 and linux-arm64 (the same name mangling; code that differs by CPU or system, and functions
+whose signature holds a 64-bit integer, `long long` on macOS and `long` on Linux, go without); less on linux-arm. The
+compiler ignores the rest, which is then optimised as without a profile. Windows names functions differently
+(Microsoft's mangling), so the Windows libraries are built without it (`chrome_pgo_phase=0`, ThinLTO alone): a profile
+for them would be recorded the same way with Windows builds (an instrumented V8 and library, `clang_rt.profile` of V8's
+clang, the corpus run on Windows x64, x86 and arm64), merged and committed beside this one.
+
+A profile goes out of date where the code changes (a V8 update, a patch): the functions changed lose it, the rest keep
+it. It is recorded again after a V8 update.
+
 ## Updating V8
 
 The patches apply to a pristine V8 tag, ClearScript's first and SSRS2's on top, each with a three-way merge: a V8 patch
@@ -243,15 +285,18 @@ Packages take full releases only: tag the same commit without `-mac` when the ro
 ./build.ps1 <work folder> [x64|x86|arm64]     Windows with Visual Studio 2022, its Clang tools and the Windows SDK
 ```
 
-The first build downloads several GB (depot_tools, V8 and its dependencies). V8 takes about 15 minutes on an M-series
-Mac and one to two hours on a 4-core machine. The library lands in `<work folder>/out`, with its licences.
+The first build downloads several GB (depot_tools, V8 and its dependencies, V8's own clang, lld and libc++).
+`build.sh` needs python3, which unpacks the profile. V8 takes about 15 minutes on an M-series Mac and one to two hours
+on a 4-core machine, the library's link-time optimisation a few minutes more. The library lands in
+`<work folder>/out`, with its licences.
 
 ## Licences
 
 This repository's scripts, workflow and test are under the MIT licence (`LICENSE`). The V8 patch is under V8's licence
 (BSD-3-Clause), the ClearScript patch under ClearScript's (MIT). A built library holds V8 (BSD-3-Clause), the
-third-party code V8 links in (ICU, Abseil, Highway, simdutf, fast_float, dragonbox, FP16, zlib, inspector_protocol),
-ClearScript (MIT) and nlohmann/json (MIT): their licences are in each release's `licenses` folder.
+third-party code V8 links in (ICU, Abseil, Highway, simdutf, fast_float, dragonbox, FP16, zlib, inspector_protocol;
+on macOS and Linux libc++ and libc++abi, Apache-2.0 with LLVM exceptions), ClearScript (MIT) and nlohmann/json (MIT):
+their licences are in each release's `licenses` folder. The profile in `profiles` is under this repository's licence.
 
 Not affiliated with the ClearScript or V8 projects. This repository is SSRS2's build: it takes no issues or pull
 requests.
