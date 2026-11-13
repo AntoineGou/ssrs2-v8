@@ -1,0 +1,56 @@
+diff --git a/config/compiler/BUILD.gn b/config/compiler/BUILD.gn
+index c106acf..485713c 100644
+--- a/config/compiler/BUILD.gn
++++ b/config/compiler/BUILD.gn
+@@ -457,13 +457,17 @@ config("compiler") {
+         # binary size, so only enable it in debug mode.
+         if (is_debug) {
+           cflags += [ "-fstack-protector-strong" ]
+-        } else {
++        } else if (!is_official_build) {
++          # (SSRS2: none in an official build, which is built for speed)
+           cflags += [ "-fstack-protector" ]
++        } else {
++          cflags += [ "-fno-stack-protector" ]
+         }
+       } else if (is_chromeos) {
+         cflags += [ "-fstack-protector-strong" ]
+       } else if (is_posix || is_fuchsia) {
+-        if (current_os != "aix") {
++        # (SSRS2: none in an official build, which is built for speed)
++        if (current_os != "aix" && !is_official_build) {
+           # Not available on aix.
+           cflags += [ "-fstack-protector" ]
+         }
+@@ -876,7 +880,9 @@ config("compiler") {
+ 
+     # TODO(crbug.com/40182783): investigate why this isn't effective on
+     # arm32.
+-    if (!is_android || current_cpu != "arm") {
++    # (SSRS2: not in an official build of the V8 monolith, whose mksnapshot then fails to
++    # link: "undefined symbol: vtable for v8::internal::OwningExternalStringResourceImpl<...>")
++    if ((!is_android || current_cpu != "arm") && !is_official_build) {
+       cflags += [ "-fwhole-program-vtables" ]
+ 
+       if (toolchain_supports_rust_thin_lto) {
+@@ -1625,7 +1631,9 @@ config("clang_warning_suppression") {
+ # See also: https://crbug.com/40891132#comment10
+ ubsan_hardening("c_array_bounds") {
+   sanitizer = "array-bounds"
+-  condition = !(is_asan && target_cpu == "x86")
++
++  # (SSRS2: none in an official build, which is built for speed)
++  condition = !(is_asan && target_cpu == "x86") && !is_official_build
+ 
+   # Because we've enabled array-bounds sanitizing we also want to suppress
+   # the related warning about "unsafe-buffer-usage-in-static-sized-array",
+@@ -1639,6 +1647,9 @@ ubsan_hardening("c_array_bounds") {
+ # `NOTREACHED()` at the end of such functions.
+ ubsan_hardening("return") {
+   sanitizer = "return"
++
++  # (SSRS2: none in an official build, which is built for speed)
++  condition = !is_official_build
+ }
+ 
+ # Enable `-fsanitize=unreachable` to crash deterministically if control
