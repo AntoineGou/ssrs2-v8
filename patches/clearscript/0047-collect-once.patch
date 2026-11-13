@@ -1,0 +1,66 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+index ae93a420..198386fd 100644
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "ClearScriptV8Native.h"
+ #include <cstdlib>
++#include <atomic> // SSRS2 (0047)
+ #include "v8-external-memory-accounter.h" // SSRS2 (0018)
+ 
+ //-----------------------------------------------------------------------------
+@@ -2518,9 +2519,15 @@ void V8IsolateImpl::SetStackLimit(size_t* pLimit)
+ 
+ //-----------------------------------------------------------------------------
+ 
++// SSRS2 (0047): whether a non-exhaustive collection makes one full collection (Ssrs2_CollectOnce), not two.
++std::atomic<bool> g_Ssrs2CollectOnce{ false };
++
+ void V8IsolateImpl::CollectGarbageInternal(bool exhaustive)
+ {
+-    auto failuresRemaining = exhaustive ? 100 : 1;
++    // (a non-exhaustive collection: the retried allocation succeeds after the first full collection when asked for;
++    // otherwise it fails once more, and V8 makes a second full collection, which frees what the first one's weak
++    // callbacks let go)
++    auto failuresRemaining = exhaustive ? 100 : (g_Ssrs2CollectOnce.load(std::memory_order_relaxed) ? 0 : 1);
+     auto allocate = [&failuresRemaining] () noexcept { return failuresRemaining-- <= 0; };
+     m_upIsolate->RetryCustomAllocate(allocate);
+ }
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index cf6e773c..88da00fd 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -7030,6 +7030,26 @@ NATIVE_ENTRY_POINT(int) Ssrs2_CollectedObjects(int32_t* contexts, int32_t* handl
+     return n;
+ }
+ 
++//-----------------------------------------------------------------------------
++// SSRS2 (0047): one full collection for a non-exhaustive collection.
++//
++//   int Ssrs2_CollectOnce(int32_t on);
++//
++// A non-exhaustive collection (V8Runtime.CollectGarbage(false), V8ScriptEngine.CollectGarbage(false)) asks V8 for a
++// retried allocation that fails once: V8 makes a full mark-compact, retries, and makes a second one when the retry
++// fails, which the first one's weak callbacks rarely leave anything for. With `on` non-zero, the retry succeeds after
++// the first: one full mark-compact (a second only where the heap is still at its limit, as V8 decides). Zero restores
++// the two. Process-wide, for every isolate; any thread, no isolate needed. Answers the setting before the call (0 or
++// 1). An exhaustive collection is unchanged.
++//-----------------------------------------------------------------------------
++
++extern std::atomic<bool> g_Ssrs2CollectOnce;
++
++NATIVE_ENTRY_POINT(int) Ssrs2_CollectOnce(int32_t on) noexcept
++{
++    return g_Ssrs2CollectOnce.exchange(on != 0) ? 1 : 0;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -7078,4 +7098,5 @@ NATIVE_ENTRY_POINT(int) Ssrs2_CollectedObjects(int32_t* contexts, int32_t* handl
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallTypedCalls=_Ssrs2_InstallTypedCalls@24")
+ #pragma comment(linker, "/EXPORT:Ssrs2_WatchObjects=_Ssrs2_WatchObjects@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_CollectedObjects=_Ssrs2_CollectedObjects@12")
++#pragma comment(linker, "/EXPORT:Ssrs2_CollectOnce=_Ssrs2_CollectOnce@4")
+ #endif

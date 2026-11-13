@@ -14,6 +14,8 @@ foreach (var library in Directory.GetFiles(args[0], "ClearScriptV8.*"))
 // (patches/clearscript/0041's check runs each of its trials in a child process of this program, which does that
 // trial alone: before anything else makes an isolate)
 if (SealedReadOnlySpace.IsChild) return SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First()) == SealedReadOnlySpace.Expected ? 0 : 1;
+// (patches/clearscript/0047's check, the same way: a child process traces its own collections)
+if (CollectOnce.IsChild) return CollectOnce.Child(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 // (patches/clearscript/0027, first: a process makes one snapshot blob and every isolate made after it starts from it)
 var snapshot = SnapshotContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"snapshot contexts: {snapshot}");
@@ -108,6 +110,8 @@ var watched = WatchedObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, 
 Console.WriteLine($"watched objects: {watched}");
 var arenaLimits = ArenaLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"string arena limits: {arenaLimits}");
+var collectOnce = CollectOnce.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"collect once: {collectOnce}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -120,8 +124,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
     && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected
-    && watched == WatchedObjects.Expected && arenaLimits == ArenaLimits.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}");
+    && watched == WatchedObjects.Expected && arenaLimits == ArenaLimits.Expected && collectOnce == CollectOnce.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}\ncollect once: {CollectOnce.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2767,5 +2771,71 @@ static unsafe class ArenaLimits
             return number;
         }
         return $"{Added(1L << 32)} {Added((1L << 32) + 100)} {Added(64)}";
+    }
+}
+
+// patches/clearscript/0047: Ssrs2_CollectOnce, a process-wide switch with which a non-exhaustive collection
+// (CollectGarbage(false)) makes one full collection, not two. V8's own trace of its collections (--trace-gc) counts them,
+// in a child process of this program for each setting, as 0041's trials run (the variable below set to the setting, an
+// empty folder given): SSRS2_V8_FLAGS=--trace-gc --expose-gc there, its trace on its standard output. The child makes a
+// few megabytes of garbage in a script, sets the switch twice (its answers, the setting before each call, on its
+// standard error), collects once with CollectGarbage(false), then makes 48 collections of the script's gc(), whose lines
+// only fill the C runtime's buffer of standard output (a library linked with a C runtime of its own may leave that
+// buffer unwritten at the process's exit), and ends. Counted: the trace's mark-compacts for an allocation failure, the
+// reason V8 gives a host's collection (gc()'s say "testing"). With the switch on, one; off (the library's default), two.
+static unsafe class CollectOnce
+{
+    public const string Expected = "on:1 off:2 answers:0,1";
+    const string ChildVariable = "SSRS2_SMOKE_COLLECT_ONCE_CHILD";
+
+    /// <summary>Whether this process is one setting's child: the program then runs that child alone.</summary>
+    public static bool IsChild => Environment.GetEnvironmentVariable(ChildVariable) is "0" or "1";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_CollectOnce", out _) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_CollectOnce@4", out _)) return "export missing";
+        var empty = Directory.CreateTempSubdirectory("collect-once-");
+        try
+        {
+            (int Marks, string Answers) Run(string on)
+            {
+                var start = new ProcessStartInfo(Environment.ProcessPath!) { RedirectStandardOutput = true, RedirectStandardError = true };
+                start.ArgumentList.Add(typeof(CollectOnce).Assembly.Location);
+                start.ArgumentList.Add(empty.FullName);
+                start.Environment[ChildVariable] = on;
+                start.Environment["SSRS2_V8_FLAGS"] = "--trace-gc --expose-gc";
+                using var child = Process.Start(start)!;
+                var output = child.StandardOutput.ReadToEndAsync();
+                var errors = child.StandardError.ReadToEndAsync();
+                if (!child.WaitForExit(300_000)) { child.Kill(); return (-1, "timeout"); }
+                output.Wait(); errors.Wait();
+                int marks = output.Result.Split('\n').Count(l => l.Contains("Mark-Compact", StringComparison.Ordinal) && l.Contains("allocation failure", StringComparison.Ordinal));
+                string answers = errors.Result.Split('\n').FirstOrDefault(l => l.StartsWith("answers ", StringComparison.Ordinal))?.Trim()["answers ".Length..] ?? "exit " + child.ExitCode;
+                return (marks, answers);
+            }
+            var on = Run("1");
+            var off = Run("0");
+            return $"on:{on.Marks} off:{off.Marks} answers:{on.Answers}";
+        }
+        finally { empty.Delete(true); }
+    }
+
+    // (the child: a script's garbage, the switch set, one collection, the padding, the end)
+    public static int Child(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_CollectOnce", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_CollectOnce@4", out export)) return 2;
+        var collectOnce = (delegate* unmanaged[Stdcall]<int, int>)export;
+        int on = Environment.GetEnvironmentVariable(ChildVariable) == "1" ? 1 : 0;
+        using var runtime = new V8Runtime();
+        using var engine = runtime.CreateScriptEngine();
+        engine.Execute("let a = []; for (let i = 0; i < 20000; i++) a.push({ i, s: 'x' + i, b: new Array(16).fill(i) }); a = null;");
+        int before = collectOnce(on);
+        int after = collectOnce(on);
+        runtime.CollectGarbage(false);
+        engine.Execute("for (let i = 0; i < 48; i++) gc();");
+        Console.Error.WriteLine($"answers {before},{after}");
+        return 0;
     }
 }
