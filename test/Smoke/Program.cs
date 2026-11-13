@@ -106,6 +106,8 @@ var typedCalls = TypedCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "
 Console.WriteLine($"typed calls: {typedCalls}");
 var watched = WatchedObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"watched objects: {watched}");
+var arenaLimits = ArenaLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"string arena limits: {arenaLimits}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -118,8 +120,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
     && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected
-    && watched == WatchedObjects.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}");
+    && watched == WatchedObjects.Expected && arenaLimits == ArenaLimits.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2733,5 +2735,37 @@ static unsafe class WatchedObjects
         engine.CollectGarbage(true);
         var third = (string)engine.Evaluate("take()");
         return first + ":" + (second.Length == 0 ? "0" : second) + ":" + third.Replace(" same", "");
+    }
+}
+
+// patches/clearscript/0046: a string arena's limit (0029's Ssrs2_ArenaNew) is counted in 64 bits on every target. A
+// 32-bit process kept only the limit's low 32 bits: 4 GB made a limit of 0 (every string refused), 4 GB and 100 bytes
+// one of 100. Checked: arenas of 4 GB and of 4 GB + 100 bytes each take a string of 200 characters, and one of 64 bytes
+// still refuses it. (A 64-bit library passes with or without the patch; a 32-bit one only with it.)
+static unsafe class ArenaLimits
+{
+    public const string Expected = "1 1 0";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_ArenaNew", 8, out var newExport) || !Export("Ssrs2_ArenaAdd", 12, out var addExport) || !Export("Ssrs2_ArenaRelease", 4, out var releaseExport))
+            return "export missing";
+        var make = (delegate* unmanaged[Stdcall]<long, nint>)newExport;
+        var add = (delegate* unmanaged[Stdcall]<nint, char*, int, int>)addExport;
+        var release = (delegate* unmanaged[Stdcall]<nint, void>)releaseExport;
+        string text = new string('z', 200);
+        int Added(long limit)
+        {
+            var arena = make(limit);
+            if (arena == 0) return -1;
+            int number;
+            fixed (char* chars = text) number = add(arena, chars, text.Length);
+            release(arena);
+            return number;
+        }
+        return $"{Added(1L << 32)} {Added((1L << 32) + 100)} {Added(64)}";
     }
 }

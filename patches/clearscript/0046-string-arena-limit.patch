@@ -1,0 +1,33 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index a71d23d..cf6e773 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -5066,11 +5066,18 @@ namespace Ssrs2Arena
+         std::atomic<int64_t> refs{ 1 };
+         std::vector<char*> blocks;
+         std::vector<Entry> entries;
+-        size_t blockSize = 0, blockUsed = 0, bytes = 0, limit = 0;
++        size_t blockSize = 0, blockUsed = 0;
++        // (0046: counted in 64 bits on every target: a 32-bit process's limit of 4 GB or more means what was asked, more
++        // than the process can hold, not the limit's low 32 bits)
++        uint64_t bytes = 0, limit = 0;
+         bool released = false;
+ 
+         char* Reserve(size_t size)
+         {
++            if (size > SIZE_MAX - 7)
++            {
++                return nullptr;
++            }
+             size = (size + 7) & ~static_cast<size_t>(7);
+             if (bytes + size > limit)
+             {
+@@ -5268,7 +5275,7 @@ NATIVE_ENTRY_POINT(void*) Ssrs2_ArenaNew(int64_t limit) noexcept
+     auto arena = new (std::nothrow) Ssrs2Arena::Arena();
+     if (arena != nullptr)
+     {
+-        arena->limit = limit <= 0 ? static_cast<size_t>(1) << 28 : static_cast<size_t>(limit);
++        arena->limit = limit <= 0 ? static_cast<uint64_t>(1) << 28 : static_cast<uint64_t>(limit);
+     }
+     return arena;
+ }
