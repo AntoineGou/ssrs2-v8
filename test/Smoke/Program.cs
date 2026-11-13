@@ -104,6 +104,8 @@ var directInPlace = DirectCallsInPlace.Check(Directory.GetFiles(AppContext.BaseD
 Console.WriteLine($"direct calls in place: {directInPlace}");
 var typedCalls = TypedCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"typed calls: {typedCalls}");
+var watched = WatchedObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"watched objects: {watched}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -115,8 +117,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
-    && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}");
+    && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected
+    && watched == WatchedObjects.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2678,5 +2681,57 @@ static unsafe class TypedCalls
             out.push(refused());
             out.join(':')
             """);
+    }
+}
+
+// patches/clearscript/0045: Ssrs2_WatchObjects and Ssrs2_CollectedObjects. In a context with a handle table (0030), the
+// script puts objects under handles 3, 5 and 7 and a number under 9; the host watches 3, 5, 7, 9 and 99 (out of the
+// table): three watched. The script lets go of 3 and 7 and keeps 5 elsewhere; after a full collection the host takes
+// the reports: 3 and 7 with the context's number, not 5; a second take is empty; then 5 let go too and reported.
+
+static unsafe class WatchedObjects
+{
+    public const string Expected = "3:3,7 same:0:5";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_WatchObjects", out var watchExport) || !NativeLibrary.TryGetExport(handle, "Ssrs2_CollectedObjects", out var takeExport)) return "export missing";
+        var installHandles = (delegate* unmanaged[Stdcall]<byte*, byte*, int>)NativeLibrary.GetExport(handle, "Ssrs2_InstallHandles");
+        var number = (delegate* unmanaged[Stdcall]<int>)NativeLibrary.GetExport(handle, "Ssrs2_ContextNumber");
+        var watch = (delegate* unmanaged[Stdcall]<int*, int, int>)watchExport;
+        var take = (delegate* unmanaged[Stdcall]<int*, int*, int, int>)takeExport;
+        using var engine = new V8ScriptEngine();
+        int context = 0;
+        engine.AddHostObject("installHandles", new Func<bool>(() =>
+        {
+            context = number();
+            fixed (byte* holder = "__w\0"u8, name = "handles\0"u8) return installHandles(holder, name) == 1;
+        }));
+        engine.AddHostObject("watch", new Func<int>(() => { int* h = stackalloc int[5] { 3, 5, 7, 9, 99 }; return watch(h, 5); }));
+        engine.AddHostObject("take", new Func<string>(() =>
+        {
+            int* c = stackalloc int[8]; int* h = stackalloc int[8];
+            int n = take(c, h, 8);
+            var parts = new List<string>();
+            bool same = true;
+            for (int i = 0; i < n; i++) { parts.Add(h[i].ToString()); same &= c[i] == context; }
+            return string.Join(",", parts) + (n > 0 && same ? " same" : "");
+        }));
+        engine.Execute("""
+            installHandles();
+            const t = __w.handles;
+            t[3] = { a: 1 }; t[5] = { b: 2 }; t[7] = [1, 2]; t[9] = 42;
+            globalThis.kept = t[5];
+            globalThis.count = watch();
+            t[3] = undefined; t[5] = undefined; t[7] = undefined;
+            """);
+        engine.CollectGarbage(true);
+        var first = (string)engine.Evaluate("count + ':' + take()");
+        var second = (string)engine.Evaluate("take()");
+        engine.Execute("globalThis.kept = undefined;");
+        engine.CollectGarbage(true);
+        var third = (string)engine.Evaluate("take()");
+        return first + ":" + (second.Length == 0 ? "0" : second) + ":" + third.Replace(" same", "");
     }
 }

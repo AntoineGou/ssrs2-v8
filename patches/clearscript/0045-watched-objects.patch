@@ -1,0 +1,116 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index d4a02b0..a71d23d 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -5590,6 +5590,10 @@ namespace Ssrs2Recording
+         // (0044: the typed calls' templates, Ssrs2TypedCalls::Cache, freed with the isolate)
+         void* typed = nullptr;
+         void (*typedGone)(void*) = nullptr;
++        // (0045: the objects watched, and the reports of those collected not taken yet: context number, handle)
++        std::unordered_set<void*> watches;
++        void (*watchesGone)(Isolates*) = nullptr;
++        std::vector<std::pair<int32_t, int32_t>> collected;
+     };
+ 
+     struct Recorder
+@@ -6519,6 +6523,7 @@ namespace Ssrs2Recording
+             }
+         }
+         if (all->typed != nullptr && all->typedGone != nullptr) all->typedGone(all->typed);
++        if (all->watchesGone != nullptr) all->watchesGone(all);
+         delete all;
+         isolate->SetData(kIsolateSlot, nullptr);
+     }
+@@ -6939,6 +6944,85 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallTypedCalls(const char* holder, int32_t coun
+     return 1;
+ }
+ 
++#include <algorithm>
++
++//-----------------------------------------------------------------------------
++// SSRS2 (0045): objects watched for their collection. The host names objects by their handles in the current context's
++// table (0030); when V8 collects one, its context's number and its handle are queued for the isolate, never a call into
++// the host from the collector; the host takes the queue when it likes.
++//
++//   int Ssrs2_WatchObjects(const int32_t* handles, int32_t count);
++//   int Ssrs2_CollectedObjects(int32_t* contexts, int32_t* handles, int32_t capacity);
++//
++// Ssrs2_WatchObjects (inside a host call, the context current): answers how many of the handles named an object it now
++// watches (a value that is no object, or a handle out of the table, is skipped; an object watched twice is reported
++// twice). Ssrs2_CollectedObjects: moves up to `capacity` reports into the arrays, the oldest first, and answers how many;
++// on the isolate's thread with the isolate entered. A report says the object is gone: the handle may name something else
++// by then if the script put another value there.
++//-----------------------------------------------------------------------------
++
++namespace Ssrs2Watch
++{
++    struct Watch
++    {
++        v8::Global<v8::Value> object;
++        int32_t context;
++        int32_t handle;
++        Ssrs2Recording::Isolates* owner;
++    };
++
++    static void Gone(const v8::WeakCallbackInfo<Watch>& info)
++    {
++        auto w = info.GetParameter();
++        w->object.Reset();
++        if (auto owner = w->owner)
++        {
++            owner->collected.push_back({ w->context, w->handle });
++            owner->watches.erase(w);
++        }
++        delete w;
++    }
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_WatchObjects(const int32_t* handles, int32_t count) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || !isolate->InContext() || handles == nullptr || count < 0) return 0;
++    v8::HandleScope scope(isolate);
++    auto context = isolate->GetCurrentContext();
++    int32_t number = Ssrs2Contexts::NumberOf(isolate, context);
++    auto all = Ssrs2Recording::IsolatesOf(isolate, true);
++    all->watchesGone = [](Ssrs2Recording::Isolates* owner)
++    {
++        for (auto p : owner->watches) { auto w = static_cast<Ssrs2Watch::Watch*>(p); w->object.Reset(); delete w; }
++        owner->watches.clear();
++    };
++    int watched = 0;
++    for (int32_t i = 0; i < count; i++)
++    {
++        v8::Local<v8::Value> value;
++        if (!Ssrs2HandleValue(isolate, handles[i]).ToLocal(&value) || !value->IsObject()) continue;
++        auto w = new Ssrs2Watch::Watch{ v8::Global<v8::Value>(isolate, value), number, handles[i], all };
++        w->object.SetWeak(w, Ssrs2Watch::Gone, v8::WeakCallbackType::kParameter);
++        all->watches.insert(w);
++        watched++;
++    }
++    return watched;
++}
++
++NATIVE_ENTRY_POINT(int) Ssrs2_CollectedObjects(int32_t* contexts, int32_t* handles, int32_t capacity) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr || contexts == nullptr || handles == nullptr || capacity <= 0) return 0;
++    auto all = Ssrs2Recording::IsolatesOf(isolate, false);
++    if (all == nullptr) return 0;
++    auto& queue = all->collected;
++    int32_t n = static_cast<int32_t>(std::min<size_t>(queue.size(), static_cast<size_t>(capacity)));
++    for (int32_t i = 0; i < n; i++) { contexts[i] = queue[static_cast<size_t>(i)].first; handles[i] = queue[static_cast<size_t>(i)].second; }
++    queue.erase(queue.begin(), queue.begin() + n);
++    return n;
++}
++
+ #if defined(_M_IX86)
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallDirectCalls=_Ssrs2_InstallDirectCalls@20")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallFastCalls=_Ssrs2_InstallFastCalls@24")
+@@ -6985,4 +7069,6 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallTypedCalls(const char* holder, int32_t coun
+ #pragma comment(linker, "/EXPORT:Ssrs2_RecordingReserve=_Ssrs2_RecordingReserve@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_RecordingTrim=_Ssrs2_RecordingTrim@4")
+ #pragma comment(linker, "/EXPORT:Ssrs2_InstallTypedCalls=_Ssrs2_InstallTypedCalls@24")
++#pragma comment(linker, "/EXPORT:Ssrs2_WatchObjects=_Ssrs2_WatchObjects@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_CollectedObjects=_Ssrs2_CollectedObjects@12")
+ #endif
