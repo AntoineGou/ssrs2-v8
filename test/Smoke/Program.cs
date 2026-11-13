@@ -100,6 +100,8 @@ var sealedReadOnly = SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.Bas
 Console.WriteLine($"sealed read-only space: {sealedReadOnly}");
 var recording = RecordingFunctions.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
 Console.WriteLine($"recording functions: {recording}");
+var directInPlace = DirectCallsInPlace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+Console.WriteLine($"direct calls in place: {directInPlace}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -111,8 +113,8 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && callsIn == CallsInContext.Expected && immutableByHandle == ImmutablePrototypesByHandle.Expected && proxies == ProxyKinds.Expected
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
-    && recording == RecordingFunctions.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}");
+    && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2544,5 +2546,67 @@ static unsafe class RecordingFunctions
             out.join(':')
             """;
         return (string)engine.Evaluate(js);
+    }
+}
+
+// patches/clearscript/0043: the direct calls (0003's Ssrs2_InstallDirectCalls) read their number arguments in place (a
+// small integer, a heap number), answer a whole number of 32 bits as a small integer, and know their slot without V8's
+// function data for the first 4,096 slots. A speed patch: what a script sees must not change, and this check says so
+// on both sides of it (it passes before 0043 too): numbers of every shape given (small integers, doubles, -0, NaN,
+// Infinity, 2^31, a Number object, strings, booleans, null, undefined, a typed array) and the kind and value the host
+// read; numbers answered (-0 kept negative, 2^31, 3, 1.5, NaN); a slot past the table (5,000) answering as one inside it.
+
+static unsafe class DirectCallsInPlace
+{
+    public const string Expected = "2:3|2:-1.5|2:0|2:-0|2:NaN|2:Infinity|2:2147483648|6:0|4:0|3:0|1:0|0:0|5:0"
+        + ":-0 true|2147483648|3|1.5|NaN:-0 true|2147483648|3|1.5|NaN";
+
+    [StructLayout(LayoutKind.Sequential)] struct Value { public int Kind, Length; public double Number; public void* Data; }
+
+    static readonly List<string> s_seen = new();
+    static int s_answer;
+    static readonly double[] s_answers = [-0.0, 2147483648.0, 3, 1.5, double.NaN];
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    static void Dispatch(int slot, Value* args, int count, Value* result)
+    {
+        if (count > 0)
+        {
+            var a = args[0];
+            string n = a.Kind == 2 ? (double.IsNegative(a.Number) && a.Number == 0 ? "-0" : a.Number.ToString(System.Globalization.CultureInfo.InvariantCulture)) : "0";
+            s_seen.Add(a.Kind + ":" + n);
+            return;
+        }
+        result->Kind = 2;
+        result->Number = s_answers[s_answer++ % s_answers.Length];
+    }
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        if (!NativeLibrary.TryGetExport(handle, "Ssrs2_InstallDirectCalls", out var export) && !NativeLibrary.TryGetExport(handle, "_Ssrs2_InstallDirectCalls@20", out export)) return "export missing";
+        var install = (delegate* unmanaged[Stdcall]<byte*, int, byte**, int*, void*, int>)export;
+        using var engine = new V8ScriptEngine();
+        engine.AddHostObject("install", new Func<bool>(() =>
+        {
+            fixed (byte* holder = "__direct\0"u8, a = "inside\0"u8, b = "past\0"u8)
+            {
+                byte** names = stackalloc byte*[2]; names[0] = a; names[1] = b;
+                int* slots = stackalloc int[2]; slots[0] = 5; slots[1] = 5000;
+                return install(holder, 2, names, slots, (delegate* unmanaged[Cdecl]<int, Value*, int, Value*, void>)&Dispatch) == 1;
+            }
+        }));
+        var answered = (string)engine.Evaluate("""
+            install();
+            const d = __direct, out = [];
+            for (const v of [3, -1.5, 0, -0, NaN, Infinity, 2147483648, new Number(4), 'x', true, null, undefined, new Uint8Array(2)]) d.inside(v);
+            for (const f of [d.inside, d.past]) {
+              const r = [];
+              for (let i = 0; i < 5; i++) { const v = f(); r.push(Object.is(v, -0) ? '-0 ' + (1 / v === -Infinity) : String(v)); }
+              out.push(r.join('|'));
+            }
+            out.join(':')
+            """);
+        return string.Join("|", s_seen) + ":" + answered;
     }
 }

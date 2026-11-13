@@ -1,0 +1,190 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index df1fa0e..b52d897 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -2137,6 +2137,19 @@ static v8::MaybeLocal<v8::Value> Ssrs2HandleValue(v8::Isolate* isolate, int32_t
+ // (0032, below: a value left under a handle of a context's table; false where the context has no table)
+ static bool Ssrs2HandlePut(v8::Local<v8::Context> context, int32_t handle, v8::Local<v8::Value> value);
+ 
++#include <array>
++#include <cmath>
++#include <utility>
++
++// (0043, below with the recording's per-isolate data (isolate data slot 1, its first field): the isolate's heap number
++// map, 0 where not checked or not found)
++static v8::internal::Address Ssrs2NumberMapSlow(v8::Isolate* isolate);
++static inline v8::internal::Address Ssrs2NumberMap(v8::Isolate* isolate)
++{
++    auto first = static_cast<const v8::internal::Address*>(isolate->GetData(1));
++    return first != nullptr && *first != 0 ? *first : Ssrs2NumberMapSlow(isolate);
++}
++
+ namespace Ssrs2DirectCalls
+ {
+     // (8 to 10 are 0030's: a script value by its handle, one found in a table by an index, a value to throw again)
+@@ -2155,20 +2168,33 @@ namespace Ssrs2DirectCalls
+     static Dispatch g_dispatch = nullptr;
+     constexpr int32_t MaxArgs = 16;
+ 
+-    static void Callback(const v8::FunctionCallbackInfo<v8::Value>& info)
++    // (0043: numbers read in place, a small integer answered as one, the strings' room taken only where there are
++    // strings; the same values given and answered as before)
++    static void CallSlot(int32_t slot, const v8::FunctionCallbackInfo<v8::Value>& info)
+     {
++        using I = v8::internal::Internals;
+         auto isolate = info.GetIsolate();
+-        int32_t slot = info.Data().As<v8::Int32>()->Value();
+         int32_t count = info.Length() < MaxArgs ? info.Length() : MaxArgs;
+         Value args[MaxArgs];
+-        thread_local std::vector<uint16_t> chars;
+         size_t total = 0;
++        auto numberMap = Ssrs2NumberMap(isolate);
+         for (int32_t i = 0; i < count; i++)
+         {
+             auto value = info[i];
+             Value& arg = args[i];
+             arg = Value{ Undefined, 0, 0, nullptr };
+-            if (value->IsNumber())
++            auto a = v8::internal::ValueHelper::ValueAsAddress(*value);
++            if (!I::HasHeapObjectTag(a))
++            {
++                arg.kind = Number;
++                arg.number = I::SmiValue(a);
++            }
++            else if (numberMap != 0 && I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset) == numberMap)
++            {
++                arg.kind = Number;
++                arg.number = I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address)));
++            }
++            else if (value->IsNumber())
+             {
+                 arg.kind = Number;
+                 arg.number = value.As<v8::Number>()->Value();
+@@ -2211,6 +2237,7 @@ namespace Ssrs2DirectCalls
+         // (the strings written once their room is known: the buffer does not move after)
+         if (total > 0)
+         {
++            thread_local std::vector<uint16_t> chars;
+             if (chars.size() < total)
+             {
+                 chars.resize(total);
+@@ -2229,16 +2256,24 @@ namespace Ssrs2DirectCalls
+         Value result{ Undefined, 0, 0, nullptr };
+         g_dispatch(slot, args, count, &result);
+         // (0033: the host stopped the script while this call ran script of its own, Ssrs2_Call's -2: nothing is
+-        // answered or thrown over the termination, which goes on to the caller)
+-        if (isolate->IsExecutionTerminating())
++        // answered or thrown over the termination, which goes on to the caller. 0043: asked before what makes a value
++        // or throws; a number, a boolean or null set as the answer during a termination is dropped by V8 as any answer)
++        if (result.kind > Null && isolate->IsExecutionTerminating())
+         {
+             return;
+         }
+         switch (result.kind)
+         {
+             case Number:
+-                info.GetReturnValue().Set(result.number);
++            {
++                // (a whole number of 32 bits, not -0: a small integer, no number made)
++                double n = result.number;
++                if (n >= -2147483648.0 && n <= 2147483647.0 && n == static_cast<double>(static_cast<int32_t>(n)) && !(n == 0 && std::signbit(n)))
++                    info.GetReturnValue().Set(static_cast<int32_t>(n));
++                else
++                    info.GetReturnValue().Set(n);
+                 break;
++            }
+             case Boolean:
+                 info.GetReturnValue().Set(result.number != 0);
+                 break;
+@@ -2279,6 +2314,17 @@ namespace Ssrs2DirectCalls
+     }
+ }
+ 
++namespace Ssrs2DirectCalls
++{
++    // (0043: a slot's function knows its slot, a function of a table of them: V8's data for the function is read only
++    // by the slots past the table)
++    template <int K> static void Slot(const v8::FunctionCallbackInfo<v8::Value>& info) { CallSlot(K, info); }
++    static void Callback(const v8::FunctionCallbackInfo<v8::Value>& info) { CallSlot(info.Data().As<v8::Int32>()->Value(), info); }
++    template <size_t... I> static constexpr std::array<v8::FunctionCallback, sizeof...(I)> Slots(std::index_sequence<I...>) { return { { &Slot<static_cast<int>(I)>... } }; }
++    static constexpr auto kSlots = Slots(std::make_index_sequence<4096>{});
++    static v8::FunctionCallback CallbackOf(int32_t slot) { return slot >= 0 && static_cast<size_t>(slot) < kSlots.size() ? kSlots[static_cast<size_t>(slot)] : Callback; }
++}
++
+ // The functions made: on the object global[holder] (made if missing), names[i] calling the dispatcher with slots[i]. In a
+ // host call only (the isolate entered, a context current); 0 otherwise.
+ NATIVE_ENTRY_POINT(int) Ssrs2_InstallDirectCalls(const char* holder, int32_t count, const char* const* names, const int32_t* slots, void* dispatch) noexcept
+@@ -2310,7 +2356,7 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallDirectCalls(const char* holder, int32_t cou
+     for (int32_t i = 0; i < count; i++)
+     {
+         v8::Local<v8::Function> function;
+-        if (!v8::Function::New(context, Ssrs2DirectCalls::Callback, v8::Integer::New(isolate, slots[i]), 0, v8::ConstructorBehavior::kThrow).ToLocal(&function))
++        if (!v8::Function::New(context, Ssrs2DirectCalls::CallbackOf(slots[i]), v8::Integer::New(isolate, slots[i]), 0, v8::ConstructorBehavior::kThrow).ToLocal(&function))
+         {
+             return 0;
+         }
+@@ -5535,11 +5581,12 @@ namespace Ssrs2Recording
+ 
+     struct Isolates
+     {
++        // (first, read in place by the direct calls, Ssrs2NumberMap: the heap number map as this isolate's numbers have
++        // it, a number argument then read in place; 0 where it could not be checked, every number read through the API)
++        v8::internal::Address heapNumberMap = 0;
++        bool numberMapChecked = false;
+         std::vector<std::unique_ptr<PlanTemplates>> plans;
+         std::unordered_set<Recorder*> live;
+-        // (the heap number map as this isolate's numbers have it: a number argument read in place; 0 where it could not
+-        // be checked, every number then read through the API)
+-        v8::internal::Address heapNumberMap = 0;
+     };
+ 
+     struct Recorder
+@@ -6574,6 +6621,30 @@ namespace Ssrs2Recording
+     }
+ }
+ 
++namespace Ssrs2Recording
++{
++    // (the isolate's heap number map, found once: a heap number's map and value where V8's own layout says, else 0 and
++    // every number read through the API)
++    static v8::internal::Address NumberMapOf(v8::Isolate* isolate)
++    {
++        auto all = IsolatesOf(isolate, true);
++        if (all->heapNumberMap == 0 && !all->numberMapChecked)
++        {
++            using I = v8::internal::Internals;
++            all->numberMapChecked = true;
++            v8::HandleScope scope(isolate);
++            const double probe = 0.1234567;
++            auto number = v8::Number::New(isolate, probe);
++            auto a = v8::internal::ValueHelper::ValueAsAddress(*number);
++            if (I::HasHeapObjectTag(a) && I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address))) == probe)
++                all->heapNumberMap = I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset);
++        }
++        return all->heapNumberMap;
++    }
++}
++
++static v8::internal::Address Ssrs2NumberMapSlow(v8::Isolate* isolate) { return Ssrs2Recording::NumberMapOf(isolate); }
++
+ // (V8IsolateImpl's destructor through Ssrs2IsolateGone: the recording's per-isolate data freed)
+ static void Ssrs2RecordingIsolateGone(v8::Isolate* isolate) { Ssrs2Recording::IsolateGone(isolate); }
+ 
+@@ -6613,16 +6684,7 @@ NATIVE_ENTRY_POINT(int) Ssrs2_InstallRecording(const char* holder, const double*
+         templates->plan = found;
+         templates->kinds.resize(found->kinds.size());
+     }
+-    if (all->heapNumberMap == 0)
+-    {
+-        // (a heap number read in place where its map and value are where V8's own layout says: else through the API)
+-        using I = v8::internal::Internals;
+-        const double probe = 0.1234567;
+-        auto number = v8::Number::New(isolate, probe);
+-        auto a = v8::internal::ValueHelper::ValueAsAddress(*number);
+-        if (I::HasHeapObjectTag(a) && I::ReadRawField<double>(a, I::kHeapObjectMapOffset + static_cast<int>(sizeof(v8::internal::Address))) == probe)
+-            all->heapNumberMap = I::ReadRawField<v8::internal::Address>(a, I::kHeapObjectMapOffset);
+-    }
++    NumberMapOf(isolate);
+     g_made.store(reinterpret_cast<Made>(made));
+     g_sync.store(reinterpret_cast<Sync>(sync));
+     g_answer.store(reinterpret_cast<Answer>(answer));
