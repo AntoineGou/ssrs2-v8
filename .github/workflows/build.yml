@@ -70,6 +70,9 @@ jobs:
   test:
     name: Test ${{ matrix.rid }}
     needs: build
+    # (each RID that built is tested though another failed: a RID whose build failed fails here at its download; the
+    # release still needs every test)
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
