@@ -126,14 +126,19 @@ cxxflags+=" -I$v8dir/buildtools/third_party/libc++ -D_LIBCPP_HARDENING_MODE=_LIB
 cxxflags+=" -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS -D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS -D_LIBCPP_INSTRUMENTED_WITH_ASAN=0"
 cxxflags+=" -flto=thin -fsplit-lto-unit -fno-stack-protector -fprofile-use=$profile"
 cxxflags+=" -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin"
+# (and V8's own target and CPU flags, as its compiles have them, after the makefile's --target: code compiled for
+# another CPU or triple is not inlined into V8's at the link, nor V8's into it; the makefile's are armv6 for linux-arm
+# where V8 is armv7 Thumb with NEON, x86-64 without SSE3 on Linux)
+cxxflags+=" $(ninja -C "$v8dir/$v8out" -t commands obj/v8_libbase/bits.o | tail -1 | tr ' ' '\n' \
+    | grep -E '^(--target=|-march=|-mcpu=|-mtune=|-mfloat-abi=|-mfpu=|-mthumb$|-m(32|64)$|-msse|-mavx|-mmacos-version-min=)' | tr '\n' ' ')"
 ltoflags="-nostdlib++ -fuse-ld=lld -Wl,--thinlto-jobs=all -Wl,-mllvm,-import-instr-limit=30 $cxxlib"
 if [[ "$os" == linux ]]; then
     cxxflags+=" --sysroot=$sysroot"
     # (the makefile's own flags, -static-libstdc++ aside)
     linkflags="-s -static-libgcc -ldl -lrt -lm --no-undefined -Wl,--exclude-libs,ALL $ltoflags"
 else
-    # (V8's clang is not Xcode's: it is given V8's target, the SDK, and the macOS version V8 is built for)
-    cxxflags+=" --target=$([[ "$cpu" == arm64 ]] && echo arm64 || echo x86_64)-apple-macos -isysroot $(xcrun --show-sdk-path) -mmacos-version-min=$(grep -o 'mac_deployment_target = "[0-9.]*"' "$v8dir/build/config/mac/mac_sdk.gni" | grep -o '[0-9.]*')"
+    # (V8's clang is not Xcode's: it is given the SDK)
+    cxxflags+=" -isysroot $(xcrun --show-sdk-path)"
     linkflags="-framework CoreFoundation $ltoflags"
 fi
 out="$root/bin/Release/Unix"

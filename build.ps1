@@ -141,6 +141,13 @@ $gnArgs = 'fatal_linker_warnings=false', 'is_cfi=false', 'is_component_build=fal
     'thin_lto_enable_optimizations=true', 'chrome_pgo_phase=0', 'symbol_level=0', 'v8_symbol_level=0', 'init_stack_vars=false',
     'v8_enable_maglev_graph_printer=false'
 New-Item -ItemType Directory -Force $out | Out-Null
+# (an official Windows build stamps its binaries with a time offset by Chrome's patch number, read from chrome\VERSION,
+# which a V8 checkout does not have: V8's own version numbers in its place)
+if (-not (Test-Path chrome\VERSION)) {
+    $v = $v8Revision.Split('.')
+    New-Item -ItemType Directory -Force chrome | Out-Null
+    Set-Content chrome\VERSION "MAJOR=$($v[0])`nMINOR=$($v[1])`nBUILD=$($v[2])`nPATCH=$($v[3])"
+}
 Set-Content "$out\args.gn" ($gnArgs -join "`n")
 Invoke-Native 'gn gen' { gn gen $out } 'gn.log'
 # (-k 0: every file that fails, not the first few, while V8 15.6 is ported to this platform)
@@ -171,7 +178,10 @@ $project = "ClearScriptV8\win-$Cpu\ClearScriptV8.win-$Cpu.vcxproj"
 # more, which they would treat as errors.
 $llvm = "$root\V8\build\v8\third_party\llvm-build\Release+Asserts"
 $llvmVersion = (Get-ChildItem "$llvm\lib\clang" -Directory | Select-Object -First 1).Name
+# (and V8's own CPU flags, SSE3 on x86 and x64: code compiled for another CPU is not inlined into V8's at the link, nor
+# V8's into it)
 $env:_CL_ = '-Wno-deprecated-declarations -Wno-error -flto=thin -fsplit-lto-unit'
+if ($Cpu -ne 'arm64') { $env:_CL_ += ' -msse3' }
 $env:_LINK_ = '/opt:lldltojobs=all -mllvm:-import-instr-limit=30'
 Invoke-Native 'MSBuild' { msbuild $project -p:Configuration=Release -p:Platform=$platform "-p:SolutionDir=$root\" "-p:LLVMInstallDir=$llvm" -p:LLVMToolsVersion=$llvmVersion -p:UseLldLink=true -m -v:minimal -nologo }
 $dll = "$root\bin\Release\ClearScriptV8.win-$Cpu.dll"
