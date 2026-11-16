@@ -170,11 +170,39 @@ index 6ac7fac1..4ca9f7eb 100644
          }
  
          private static IEnumerable<string> GetDirPaths(string platform, string architecture)
+diff --git a/NetCore/ClearScript.Core/ClearScript.Core.csproj b/NetCore/ClearScript.Core/ClearScript.Core.csproj
+index 53d46a19..7a06e0b1 100644
+--- a/NetCore/ClearScript.Core/ClearScript.Core.csproj
++++ b/NetCore/ClearScript.Core/ClearScript.Core.csproj
+@@ -28,6 +28,12 @@
+         <DocumentationFile>..\..\bin\Release\$(TargetFramework)\ClearScript.Core.xml</DocumentationFile>
+     </PropertyGroup>
+ 
++    <!-- SSRS2 (-p:Ssrs2Managed=true): the build's own assembly name (its namespaces are renamed by build-managed.sh):
++         a changed build does not carry ClearScript's names, and loads beside ClearScript's own in one application. -->
++    <PropertyGroup Condition="'$(Ssrs2Managed)' == 'true'">
++        <AssemblyName>SSRS2.ClearScript.Core</AssemblyName>
++    </PropertyGroup>
++
+     <PropertyGroup Condition="Exists('$(SolutionDir)ClearScript.snk')">
+         <SignAssembly>true</SignAssembly>
+         <AssemblyOriginatorKeyFile>$(SolutionDir)ClearScript.snk</AssemblyOriginatorKeyFile>
 diff --git a/NetCore/ClearScript.V8/ClearScript.V8.csproj b/NetCore/ClearScript.V8/ClearScript.V8.csproj
-index e4d0ce65..abd57874 100644
+index e4d0ce65..a7920711 100644
 --- a/NetCore/ClearScript.V8/ClearScript.V8.csproj
 +++ b/NetCore/ClearScript.V8/ClearScript.V8.csproj
-@@ -180,6 +180,13 @@
+@@ -26,6 +26,10 @@
+         <DocumentationFile>..\..\bin\Release\$(TargetFramework)\ClearScript.V8.xml</DocumentationFile>
+     </PropertyGroup>
+ 
++    <PropertyGroup Condition="'$(Ssrs2Managed)' == 'true'">
++        <AssemblyName>SSRS2.ClearScript.V8</AssemblyName>
++    </PropertyGroup>
++
+     <PropertyGroup Condition="Exists('$(SolutionDir)ClearScript.snk')">
+         <SignAssembly>true</SignAssembly>
+         <AssemblyOriginatorKeyFile>$(SolutionDir)ClearScript.snk</AssemblyOriginatorKeyFile>
+@@ -180,6 +184,13 @@
          <ProjectReference Include="..\..\NetStandard\ClearScript.V8.ICUData\ClearScript.V8.ICUData.csproj" />
      </ItemGroup>
  

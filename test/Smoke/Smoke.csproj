@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Loads a ClearScriptV8 library built here through ClearScript's managed side (no native package) and runs smoke.js.
-       -p:ClearScriptManaged=<folder>: the managed assemblies build-managed.sh made (its out-managed/lib/net8.0), in
-       place of ClearScript's package: the pair a release carries, tested together. -->
+  <!-- Loads a library built here (SSRS2.ClearScriptV8.<rid>) through the managed assemblies built here and runs
+       smoke.js: -p:ClearScriptManaged=<folder> names build-managed.sh's out-managed/lib/net8.0. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -10,12 +9,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.ClearScript.V8" Version="7.5.1.1" Condition="'$(ClearScriptManaged)' == ''" />
-    <None Include="smoke.js;expected.txt" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-  <ItemGroup Condition="'$(ClearScriptManaged)' != ''">
-    <Reference Include="ClearScript.Core" HintPath="$(ClearScriptManaged)/ClearScript.Core.dll" />
-    <Reference Include="ClearScript.V8" HintPath="$(ClearScriptManaged)/ClearScript.V8.dll" />
+    <Reference Include="SSRS2.ClearScript.Core" HintPath="$(ClearScriptManaged)/SSRS2.ClearScript.Core.dll" />
+    <Reference Include="SSRS2.ClearScript.V8" HintPath="$(ClearScriptManaged)/SSRS2.ClearScript.V8.dll" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <None Include="smoke.js;expected.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

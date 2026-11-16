@@ -8,7 +8,7 @@
 #
 # Needs Visual Studio 2022 with the C++ workload, its Clang tools (ClearScript's projects are ClangCL's) and the Windows
 # SDK with its debugging tools, as ClearScript's V8Update.cmd does. Downloads several GB the first time (depot_tools,
-# V8 and its dependencies). Writes <work folder>\out\ClearScriptV8.win-<cpu>.dll.
+# V8 and its dependencies). Writes <work folder>\out\SSRS2.ClearScriptV8.win-<cpu>.dll.
 param(
     [Parameter(Mandatory = $true)][string]$Work,
     [ValidateSet('x64', 'x86', 'arm64')][string]$Cpu = 'x64'
@@ -186,7 +186,8 @@ $env:_LINK_ = '/opt:lldltojobs=all -mllvm:-import-instr-limit=30'
 Invoke-Native 'MSBuild' { msbuild $project -p:Configuration=Release -p:Platform=$platform "-p:SolutionDir=$root\" "-p:LLVMInstallDir=$llvm" -p:LLVMToolsVersion=$llvmVersion -p:UseLldLink=true -m -v:minimal -nologo }
 $dll = "$root\bin\Release\ClearScriptV8.win-$Cpu.dll"
 New-Item -ItemType Directory -Force "$Work\out" | Out-Null
-Copy-Item $dll "$Work\out\"
+# (under the build's own name, which its managed assemblies look for: build-managed.sh)
+Copy-Item $dll "$Work\out\SSRS2.ClearScriptV8.win-$Cpu.dll"
 
 # the licences of what the library holds: ClearScript, nlohmann/json, V8 and the third-party code V8 links in
 $licenses = "$Work\out\licenses"
@@ -202,4 +203,4 @@ foreach ($f in 'abseil-cpp/LICENSE', 'dragonbox/src/LICENSE-Apache2-LLVM', 'drag
     New-Item -ItemType Directory -Force (Split-Path $to) | Out-Null
     Copy-Item "V8\build\v8\third_party\$f" $to
 }
-Get-Item "$Work\out\ClearScriptV8.win-$Cpu.dll"
+Get-Item "$Work\out\SSRS2.ClearScriptV8.win-$Cpu.dll"

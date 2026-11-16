@@ -11,7 +11,7 @@
 # sysroots (for older glibc versions than the build machine's: the build says which). Downloads several GB the first
 # time (depot_tools, V8 and its dependencies); V8 itself takes about 15 minutes on an M-series Mac, one to two hours on a
 # 4-core runner, and needs about 15 GB of disk a CPU.
-# Writes <work folder>/out/ClearScriptV8.<rid>.<ext>.
+# Writes <work folder>/out/SSRS2.ClearScriptV8.<rid>.<ext> (the library under the name its managed assemblies look for).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mkdir -p "${1:?work folder}" && cd "$1" && pwd)"
@@ -148,7 +148,8 @@ make -f Unix/ClearScriptV8/Makefile CPU="$cpu" OUTDIR="$out" clean
 make -f Unix/ClearScriptV8/Makefile CPU="$cpu" OUTDIR="$out" CXX="$llvm/clang++" SRCDIR=ClearScriptV8 \
     CXXCROSSFLAGS="$cxxflags" CXXLINKFLAGS="$linkflags" objdir "$lib"
 mkdir -p "$work/out"
-cp "$lib" "$work/out/"
+# (under the build's own name, which its managed assemblies look for: build-managed.sh)
+cp "$lib" "$work/out/SSRS2.ClearScriptV8.$rid.$ext"
 # the licences of what the library holds: ClearScript, nlohmann/json, V8 and the third-party code V8 links in
 licenses="$work/out/licenses"
 rm -rf "$licenses"
@@ -179,4 +180,4 @@ else
     echo "Needs $needed"
     [[ "$needed" != *"libc++"* ]] || { echo "The system's libc++ is needed"; exit 1; }
 fi
-ls -la "$work/out/ClearScriptV8.$rid.$ext"
+ls -la "$work/out/SSRS2.ClearScriptV8.$rid.$ext"

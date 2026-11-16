@@ -1,8 +1,12 @@
 # SSRS2's V8 for ClearScript
 
-ClearScript's native V8 library (`ClearScriptV8.<rid>`) as [SSRS2](https://ssrs2.net) builds it: around V8 15.6.75.33,
-with changes that make the scripts of the pages SSRS2 prints faster (charts, dates and numbers above all). It takes the
-place of the library in the `Microsoft.ClearScript.V8.Native.<rid>` packages: same file name, same API, used with the
+ClearScript as [SSRS2](https://ssrs2.net) builds it, around V8 15.6.75.33, with changes that make the scripts of the
+pages SSRS2 prints faster (charts, dates and numbers above all): ClearScript 7.5.1.1's native V8 library, one a
+runtime (`SSRS2.ClearScriptV8.<rid>`), and its two managed assemblies (`SSRS2.ClearScript.Core.dll`,
+`SSRS2.ClearScript.V8.dll`). It is a changed build under its own names: the assemblies, the namespaces
+(`SSRS2.ClearScript`, where ClearScript has `Microsoft.ClearScript`) and the library's file name, with ClearScript's API
+otherwise. An application can hold it beside ClearScript's own packages, and none of its files passes for Microsoft's.
+Until release ssrs2.26 the library alone was built here, under ClearScript's file name, for use with the
 `Microsoft.ClearScript.V8` 7.5.1.1 package.
 
 On SSRS2's 300-page test report (a chart a page, drawn by Chart.js), its scripts took 815 ms against 1,419 ms with
@@ -11,11 +15,10 @@ same output byte for byte.
 
 ## The managed assemblies
 
-Since release ssrs2.27 a release also carries `ClearScript.managed.zip`: ClearScript 7.5.1.1's two managed assemblies,
-`ClearScript.Core.dll` and `ClearScript.V8.dll` (`lib/net8.0`, for .NET 8 and later), built by `build-managed.sh` from
-ClearScript's sources with `patches/clearscript-managed`. They are ClearScript's API unchanged, for use with the
-libraries built here in place of the `Microsoft.ClearScript.V8` package (`ClearScript.V8` needs Newtonsoft.Json
-13.0.3, as the package does). What the patch changes:
+Since release ssrs2.27 a release carries `ClearScript.managed.zip`: `SSRS2.ClearScript.Core.dll` and
+`SSRS2.ClearScript.V8.dll` (`lib/net8.0`, for .NET 8 and later), built by `build-managed.sh` from ClearScript 7.5.1.1's
+sources (`SSRS2.ClearScript.V8` needs Newtonsoft.Json 13.0.3, as ClearScript's package does). Beside the names, which
+the script changes in every source, `patches/clearscript-managed` changes:
 
 - no ICU data assembly: the libraries built here carry V8's ICU data, and the 10 MB `ClearScript.V8.ICUData.dll`, read
   into memory at each process's start, is neither referenced nor shipped;
@@ -23,8 +26,8 @@ libraries built here in place of the `Microsoft.ClearScript.V8` package (`ClearS
   (ClearScript hashed every script's whole text at each compile);
 - two parameters marked `scoped`, which the compiler's by-reference rules ask for when the target is .NET 7 or later.
 
-The assemblies are not signed with ClearScript's key (it is not public): .NET does not use an assembly's public key
-to bind it. The workflow's tests load each library through these assemblies.
+The assemblies are not strong-named. The version they and the libraries state stays ClearScript's, 7.5.1.1: the
+managed side checks the library's against its own. The workflow's tests load each library through these assemblies.
 
 ## What it changes
 

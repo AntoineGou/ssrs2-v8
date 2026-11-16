@@ -5,19 +5,19 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using Microsoft.ClearScript;
-using Microsoft.ClearScript.V8;
+using SSRS2.ClearScript;
+using SSRS2.ClearScript.V8;
 
 // (ClearScript loads its library from the app's folder on .NET)
-foreach (var library in Directory.GetFiles(args[0], "ClearScriptV8.*"))
+foreach (var library in Directory.GetFiles(args[0], "SSRS2.ClearScriptV8.*"))
     File.Copy(library, Path.Combine(AppContext.BaseDirectory, Path.GetFileName(library)), overwrite: true);
 // (patches/clearscript/0041's check runs each of its trials in a child process of this program, which does that
 // trial alone: before anything else makes an isolate)
-if (SealedReadOnlySpace.IsChild) return SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First()) == SealedReadOnlySpace.Expected ? 0 : 1;
+if (SealedReadOnlySpace.IsChild) return SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First()) == SealedReadOnlySpace.Expected ? 0 : 1;
 // (patches/clearscript/0047's check, the same way: a child process traces its own collections)
-if (CollectOnce.IsChild) return CollectOnce.Child(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+if (CollectOnce.IsChild) return CollectOnce.Child(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 // (patches/clearscript/0027, first: a process makes one snapshot blob and every isolate made after it starts from it)
-var snapshot = SnapshotContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var snapshot = SnapshotContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"snapshot contexts: {snapshot}");
 var script = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "smoke.js"));
 var expected = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "expected.txt")).Trim();
@@ -25,92 +25,92 @@ using var engine = new V8ScriptEngine();
 var answer = (string)engine.Evaluate(script);
 var offset = Convert.ToInt32(engine.Evaluate("new Date(0).getTimezoneOffset()"));
 Console.WriteLine($"{answer}\ntime zone offset {offset}");
-var calls = HostCalls.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var calls = HostCalls.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"host calls: {calls}");
 using var moduleEngine = new V8ScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
 var modules = Modules.Check(moduleEngine);
 Console.WriteLine($"modules: {modules}");
-var microtasks = Microtasks.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var microtasks = Microtasks.Check(engine, Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"microtasks: {microtasks}");
-var realms = CreationContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var realms = CreationContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"creation contexts: {realms}");
-var scheduled = ImportSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var scheduled = ImportSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"import scheduler: {scheduled}");
 var heap = HeapLimits.Check();
 Console.WriteLine($"heap limit: {heap}");
 var referrer = KeptReferrers.Check();
 Console.WriteLine($"kept referrer: {referrer}");
-var codeLike = CodeLikes.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var codeLike = CodeLikes.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"code-like: {codeLike}");
-var undetectable = Undetectables.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var undetectable = Undetectables.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"undetectable: {undetectable}");
-var noReferrer = NoReferrers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var noReferrer = NoReferrers.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"no referrer: {noReferrer}");
-var incumbent = Incumbents.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var incumbent = Incumbents.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"incumbent: {incumbent}");
 var evalCallers = EvalCallers.Check();
 Console.WriteLine($"eval callers: {evalCallers}");
-var links = ContextLinks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var links = ContextLinks.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"context links: {links}");
-var wasmMemory = WasmMemoryLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var wasmMemory = WasmMemoryLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"wasm memory limit: {wasmMemory}");
-var codeGen = CodeGenChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var codeGen = CodeGenChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"code generation check: {codeGen}");
-var entry = EntryContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var entry = EntryContexts.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"entry context: {entry}");
-var immutable = ImmutableGlobals.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var immutable = ImmutableGlobals.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"immutable global prototype: {immutable}");
-var immutablePrototype = ImmutablePrototypes.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var immutablePrototype = ImmutablePrototypes.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"immutable prototype: {immutablePrototype}");
-var interceptors = InterceptorObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var interceptors = InterceptorObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"interceptors: {interceptors}");
-var prototypeSetup = PrototypeSetups.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var prototypeSetup = PrototypeSetups.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"prototype setup: {prototypeSetup}");
-var scriptIds = FunctionScriptIds.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var scriptIds = FunctionScriptIds.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"function script id: {scriptIds}");
-var digests = TextDigests.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var digests = TextDigests.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"text digest: {digests}");
-var arena = StringArenas.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var arena = StringArenas.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"string arena: {arena}");
-var handleCalls = HandlesAndCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var handleCalls = HandlesAndCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"handles and calls: {handleCalls}");
-var tables = InterceptorTables.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var tables = InterceptorTables.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"interceptor tables: {tables}");
-var guards = InterceptorTableGuards.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var guards = InterceptorTableGuards.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"interceptor table guards: {guards}");
-var hostCheck = CodeGenHostChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var hostCheck = CodeGenHostChecks.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"code generation host check: {hostCheck}");
-var codeLikeSources = CodeLikeSources.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var codeLikeSources = CodeLikeSources.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"code-like sources: {codeLikeSources}");
-var callsIn = CallsInContext.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var callsIn = CallsInContext.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"calls in a context: {callsIn}");
-var immutableByHandle = ImmutablePrototypesByHandle.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var immutableByHandle = ImmutablePrototypesByHandle.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"immutable prototype by handle: {immutableByHandle}");
-var proxies = ProxyKinds.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var proxies = ProxyKinds.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"proxy kind and target: {proxies}");
-var hostScheduler = ImportHostSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var hostScheduler = ImportHostSchedulers.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"import host scheduler: {hostScheduler}");
-var namedHost = NamedHostInterceptors.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var namedHost = NamedHostInterceptors.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"named host interceptors: {namedHost}");
-var tableQueries = TableQueries.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var tableQueries = TableQueries.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"table queries: {tableQueries}");
-var tokens = SecurityTokens.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var tokens = SecurityTokens.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"security tokens: {tokens}");
-var codeLikeObjects = CodeLikeObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var codeLikeObjects = CodeLikeObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"code-like objects: {codeLikeObjects}");
-var sealedReadOnly = SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var sealedReadOnly = SealedReadOnlySpace.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"sealed read-only space: {sealedReadOnly}");
-var recording = RecordingFunctions.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var recording = RecordingFunctions.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"recording functions: {recording}");
-var directInPlace = DirectCallsInPlace.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var directInPlace = DirectCallsInPlace.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"direct calls in place: {directInPlace}");
-var typedCalls = TypedCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var typedCalls = TypedCalls.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"typed calls: {typedCalls}");
-var watched = WatchedObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var watched = WatchedObjects.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"watched objects: {watched}");
-var arenaLimits = ArenaLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var arenaLimits = ArenaLimits.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"string arena limits: {arenaLimits}");
-var collectOnce = CollectOnce.Check(Directory.GetFiles(AppContext.BaseDirectory, "ClearScriptV8.*").First());
+var collectOnce = CollectOnce.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"collect once: {collectOnce}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
@@ -135,19 +135,19 @@ static class KeptReferrers
 {
     public const string Expected = "host.js ./m.js";
 
-    internal sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    internal sealed class Loader : SSRS2.ClearScript.DocumentLoader
     {
         public string Seen = "";
-        public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
+        public override SSRS2.ClearScript.Document LoadDocument(SSRS2.ClearScript.DocumentSettings settings, SSRS2.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, SSRS2.ClearScript.DocumentCategory category, SSRS2.ClearScript.DocumentContextCallback contextCallback)
         {
             if (specifier.EndsWith("\0import()", StringComparison.Ordinal)) specifier = specifier[..^"\0import()".Length];
             Seen = $"{sourceInfo?.Name} {specifier}";
-            return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///m.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard }, "export default 1;");
+            return new SSRS2.ClearScript.StringDocument(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///m.js")) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard }, "export default 1;");
         }
 
-        public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+        public override Task<SSRS2.ClearScript.Document> LoadDocumentAsync(SSRS2.ClearScript.DocumentSettings settings, SSRS2.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, SSRS2.ClearScript.DocumentCategory category, SSRS2.ClearScript.DocumentContextCallback contextCallback) =>
             Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
     }
 
@@ -156,9 +156,9 @@ static class KeptReferrers
         using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
         var loader = new Loader();
         engine.DocumentSettings.Loader = loader;
-        using var host = engine.Compile(new Microsoft.ClearScript.DocumentInfo("host.js"), "globalThis.go = () => Function(\"return import('./m.js')\")();");
+        using var host = engine.Compile(new SSRS2.ClearScript.DocumentInfo("host.js"), "globalThis.go = () => Function(\"return import('./m.js')\")();");
         engine.Execute(host);
-        for (int i = 0; i < 1100; i++) engine.Execute(new Microsoft.ClearScript.DocumentInfo("s" + i + ".js"), i + ";");
+        for (int i = 0; i < 1100; i++) engine.Execute(new SSRS2.ClearScript.DocumentInfo("s" + i + ".js"), i + ";");
         try { engine.Invoke("go"); } catch (Exception e) { return "error " + e.Message; }
         return loader.Seen.Length > 0 ? loader.Seen : "not asked";
     }
@@ -179,7 +179,7 @@ static unsafe class NoReferrers
         if (!NativeLibrary.TryGetExport(handle, "Ssrs2_SetNoReferrerName", out var export)) return "export missing";
         var set = (delegate* unmanaged[Stdcall]<byte*, int>)export;
         using var runtime = new V8Runtime();
-        using var stand = runtime.Compile(new Microsoft.ClearScript.DocumentInfo("noref"), "0");
+        using var stand = runtime.Compile(new SSRS2.ClearScript.DocumentInfo("noref"), "0");
         fixed (byte* name = "noref\0"u8) set(name);
         const string code = "globalThis.go = () => (0, eval)(\"import('./m.js')\");";
         string first;
@@ -187,15 +187,15 @@ static unsafe class NoReferrers
         {
             var loader = new KeptReferrers.Loader();
             a.DocumentSettings.Loader = loader;
-            using (var script = a.Compile(new Microsoft.ClearScript.DocumentInfo("a.js"), code)) a.Execute(script);
+            using (var script = a.Compile(new SSRS2.ClearScript.DocumentInfo("a.js"), code)) a.Execute(script);
             try { a.Invoke("go"); } catch (Exception e) { return "error " + e.Message; }
             first = loader.Seen;
         }
         using var b = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
         var second = new KeptReferrers.Loader();
         b.DocumentSettings.Loader = second;
-        for (int i = 0; i < 1100; i++) b.Execute(new Microsoft.ClearScript.DocumentInfo("t" + i + ".js"), i + ";");
-        using (var script = b.Compile(new Microsoft.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
+        for (int i = 0; i < 1100; i++) b.Execute(new SSRS2.ClearScript.DocumentInfo("t" + i + ".js"), i + ";");
+        using (var script = b.Compile(new SSRS2.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
         try { b.Invoke("go"); } catch (Exception e) { return first + "|error " + e.Message; }
         return first + "|" + (second.Seen.Length > 0 ? second.Seen : "not asked");
     }
@@ -224,11 +224,11 @@ static class EvalCallers
         using var a = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
         var la = new KeptReferrers.Loader();
         a.DocumentSettings.Loader = la;
-        using (var script = a.Compile(new Microsoft.ClearScript.DocumentInfo("a.js"), code)) a.Execute(script);
+        using (var script = a.Compile(new SSRS2.ClearScript.DocumentInfo("a.js"), code)) a.Execute(script);
         using var b = runtime.CreateScriptEngine(V8ScriptEngineFlags.EnableDynamicModuleImports);
         var lb = new KeptReferrers.Loader();
         b.DocumentSettings.Loader = lb;
-        using (var script = b.Compile(new Microsoft.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
+        using (var script = b.Compile(new SSRS2.ClearScript.DocumentInfo("b.js"), code)) b.Execute(script);
         var first = Run(a, la);
         var second = Run(b, lb);
         var again = Run(a, la);
@@ -265,8 +265,8 @@ static class HeapLimits
                 engine.Execute("var keep = []; var t0 = Date.now(); while (Date.now() - t0 < 10000) keep.push(new Array(100000).fill(keep.length));");
                 outcome = "not stopped";
             }
-            catch (Microsoft.ClearScript.ScriptInterruptedException) { outcome = "stopped"; }
-            catch (Microsoft.ClearScript.ScriptEngineException e) { outcome = e.Message.Contains("memory limit", StringComparison.Ordinal) ? "stopped" : "error " + e.Message; }
+            catch (SSRS2.ClearScript.ScriptInterruptedException) { outcome = "stopped"; }
+            catch (SSRS2.ClearScript.ScriptEngineException e) { outcome = e.Message.Contains("memory limit", StringComparison.Ordinal) ? "stopped" : "error " + e.Message; }
             return outcome == "stopped" && started.Elapsed > TimeSpan.FromSeconds(2) ? $"stopped after {started.Elapsed.TotalSeconds:0.0} s" : outcome;
         }
         finally { s_released = true; }
@@ -280,18 +280,18 @@ static unsafe class ImportSchedulers
 {
     public const string Expected = "1:before after:2:true:before after evaluated:bad:0";
 
-    sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    sealed class Loader : SSRS2.ClearScript.DocumentLoader
     {
-        public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
+        public override SSRS2.ClearScript.Document LoadDocument(SSRS2.ClearScript.DocumentSettings settings, SSRS2.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, SSRS2.ClearScript.DocumentCategory category, SSRS2.ClearScript.DocumentContextCallback contextCallback)
         {
             if (specifier.EndsWith("\0import()", StringComparison.Ordinal)) specifier = specifier[..^"\0import()".Length];
-            return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            return new SSRS2.ClearScript.StringDocument(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
                 specifier.Contains("side", StringComparison.Ordinal) ? "globalThis.order.push('evaluated');" : "throw new Error('bad');");
         }
 
-        public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+        public override Task<SSRS2.ClearScript.Document> LoadDocumentAsync(SSRS2.ClearScript.DocumentSettings settings, SSRS2.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, SSRS2.ClearScript.DocumentCategory category, SSRS2.ClearScript.DocumentContextCallback contextCallback) =>
             Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
     }
 
@@ -308,13 +308,13 @@ static unsafe class ImportSchedulers
             else if (kind == V8PromiseRejectionEventKind.HandlerAddedAfterRejection) unhandled--;
         };
         engine.DocumentSettings.Loader = new Loader();
-        engine.DocumentSettings.AccessFlags = Microsoft.ClearScript.DocumentAccessFlags.EnableAllLoading;
+        engine.DocumentSettings.AccessFlags = SSRS2.ClearScript.DocumentAccessFlags.EnableAllLoading;
         engine.AddHostObject("install", new Func<int>(() =>
         {
             fixed (byte* holder = "ssrs2\0"u8, name = "importScheduler\0"u8) return install(holder, name);
         }));
         var installed = Convert.ToInt32(engine.Evaluate("globalThis.queued = []; const made = install(); ssrs2.importScheduler((run, name) => { queued.push([run, name]); }); made"));
-        engine.Execute(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///main2.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+        engine.Execute(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///main2.js")) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
             "globalThis.order = ['before']; import('./side2.js'); import('./bad2.js').catch(e => { globalThis.caught = e.message; }); globalThis.order.push('after');");
         var before = (string)engine.Evaluate("order.join(' ')");
         var count = Convert.ToInt32(engine.Evaluate("queued.length"));
@@ -427,7 +427,7 @@ static class Modules
 {
     public const string Expected = "hello|loader saw ./t.txt type=text|bad module|before after evaluated|import() ./bad.js ./side.js ./dyn.js|attr ./plain.js=unknown ./dyn.js=other";
 
-    sealed class Loader : Microsoft.ClearScript.DocumentLoader
+    sealed class Loader : SSRS2.ClearScript.DocumentLoader
     {
         public string Seen = "";
         // (patches/clearscript/0009: the dynamic imports' specifiers, which end with a NUL and "import()", a static
@@ -436,8 +436,8 @@ static class Modules
         // (patches/clearscript/0010: an attribute other than type, its key after a NUL and "attr=", before the type)
         public string Attributes = "attr";
 
-        public override Microsoft.ClearScript.Document LoadDocument(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback)
+        public override SSRS2.ClearScript.Document LoadDocument(SSRS2.ClearScript.DocumentSettings settings, SSRS2.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, SSRS2.ClearScript.DocumentCategory category, SSRS2.ClearScript.DocumentContextCallback contextCallback)
         {
             bool dynamic = specifier.EndsWith("\0import()", StringComparison.Ordinal);
             if (dynamic) specifier = specifier[..^"\0import()".Length];
@@ -451,23 +451,23 @@ static class Modules
             }
             if (dynamic) Dynamic += " " + specifier;
             if (specifier is "./plain.js" or "./dyn.js")
-                return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+                return new SSRS2.ClearScript.StringDocument(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
                     "export default 1;");
             int marker = specifier.IndexOf("\0type=", StringComparison.Ordinal);
             if (marker >= 0)
             {
                 Seen = $"{specifier[..marker]} type={specifier[(marker + 6)..]}";
-                return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///t.txt")) { Category = Microsoft.ClearScript.DocumentCategory.Json }, "\"hello\"");
+                return new SSRS2.ClearScript.StringDocument(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///t.txt")) { Category = SSRS2.ClearScript.DocumentCategory.Json }, "\"hello\"");
             }
             if (specifier.Contains("side", StringComparison.Ordinal))
-                return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///side.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+                return new SSRS2.ClearScript.StringDocument(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///side.js")) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
                     "globalThis.order.push('evaluated');");
-            return new Microsoft.ClearScript.StringDocument(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+            return new SSRS2.ClearScript.StringDocument(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
                 "throw new Error('bad module');");
         }
 
-        public override Task<Microsoft.ClearScript.Document> LoadDocumentAsync(Microsoft.ClearScript.DocumentSettings settings, Microsoft.ClearScript.DocumentInfo? sourceInfo,
-            string specifier, Microsoft.ClearScript.DocumentCategory category, Microsoft.ClearScript.DocumentContextCallback contextCallback) =>
+        public override Task<SSRS2.ClearScript.Document> LoadDocumentAsync(SSRS2.ClearScript.DocumentSettings settings, SSRS2.ClearScript.DocumentInfo? sourceInfo,
+            string specifier, SSRS2.ClearScript.DocumentCategory category, SSRS2.ClearScript.DocumentContextCallback contextCallback) =>
             Task.FromResult(LoadDocument(settings, sourceInfo, specifier, category, contextCallback));
     }
 
@@ -475,12 +475,12 @@ static class Modules
     {
         var loader = new Loader();
         engine.DocumentSettings.Loader = loader;
-        engine.DocumentSettings.AccessFlags = Microsoft.ClearScript.DocumentAccessFlags.EnableAllLoading;
-        engine.Execute(new Microsoft.ClearScript.DocumentInfo(new Uri("file:///main.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+        engine.DocumentSettings.AccessFlags = SSRS2.ClearScript.DocumentAccessFlags.EnableAllLoading;
+        engine.Execute(new SSRS2.ClearScript.DocumentInfo(new Uri("file:///main.js")) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
             "import t from './t.txt' with { type: 'text' }; import './plain.js' with { unknown: 'x' }; globalThis.moduleText = t;"
             + " import('./bad.js').then(() => { globalThis.moduleError = 'resolved'; }, e => { globalThis.moduleError = e.message; });"
             + " globalThis.order = ['before']; import('./side.js'); globalThis.order.push('after'); import('./dyn.js', { with: { other: 'y' } });");
-        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((Microsoft.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}|{loader.Dynamic}|{loader.Attributes}";
+        return $"{engine.Script.moduleText}|loader saw {loader.Seen}|{engine.Script.moduleError}|{string.Join(" ", ((SSRS2.ClearScript.ScriptObject)engine.Script.order).PropertyIndices.Select(i => engine.Script.order[i]))}|{loader.Dynamic}|{loader.Attributes}";
     }
 }
 
@@ -1738,7 +1738,7 @@ static unsafe class ImportHostSchedulers
             var code = specifier.Contains("side", StringComparison.Ordinal) ? "globalThis.order.push('evaluated');"
                 : specifier.Contains("decline", StringComparison.Ordinal) ? "globalThis.order.push('declined');"
                 : specifier.Contains("late", StringComparison.Ordinal) ? "globalThis.order.push('late');" : "throw new Error('bad');";
-            return new StringDocument(new DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard }, code);
+            return new StringDocument(new DocumentInfo(new Uri("file:///" + specifier.TrimStart('.', '/'))) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard }, code);
         }
 
         public override Task<Document> LoadDocumentAsync(DocumentSettings settings, DocumentInfo? sourceInfo, string specifier, DocumentCategory category, DocumentContextCallback contextCallback) =>
@@ -1816,7 +1816,7 @@ static unsafe class ImportHostSchedulers
 
         var results = new List<string>();
         results.Add(((bool)engine.Evaluate("globalThis.next = 20; const made = install(); __toy.handles[3] = run => { __toy.handles[next] = run; return next++; }; made")).ToString().ToLowerInvariant());
-        engine.Execute(new DocumentInfo(new Uri("file:///main.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+        engine.Execute(new DocumentInfo(new Uri("file:///main.js")) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
             "globalThis.order = ['before']; import('./side.js').then(() => order.push('resolved')); import('./bad.js').catch(e => { globalThis.caught = e.message; });"
             + " import('./decline.js'); globalThis.order.push('after');");
         results.Add((string)engine.Evaluate("order.join(' ')"));
@@ -1830,7 +1830,7 @@ static unsafe class ImportHostSchedulers
         // (the scheduler taken away: evaluated in a microtask, the host not asked)
         int asked = s_names.Count;
         var removed = (bool)engine.Evaluate("remove()");
-        engine.Execute(new DocumentInfo(new Uri("file:///main2.js")) { Category = Microsoft.ClearScript.JavaScript.ModuleCategory.Standard },
+        engine.Execute(new DocumentInfo(new Uri("file:///main2.js")) { Category = SSRS2.ClearScript.JavaScript.ModuleCategory.Standard },
             "globalThis.order = []; import('./late.js');");
         results.Add($"{(removed && s_names.Count == asked).ToString().ToLowerInvariant()} {engine.Evaluate("order.join(' ')")}");
         results.Add(Convert.ToInt32(other.Evaluate("dead()")).ToString());
