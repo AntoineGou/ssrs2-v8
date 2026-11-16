@@ -9,6 +9,23 @@ On SSRS2's 300-page test report (a chart a page, drawn by Chart.js), its scripts
 ClearScript's own library (V8 14.7), and the whole report 1,458 ms against 2,063 (warm, on an M-series Mac), with the
 same output byte for byte.
 
+## The managed assemblies
+
+Since release ssrs2.27 a release also carries `ClearScript.managed.zip`: ClearScript 7.5.1.1's two managed assemblies,
+`ClearScript.Core.dll` and `ClearScript.V8.dll` (`lib/net8.0`, for .NET 8 and later), built by `build-managed.sh` from
+ClearScript's sources with `patches/clearscript-managed`. They are ClearScript's API unchanged, for use with the
+libraries built here in place of the `Microsoft.ClearScript.V8` package (`ClearScript.V8` needs Newtonsoft.Json
+13.0.3, as the package does). What the patch changes:
+
+- no ICU data assembly: the libraries built here carry V8's ICU data, and the 10 MB `ClearScript.V8.ICUData.dll`, read
+  into memory at each process's start, is neither referenced nor shipped;
+- a compiled script's digest is worked out only for a CommonJS module, the one kind of document that reads it
+  (ClearScript hashed every script's whole text at each compile);
+- two parameters marked `scoped`, which the compiler's by-reference rules ask for when the target is .NET 7 or later.
+
+The assemblies are not signed with ClearScript's key (it is not public): .NET does not use an assembly's public key
+to bind it. The workflow's tests load each library through these assemblies.
+
 ## What it changes
 
 V8, in order (`patches/v8`): `0001-clearscript-7.5.1.1-port.patch`, ClearScript 7.5.1.1's own V8 changes ported to

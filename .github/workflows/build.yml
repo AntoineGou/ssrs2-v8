@@ -1,4 +1,5 @@
-# Builds ClearScriptV8 for eight RIDs, loads each on a machine that runs it, and on a tag publishes them as a release.
+# Builds ClearScriptV8 for eight RIDs and ClearScript's managed assemblies, loads each library through those assemblies
+# on a machine that runs it, and on a tag publishes them all as a release.
 # A tag ending in -mac (v15.6.75.33-ssrs2.7-mac) builds, tests and publishes osx-arm64 alone, as a prerelease: a quick
 # development round (about an hour and a half against two and a half); the package takes only full releases.
 name: Build
@@ -67,9 +68,28 @@ jobs:
           path: ${{ runner.os == 'Windows' && 'C:/v8work' || format('{0}/work', runner.temp) }}/out/
           if-no-files-found: error
 
+  # ClearScript's managed assemblies with patches/clearscript-managed: the same for every RID, built once (a -mac round
+  # and a run of some RIDs build them too: the tests load each library through them).
+  managed:
+    name: Build the managed assemblies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build
+        run: ./build-managed.sh "$RUNNER_TEMP/work"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clearscript-managed
+          path: ${{ runner.temp }}/work/out-managed/
+          if-no-files-found: error
+
   test:
     name: Test ${{ matrix.rid }}
-    needs: build
+    needs: [build, managed]
     # (each RID that built is tested though another failed: a RID whose build failed fails here at its download; the
     # release still needs every test)
     if: ${{ !cancelled() }}
@@ -102,9 +122,15 @@ jobs:
         with:
           name: ${{ matrix.rid }}
           path: lib
+      - uses: actions/download-artifact@v4
+        if: env.SELECTED == 'true'
+        with:
+          name: clearscript-managed
+          path: managed
+      # (through the managed assemblies built here, not ClearScript's package: the pair a release carries)
       - name: Build the test
         if: env.SELECTED == 'true'
-        run: dotnet publish test/Smoke -c Release -o app
+        run: dotnet publish test/Smoke -c Release -o app "-p:ClearScriptManaged=${{ github.workspace }}/managed/lib/net8.0"
       # (our V8's local time is UTC whatever the machine's zone: the test checks it in another zone)
       - name: Test
         if: env.SELECTED == 'true' && matrix.dotnet == '' && matrix.docker == '' && runner.os != 'Windows'
@@ -160,12 +186,14 @@ jobs:
           for d in built/*/; do
             rid=$(basename "$d")
             [[ "$rid" == logs-* ]] && continue
+            # (the managed assemblies: one zip for every RID, lib/net8.0 and ClearScript's licence)
+            if [[ "$rid" == clearscript-managed ]]; then (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/ClearScript.managed.zip" .); continue; fi
             (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/ClearScriptV8.$rid.zip" .)
           done
           (cd dist && sha256sum *.zip > SHA256SUMS)
           cat dist/SHA256SUMS
-          # (eight RIDs in a release, osx-arm64 alone in a -mac round)
-          want=8; [[ "$GITHUB_REF_NAME" == *-mac ]] && want=1
+          # (eight RIDs in a release, osx-arm64 alone in a -mac round; and the managed assemblies)
+          want=9; [[ "$GITHUB_REF_NAME" == *-mac ]] && want=2
           n=$(ls dist/*.zip | wc -l)
           [[ "$n" -eq "$want" ]] || { echo "$n zips, not $want"; exit 1; }
       - uses: actions/attest-build-provenance@v2
@@ -176,7 +204,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$GITHUB_REF_NAME" == *-mac ]]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --prerelease --notes "ClearScriptV8 for osx-arm64 only, a development round: V8 15.6.75.33 with SSRS2's patches, ClearScript 7.5.1.1. Not for a package (a release has eight RIDs). Checksums in SHA256SUMS; build provenance attested by GitHub."
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --prerelease --notes "ClearScriptV8 for osx-arm64 only, a development round: V8 15.6.75.33 with SSRS2's patches, ClearScript 7.5.1.1, and ClearScript's managed assemblies (ClearScript.managed.zip). Not for a package (a release has eight RIDs). Checksums in SHA256SUMS; build provenance attested by GitHub."
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "ClearScriptV8 for eight RIDs, V8 15.6.75.33 with SSRS2's patch, ClearScript 7.5.1.1. Checksums in SHA256SUMS; build provenance attested by GitHub."
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "ClearScriptV8 for eight RIDs, V8 15.6.75.33 with SSRS2's patch, ClearScript 7.5.1.1, and ClearScript's managed assemblies for them (ClearScript.managed.zip). Checksums in SHA256SUMS; build provenance attested by GitHub."
           fi

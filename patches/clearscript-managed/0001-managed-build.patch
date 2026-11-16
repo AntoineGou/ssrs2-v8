@@ -1,0 +1,190 @@
+diff --git a/ClearScript/Util/MiscHelpers.cs b/ClearScript/Util/MiscHelpers.cs
+index 79877b45..9d7a72e7 100644
+--- a/ClearScript/Util/MiscHelpers.cs
++++ b/ClearScript/Util/MiscHelpers.cs
+@@ -234,6 +234,14 @@ namespace Microsoft.ClearScript.Util
+             return builder.ToString();
+         }
+ 
++        // SSRS2: a compiled script's digest is read by CommonJS modules alone (V8ScriptEngine.ExecuteInternal,
++        // CommonJSManager.GetOrCreateModule); for any other document its whole text was hashed a byte a step at
++        // every Compile and the digest never read.
++        public static UIntPtr GetDigest(this string code, UniqueDocumentInfo documentInfo)
++        {
++            return (documentInfo.Category == JavaScript.ModuleCategory.CommonJS) ? code.GetDigest() : UIntPtr.Zero;
++        }
++
+         public static UIntPtr GetDigest(this string code)
+         {
+             return (UIntPtr.Size == 4) ? (UIntPtr)code.GetDigestAsUInt32() : (UIntPtr)code.GetDigestAsUInt64();
+diff --git a/ClearScript/Util/ValueScope.cs b/ClearScript/Util/ValueScope.cs
+index 34772840..96c877c9 100644
+--- a/ClearScript/Util/ValueScope.cs
++++ b/ClearScript/Util/ValueScope.cs
+@@ -58,7 +58,7 @@ namespace Microsoft.ClearScript.Util
+             return new ValueScope(exitAction);
+         }
+ 
+-        public static ValueScope Create<TArg>(Action<TArg> enterAction, Action exitAction, in TArg arg)
++        public static ValueScope Create<TArg>(Action<TArg> enterAction, Action exitAction, scoped in TArg arg)
+         {
+             enterAction?.Invoke(arg);
+             return new ValueScope(exitAction);
+@@ -70,7 +70,7 @@ namespace Microsoft.ClearScript.Util
+             return new ValueScope<TValue>(value, exitAction);
+         }
+ 
+-        public static ValueScope<TValue> Create<TArg, TValue>(Func<TArg, TValue> enterFunc, Action<TValue> exitAction, in TArg arg)
++        public static ValueScope<TValue> Create<TArg, TValue>(Func<TArg, TValue> enterFunc, Action<TValue> exitAction, scoped in TArg arg)
+         {
+             var value = (enterFunc is not null) ? enterFunc(arg) : default;
+             return new ValueScope<TValue>(value, exitAction);
+diff --git a/ClearScript/V8/FastProxy/V8FastArgImpl.cs b/ClearScript/V8/FastProxy/V8FastArgImpl.cs
+index 4588904a..351a0c08 100644
+--- a/ClearScript/V8/FastProxy/V8FastArgImpl.cs
++++ b/ClearScript/V8/FastProxy/V8FastArgImpl.cs
+@@ -793,7 +793,7 @@ namespace Microsoft.ClearScript.V8.FastProxy
+ 
+         private static T ReturnOrThrow<T>(bool succeeded, T result, V8FastArgKind kind, string name) => succeeded ? result : throw CreateArgumentException(kind, name);
+ 
+-        private static ReadOnlySpan<char> ReturnOrThrow(bool succeeded, in ReadOnlySpan<char> result, V8FastArgKind kind, string name) => succeeded ? result : throw CreateArgumentException(kind, name);
++        private static ReadOnlySpan<char> ReturnOrThrow(bool succeeded, scoped in ReadOnlySpan<char> result, V8FastArgKind kind, string name) => succeeded ? result : throw CreateArgumentException(kind, name);
+ 
+         private static ArgumentException CreateArgumentException(V8FastArgKind kind, string name)
+         {
+diff --git a/ClearScript/V8/SplitProxy/V8ContextProxyImpl.cs b/ClearScript/V8/SplitProxy/V8ContextProxyImpl.cs
+index 36a460f9..f4dccec0 100644
+--- a/ClearScript/V8/SplitProxy/V8ContextProxyImpl.cs
++++ b/ClearScript/V8/SplitProxy/V8ContextProxyImpl.cs
+@@ -105,7 +105,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+         public override V8.V8Script Compile(UniqueDocumentInfo documentInfo, string code)
+         {
+-            return new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            return new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, ctx) => instance.V8Context_Compile(
+                     ctx.Handle,
+                     MiscHelpers.GetUrlOrPath(ctx.documentInfo.Uri, ctx.documentInfo.UniqueName),
+@@ -129,7 +129,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+             var ctx = (Handle, documentInfo, code, cacheKind, cacheBytes: (byte[])null);
+ 
+-            var script = new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            var script = new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, pCtx) =>
+                 {
+                     ref var ctx = ref pCtx.AsRef();
+@@ -162,7 +162,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+             var ctx = (Handle, documentInfo, code, cacheKind, cacheBytes, cacheAccepted: false);
+ 
+-            var script = new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            var script = new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, pCtx) =>
+                 {
+                     ref var ctx = ref pCtx.AsRef();
+@@ -210,7 +210,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+             var ctx = (Handle, documentInfo, code, cacheKind, cacheBytes, cacheResult: V8CacheResult.Disabled);
+ 
+-            script = new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            script = new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, pCtx) =>
+                 {
+                     ref var ctx = ref pCtx.AsRef();
+diff --git a/ClearScript/V8/SplitProxy/V8IsolateProxyImpl.cs b/ClearScript/V8/SplitProxy/V8IsolateProxyImpl.cs
+index 708269ef..a54ddf00 100644
+--- a/ClearScript/V8/SplitProxy/V8IsolateProxyImpl.cs
++++ b/ClearScript/V8/SplitProxy/V8IsolateProxyImpl.cs
+@@ -66,7 +66,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+         public override V8.V8Script Compile(UniqueDocumentInfo documentInfo, string code)
+         {
+-            return new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            return new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, ctx) => instance.V8Isolate_Compile(
+                     ctx.Handle,
+                     MiscHelpers.GetUrlOrPath(ctx.documentInfo.Uri, ctx.documentInfo.UniqueName),
+@@ -90,7 +90,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+             var ctx = (Handle, documentInfo, code, cacheKind, cacheBytes: (byte[])null);
+ 
+-            var script = new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            var script = new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, pCtx) =>
+                 {
+                     ref var ctx = ref pCtx.AsRef();
+@@ -123,7 +123,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+             var ctx = (Handle, documentInfo, code, cacheKind, cacheBytes, cacheAccepted: false);
+ 
+-            var script = new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            var script = new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, pCtx) =>
+                 {
+                     ref var ctx = ref pCtx.AsRef();
+@@ -171,7 +171,7 @@ namespace Microsoft.ClearScript.V8.SplitProxy
+ 
+             var ctx = (Handle, documentInfo, code, cacheKind, cacheBytes, cacheResult: V8CacheResult.Disabled);
+ 
+-            script = new V8ScriptImpl(documentInfo, code.GetDigest(), V8SplitProxyNative.Invoke(
++            script = new V8ScriptImpl(documentInfo, code.GetDigest(documentInfo), V8SplitProxyNative.Invoke(
+                 static (instance, pCtx) =>
+                 {
+                     ref var ctx = ref pCtx.AsRef();
+diff --git a/ClearScript/V8/V8Proxy.cs b/ClearScript/V8/V8Proxy.cs
+index 6ac7fac1..4ca9f7eb 100644
+--- a/ClearScript/V8/V8Proxy.cs
++++ b/ClearScript/V8/V8Proxy.cs
+@@ -10,7 +10,6 @@ using System.Runtime.InteropServices;
+ using System.Text;
+ using Microsoft.ClearScript.Properties;
+ using Microsoft.ClearScript.Util;
+-using Microsoft.ClearScript.V8.ICUData;
+ using Microsoft.ClearScript.V8.SplitProxy;
+ 
+ namespace Microsoft.ClearScript.V8
+@@ -158,21 +157,11 @@ namespace Microsoft.ClearScript.V8
+             throw new TypeLoadException(message);
+         }
+ 
+-        private static unsafe void InitializeICU()
++        private static void InitializeICU()
+         {
+-            using (var stream = typeof(V8ICUData).Assembly.GetManifestResourceStream(V8ICUData.ResourceName))
+-            {
+-                var bytes = new byte[stream.Length];
+-
+-                var length = stream.Read(bytes, 0, bytes.Length);
+-                Debug.Assert(length == bytes.Length);
+-
+-                fixed (byte* pBytes = bytes)
+-                {
+-                    var pICUData = (IntPtr)pBytes;
+-                    V8SplitProxyNative.InvokeNoThrow(static (instance, ctx) => instance.V8Environment_InitializeICU(ctx.pICUData, Convert.ToUInt32(ctx.length)), (pICUData, length));
+-                }
+-            }
++            // SSRS2: the native library has V8's ICU data built in (V8Environment_InitializeICU takes its own, whatever
++            // it is given): no data assembly, whose 10 MB were read into an array at each process's start.
++            V8SplitProxyNative.InvokeNoThrow(static instance => instance.V8Environment_InitializeICU(IntPtr.Zero, 0));
+         }
+ 
+         private static IEnumerable<string> GetDirPaths(string platform, string architecture)
+diff --git a/NetCore/ClearScript.V8/ClearScript.V8.csproj b/NetCore/ClearScript.V8/ClearScript.V8.csproj
+index e4d0ce65..abd57874 100644
+--- a/NetCore/ClearScript.V8/ClearScript.V8.csproj
++++ b/NetCore/ClearScript.V8/ClearScript.V8.csproj
+@@ -180,6 +180,13 @@
+         <ProjectReference Include="..\..\NetStandard\ClearScript.V8.ICUData\ClearScript.V8.ICUData.csproj" />
+     </ItemGroup>
+ 
++    <!-- SSRS2 (-p:Ssrs2Managed=true): the managed assembly alone. The native libraries are built and shipped apart
++         (one a runtime), and they carry V8's ICU data: no data assembly. -->
++    <ItemGroup Condition="'$(Ssrs2Managed)' == 'true'">
++        <None Remove="..\..\bin\**" />
++        <ProjectReference Remove="..\..\NetStandard\ClearScript.V8.ICUData\ClearScript.V8.ICUData.csproj" />
++    </ItemGroup>
++
+     <ItemGroup>
+         <Service Include="{508349b6-6b84-4df5-91f0-309beebad82d}" />
+     </ItemGroup>
