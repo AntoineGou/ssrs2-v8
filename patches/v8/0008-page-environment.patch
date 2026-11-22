@@ -1,0 +1,1040 @@
+--- a/include/v8-ssrs2.h
++++ b/include/v8-ssrs2.h
+@@ -3,11 +3,15 @@
+ #ifndef INCLUDE_V8_SSRS2_H_
+ #define INCLUDE_V8_SSRS2_H_
+ 
++#include <stdint.h>
++
+ #include "v8-local-handle.h"  // NOLINT(build/include_directory)
+ #include "v8config.h"         // NOLINT(build/include_directory)
+ 
+ namespace v8 {
+ 
++class Context;
++class Isolate;
+ class Object;
+ 
+ namespace ssrs2 {
+@@ -36,6 +40,36 @@ V8_EXPORT void SetPrototypeSetupMode(bool on);
+  */
+ V8_EXPORT bool OptimizePrototype(Local<Object> object);
+ 
++/**
++ * SSRS2: what a page's scripts see of time, place and chance, set by the embedder for each document. The clock, the
++ * time zone and the locale are the isolate's (one document runs in an isolate at a time, its frames with it);
++ * Math.random's seed is a context's (each frame's document has its own).
++ *
++ * The page's clock: Date.now(), new Date() and Date() read origin + *clock in milliseconds, floored, after moving
++ * *clock on by step (what a read takes). *clock is the embedder's (its event loop moves it too) and must outlive the
++ * setting; a null clock reads origin + 1 (a document's clock before its loop starts). Until set, the isolate reads the
++ * machine's clock.
++ */
++V8_EXPORT void SetClock(Isolate* isolate, double* clock, double origin, double step);
++
++/**
++ * SSRS2: the page's time zone (an IANA name; UTC when null or empty): local time, Date's string forms and Intl's
++ * default zone. False, the zone unchanged, for a name ICU does not know.
++ */
++V8_EXPORT bool SetTimeZone(Isolate* isolate, const char* time_zone);
++
++/**
++ * SSRS2: the page's locale (a BCP 47 tag; en-US when null or empty): Intl's and the toLocale methods' default locale.
++ * False, the locale unchanged, for a tag ICU cannot read.
++ */
++V8_EXPORT bool SetDefaultLocale(Isolate* isolate, const char* locale);
++
++/**
++ * SSRS2: Math.random's sequence for the context: SSRS2's xorshift128 (four 32-bit words, each double of two draws),
++ * started from seed. A context never seeded draws as if seeded with 0.
++ */
++V8_EXPORT void SeedRandom(Local<Context> context, uint32_t seed);
++
+ }  // namespace ssrs2
+ }  // namespace v8
+ 
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -173,6 +173,7 @@
+ #ifdef V8_INTL_SUPPORT
+ #include "src/objects/intl-objects.h"
+ #endif  // V8_INTL_SUPPORT
++#include "src/numbers/math-random.h"
+ 
+ #include "src/strings/string-hasher-inl.h"
+ 
+@@ -11544,6 +11545,79 @@ bool ssrs2::OptimizePrototype(Local<Object> object) {
+   return js_obj->HasFastProperties();
+ }
+ 
++void ssrs2::SetClock(Isolate* isolate, double* clock, double origin,
++                     double step) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  i::DateCache::Ssrs2Clock& page_clock = i_isolate->date_cache()->ssrs2_clock();
++  page_clock.clock = clock;
++  page_clock.origin = origin;
++  page_clock.step = step;
++  page_clock.set = true;
++}
++
++bool ssrs2::SetTimeZone(Isolate* isolate, const char* time_zone) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  std::string zone;
++#ifdef V8_INTL_SUPPORT
++  {
++    HandleScope scope(isolate);
++    TryCatch try_catch(isolate);
++    bool known;
++    zone = i::Intl::Ssrs2CanonicalTimeZone(
++        i_isolate, time_zone != nullptr ? time_zone : "", &known);
++    if (!known || try_catch.HasCaught()) return false;
++  }
++#else
++  if (time_zone != nullptr && *time_zone != 0) return false;
++#endif
++  i::DateCache* date_cache = i_isolate->date_cache();
++  if (zone == date_cache->ssrs2_time_zone()) return true;
++  bool const is_utc = zone.empty();
++  // Compiled code folds getUTCDate and its kin to the local fields while local time is UTC (JSCallReducer, Maglev's
++  // reducer): none compiles while that changes, and what was compiled with dates is thrown away with the protector.
++  if (is_utc != date_cache->local_time_is_utc()) {
++    i_isolate->AbortConcurrentOptimization(i::BlockingBehavior::kBlock);
++  }
++  date_cache->Ssrs2SetTimeZone(zone, is_utc);
++  i_isolate->IncreaseDateCacheStampAndInvalidateProtector();
++#ifdef V8_INTL_SUPPORT
++  i_isolate->clear_cached_icu_object(
++      i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormat);
++  i_isolate->clear_cached_icu_object(
++      i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormatForTime);
++  i_isolate->clear_cached_icu_object(
++      i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormatForDate);
++#endif
++  return true;
++}
++
++bool ssrs2::SetDefaultLocale(Isolate* isolate, const char* locale) {
++#ifdef V8_INTL_SUPPORT
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  std::string resolved;
++  {
++    HandleScope scope(isolate);
++    TryCatch try_catch(isolate);
++    resolved = i::Intl::Ssrs2ResolveDefaultLocale(
++        i_isolate, locale != nullptr ? locale : "");
++    if (resolved.empty() || try_catch.HasCaught()) return false;
++  }
++  if (resolved == i_isolate->DefaultLocale()) return true;
++  // (V8's own reset: the cached formatters let go, code that inlined a locale's fast paths thrown away)
++  i_isolate->ResetDefaultLocale();
++  i_isolate->set_default_locale(resolved);
++  i_isolate->date_cache()->Ssrs2ClearFormatters();
++  return true;
++#else
++  return locale == nullptr || *locale == 0;
++#endif
++}
++
++void ssrs2::SeedRandom(Local<Context> context, uint32_t seed) {
++  auto native_context = Utils::OpenDirectHandle(*context);
++  i::MathRandom::Ssrs2Seed(*native_context, seed);
++}
++
+ bool ssrs2::SetImmutableProto(Local<Object> object) {
+   auto obj = Utils::OpenDirectHandle(*object);
+   if (!i::IsJSObject(*obj)) return false;
+--- a/src/builtins/math.tq
++++ b/src/builtins/math.tq
+@@ -518,37 +518,46 @@ extern macro LoadMathRandomState(ByteArray): XorShift128State;
+ extern macro StoreMathRandomState(ByteArray, XorShift128State): void;
+ extern macro InitializeAndMaybeRefillMathRandom(NativeContext): Smi;
+ 
+-struct XorShift128Result {
+-  state: XorShift128State;
+-  random: uint64;
+-}
+-
+-// LINT.IfChange(xorshift128)
+-macro RandomToDouble(random: uint64): float64 {
+-  // Get a random [0,2**53) integer value (up to MAX_SAFE_INTEGER) by dropping
+-  // 11 bits of the state.
+-  const random0to2pow53: uint64 = random >>> Convert<uint64>(11);
+-  const randomDouble: float64 = ChangeUint64ToFloat64(random0to2pow53);
+-  // Map this to [0,1) by division with 2**53 (2**53 = 9007199254740992.0).
+-  return randomDouble / 9007199254740992.0;
+-}
+-
+-macro XorShift128(s0In: uint64, s1In: uint64): XorShift128Result {
+-  let s1 = s0In;
+-  const s0 = s1In;
+-  const newS0 = s0;
+-  s1 = Word64Xor(s1, Word64Shl(s1, Convert<uint64>(23)));
+-  s1 = Word64Xor(s1, Word64Shr(s1, Convert<uint64>(17)));
+-  s1 = Word64Xor(s1, s0);
+-  s1 = Word64Xor(s1, Word64Shr(s0, Convert<uint64>(26)));
+-  const newS1 = s1;
+-  const random = Uint64Add(s0, s1);
+-  return XorShift128Result{
+-    state: XorShift128State{s0: newS0, s1: newS1},
+-    random: random
+-  };
+-}
+-// LINT.ThenChange(/src/base/utils/random-number-generator.h:xorshift128)
++// SSRS2: V8's xorshift128+ (XorShift128, RandomToDouble) replaced by SSRS2's generator below.
++
++// SSRS2: SSRS2's generator (MathRandom::Ssrs2Next in src/numbers/math-random.cc, which the 32-bit cache is filled
++// with): xorshift128 of four 32-bit words, state.s0 holding the first two (low word first) and state.s1 the others;
++// a double from two draws, the first its high 32 bits, the second's top 21 its low ones.
++struct Ssrs2Words {
++  s0: uint32;
++  s1: uint32;
++  s2: uint32;
++  s3: uint32;
++}
++
++macro Ssrs2Low(word: uint64): uint32 {
++  return Unsigned(TruncateInt64ToInt32(Signed(word)));
++}
++
++macro Ssrs2High(word: uint64): uint32 {
++  return Ssrs2Low(Word64Shr(word, Convert<uint64>(32)));
++}
++
++macro Ssrs2Word(low: uint32, high: uint32): uint64 {
++  return Word64Or(
++      ChangeUint32ToUint64(low),
++      Word64Shl(ChangeUint32ToUint64(high), Convert<uint64>(32)));
++}
++
++macro Ssrs2Next32(w: Ssrs2Words): Ssrs2Words {
++  const t: uint32 = Word32Xor(w.s0, Word32Shl(w.s0, Convert<uint32>(11)));
++  const s3: uint32 = Word32Xor(
++      Word32Xor(w.s3, Word32Shr(w.s3, Convert<uint32>(19))),
++      Word32Xor(t, Word32Shr(t, Convert<uint32>(8))));
++  return Ssrs2Words{s0: w.s1, s1: w.s2, s2: w.s3, s3: s3};
++}
++
++macro Ssrs2Double(high: uint32, low: uint32): float64 {
++  const bits: uint64 = Word64Or(
++      Word64Shl(ChangeUint32ToUint64(high), Convert<uint64>(21)),
++      ChangeUint32ToUint64(Word32Shr(low, Convert<uint32>(11))));
++  return ChangeUint64ToFloat64(bits) / 9007199254740992.0;
++}
+ 
+ // https://tc39.es/ecma262/#sec-math.random
+ transitioning javascript builtin MathRandom(
+@@ -564,9 +573,19 @@ transitioning javascript builtin MathRandom(
+         state = LoadMathRandomState(stateArray);
+       }
+ 
+-    const result = XorShift128(state.s0, state.s1);
+-    StoreMathRandomState(stateArray, result.state);
+-    return AllocateHeapNumberWithValue(RandomToDouble(result.random));
++    // SSRS2: SSRS2's generator (above), two draws a double.
++    const first = Ssrs2Next32(Ssrs2Words{
++      s0: Ssrs2Low(state.s0),
++      s1: Ssrs2High(state.s0),
++      s2: Ssrs2Low(state.s1),
++      s3: Ssrs2High(state.s1)
++    });
++    const second = Ssrs2Next32(first);
++    StoreMathRandomState(stateArray, XorShift128State{
++      s0: Ssrs2Word(second.s0, second.s1),
++      s1: Ssrs2Word(second.s2, second.s3)
++    });
++    return AllocateHeapNumberWithValue(Ssrs2Double(first.s3, second.s3));
+ 
+   } else {
+     let smiIndex:
+--- a/src/compiler/code-assembler.h
++++ b/src/compiler/code-assembler.h
+@@ -1159,6 +1159,15 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+   TNode<Uint64T> Word64Xor(TNode<Uint64T> left, TNode<Uint64T> right) {
+     return Unsigned(Word64Xor(static_cast<TNode<Word64T>>(left), right));
+   }
++  // SSRS2: two overloads base.tq declares that V8's own builtins never used (Math.random's generator does).
++  TNode<Uint32T> Word32Xor(TNode<Uint32T> left, TNode<Uint32T> right) {
++    return Unsigned(Word32Xor(static_cast<TNode<Word32T>>(left),
++                              static_cast<TNode<Word32T>>(right)));
++  }
++  TNode<Uint64T> Word64Or(TNode<Uint64T> left, TNode<Uint64T> right) {
++    return Unsigned(Word64Or(static_cast<TNode<Word64T>>(left),
++                             static_cast<TNode<Word64T>>(right)));
++  }
+ 
+   TNode<Int64T> Word64Not(TNode<Int64T> value) {
+     return Signed(Word64Not(static_cast<TNode<Word64T>>(value)));
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -5398,6 +5398,10 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
+ 
+   Builtin builtin =
+       shared.HasBuiltinId() ? shared.builtin_id() : Builtin::kNoBuiltinId;
++  // SSRS2: local time is UTC (below): the process's, and the page's zone (the isolate's DateCache::local_time_is_utc,
++  // which v8::ssrs2::SetTimeZone changes with no compilation running).
++  bool const utc_is_local =
++      g_local_time_is_utc && isolate()->date_cache()->local_time_is_utc();
+   switch (builtin) {
+     case Builtin::kArrayConstructor:
+       return ReduceArrayConstructor(node);
+@@ -5582,25 +5586,25 @@ Reduction JSCallReducer::ReduceJSCall(Node* node,
+     // SSRS2: with local time UTC (g_local_time_is_utc) a date's cached fields are its UTC fields: getUTCDate and its kin
+     // inlined as the local getters are (a field load under the same protector), not a builtin and a C call each.
+     case Builtin::kDatePrototypeGetUTCFullYear:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kYear)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kYear)
+                                  : NoChange();
+     case Builtin::kDatePrototypeGetUTCMonth:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kMonth)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kMonth)
+                                  : NoChange();
+     case Builtin::kDatePrototypeGetUTCDate:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kDay)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kDay)
+                                  : NoChange();
+     case Builtin::kDatePrototypeGetUTCDay:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kWeekday)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kWeekday)
+                                  : NoChange();
+     case Builtin::kDatePrototypeGetUTCHours:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kHour)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kHour)
+                                  : NoChange();
+     case Builtin::kDatePrototypeGetUTCMinutes:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kMinute)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kMinute)
+                                  : NoChange();
+     case Builtin::kDatePrototypeGetUTCSeconds:
+-      return g_local_time_is_utc ? ReduceDatePrototypeGetField(node, JSDate::kSecond)
++      return utc_is_local ? ReduceDatePrototypeGetField(node, JSDate::kSecond)
+                                  : NoChange();
+ 
+     case Builtin::kTypedArrayPrototypeByteLength:
+--- a/src/date/date.cc
++++ b/src/date/date.cc
+@@ -39,6 +39,20 @@ DateCache::DateCache()
+   ResetDateCache(base::TimezoneCache::TimeZoneDetection::kSkip);
+ }
+ 
++void DateCache::Ssrs2SetTimeZone(const std::string& time_zone, bool is_utc) {
++  base::TimezoneCache* made =
++#ifdef V8_INTL_SUPPORT
++      Intl::CreateTimeZoneCache(time_zone);
++#else
++      base::OS::CreateTimezoneCache();
++#endif
++  delete tz_cache_;
++  tz_cache_ = made;
++  ssrs2_time_zone_ = time_zone;
++  local_time_is_utc_ = is_utc;
++  ResetDateCache(base::TimezoneCache::TimeZoneDetection::kSkip);
++}
++
+ void DateCache::ResetDateCache(
+     base::TimezoneCache::TimeZoneDetection time_zone_detection) {
+   for (int i = 0; i < kCacheSize; ++i) {
+@@ -58,6 +72,10 @@ void DateCache::ResetDateCache(
+   tz_cache_->Clear(time_zone_detection);
+   tz_name_ = nullptr;
+   dst_tz_name_ = nullptr;
++#ifdef V8_INTL_SUPPORT
++  // SSRS2: the formatters kept were made in the zone that was (DateCache::Ssrs2Formatter).
++  ssrs2_formatters_.clear();
++#endif
+ }
+ 
+ void DateCache::ClearSegment(CacheItem* segment) {
+@@ -285,7 +303,7 @@ void DateCache::ExtendTheAfterSegment(int64_t time_ms, int offset_ms) {
+ bool g_local_time_is_utc = false;
+ 
+ int DateCache::LocalOffsetInMs(int64_t time_ms, bool is_utc) {
+-  if (g_local_time_is_utc) return 0;
++  if (g_local_time_is_utc && local_time_is_utc_) return 0;
+   if (!is_utc) {
+     return GetLocalOffsetFromOS(time_ms, is_utc);
+   }
+--- a/src/date/date.h
++++ b/src/date/date.h
+@@ -6,6 +6,9 @@
+ #define V8_DATE_DATE_H_
+ 
+ #include <cmath>
++#include <memory>
++#include <string>
++#include <unordered_map>
+ 
+ #include "src/base/small-vector.h"
+ #include "src/base/timezone-cache.h"
+@@ -48,6 +51,38 @@ class V8_EXPORT_PRIVATE DateCache {
+     tz_cache_ = nullptr;
+   }
+ 
++  // SSRS2: the page's clock (include/v8-ssrs2.h, SetClock): Date.now(), new Date() and Date() read it once set.
++  struct Ssrs2Clock {
++    double* clock = nullptr;
++    double origin = 0;
++    double step = 0;
++    bool set = false;
++  };
++  Ssrs2Clock& ssrs2_clock() { return ssrs2_clock_; }
++
++  // SSRS2: whether the isolate's local time is UTC (the default, g_local_time_is_utc): false once the page's zone is
++  // another (SetTimeZone). Local offsets are then the zone's and a date's UTC fields are worked out as V8 does.
++  bool local_time_is_utc() const { return local_time_is_utc_; }
++  // SSRS2: the page's zone, an IANA name ("" for the process's default, UTC).
++  const std::string& ssrs2_time_zone() const { return ssrs2_time_zone_; }
++  // SSRS2: local time in another zone ("" or a UTC name for UTC): the zone cache made again for it, the cache reset.
++  void Ssrs2SetTimeZone(const std::string& time_zone, bool is_utc);
++
++#ifdef V8_INTL_SUPPORT
++  // SSRS2: the formatters behind toLocaleString and its date kinds, kept by locale and options (V8 keeps one only for a
++  // call without options: a table's every cell built a formatter, 22 microseconds). Cleared when the page's zone or
++  // locale changes; 256 at most (all let go past that).
++  std::shared_ptr<void> Ssrs2Formatter(const std::string& key) {
++    auto found = ssrs2_formatters_.find(key);
++    return found == ssrs2_formatters_.end() ? nullptr : found->second;
++  }
++  void Ssrs2KeepFormatter(const std::string& key, std::shared_ptr<void> formatter) {
++    if (ssrs2_formatters_.size() >= 256) ssrs2_formatters_.clear();
++    ssrs2_formatters_[key] = std::move(formatter);
++  }
++  void Ssrs2ClearFormatters() { ssrs2_formatters_.clear(); }
++#endif
++
+   // Clears cached timezone information and increments the cache stamp.
+   void ResetDateCache(
+       base::TimezoneCache::TimeZoneDetection time_zone_detection);
+@@ -244,6 +279,14 @@ class V8_EXPORT_PRIVATE DateCache {
+   const char* dst_tz_name_;
+ 
+   base::TimezoneCache* tz_cache_;
++
++  // SSRS2 (above)
++  Ssrs2Clock ssrs2_clock_;
++  bool local_time_is_utc_ = true;
++  std::string ssrs2_time_zone_;
++#ifdef V8_INTL_SUPPORT
++  std::unordered_map<std::string, std::shared_ptr<void>> ssrs2_formatters_;
++#endif
+ };
+ 
+ // Routines shared between Date and Temporal
+--- a/src/maglev/maglev-reducer-inl.h
++++ b/src/maglev/maglev-reducer-inl.h
+@@ -5557,47 +5557,54 @@ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetSeconds(
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kSecond);
+ }
+ 
+-// SSRS2: getUTCDate and its kin, with local time UTC (g_local_time_is_utc): the cached fields are the UTC fields.
++// SSRS2: getUTCDate and its kin, with local time UTC (g_local_time_is_utc, and the page's zone UTC: the isolate's
++// DateCache::local_time_is_utc, which v8::ssrs2::SetTimeZone changes with no compilation running): the cached fields
++// are the UTC fields.
++template <typename BaseT>
++bool MaglevReducer<BaseT>::Ssrs2UtcIsLocal() {
++  return g_local_time_is_utc &&
++         broker()->isolate()->date_cache()->local_time_is_utc();
++}
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCFullYear(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kYear);
+ }
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCMonth(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kMonth);
+ }
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCDate(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kDay);
+ }
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCDay(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kWeekday);
+ }
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCHours(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kHour);
+ }
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCMinutes(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kMinute);
+ }
+ template <typename BaseT>
+ MaybeReduceResult MaglevReducer<BaseT>::TryReduceDatePrototypeGetUTCSeconds(
+     ValueNode* context, compiler::JSFunctionRef target, CallArguments& args) {
+-  if (!g_local_time_is_utc) return {};
++  if (!Ssrs2UtcIsLocal()) return {};
+   return TryReduceDatePrototypeGetField(target, args, JSDate::kSecond);
+ }
+ 
+--- a/src/maglev/maglev-reducer.h
++++ b/src/maglev/maglev-reducer.h
+@@ -1326,6 +1326,8 @@ class MaglevReducer {
+   MaybeReduceResult TryReduceDatePrototypeGetField(
+       compiler::JSFunctionRef target, CallArguments& args,
+       JSDate::FieldIndex field);
++  // SSRS2: whether a date's cached local fields are its UTC fields.
++  bool Ssrs2UtcIsLocal();
+ 
+   MaybeReduceResult DoTryReduceMathRound(ValueNode* context,
+                                          CallArguments& args,
+--- a/src/numbers/math-random.cc
++++ b/src/numbers/math-random.cc
+@@ -53,15 +53,9 @@ Address MathRandom::InitializeAndMaybeRefillCache(Isolate* isolate,
+   // requested, use it to reset our state the first time a script asks for
+   // random numbers in this context. This ensures the script sees a consistent
+   // sequence.
++  // SSRS2: SSRS2's generator, seeded with 0 (v8::ssrs2::SeedRandom seeds it otherwise).
+   if (state.s0 == 0 && state.s1 == 0) {
+-    uint64_t seed;
+-    if (v8_flags.random_seed != 0) {
+-      seed = v8_flags.random_seed;
+-    } else {
+-      isolate->random_number_generator()->NextBytes(&seed, sizeof(seed));
+-    }
+-    state.s0 = base::RandomNumberGenerator::MurmurHash3(seed);
+-    state.s1 = base::RandomNumberGenerator::MurmurHash3(~seed);
++    state = Ssrs2Seeded(0);
+     CHECK(state.s0 != 0 || state.s1 != 0);
+   }
+ 
+@@ -73,11 +67,9 @@ Address MathRandom::InitializeAndMaybeRefillCache(Isolate* isolate,
+   Tagged<FixedDoubleArray> cache =
+       Cast<FixedDoubleArray>(native_context->math_random_cache());
+   // Create random numbers.
++  // (SSRS2's generator: the builtin reads the cache from its end)
+   for (int i = kCacheSize - 1; i >= 0; i--) {
+-    // Generate random numbers using xorshift128+.
+-    uint64_t random =
+-        base::RandomNumberGenerator::XorShift128(&state.s0, &state.s1);
+-    cache->set(i, base::RandomNumberGenerator::ToDouble(random));
++    cache->set(i, Ssrs2Next(&state));
+   }
+   pod->set(0, state);
+ 
+@@ -86,5 +78,60 @@ Address MathRandom::InitializeAndMaybeRefillCache(Isolate* isolate,
+   return new_index.ptr();
+ }
+ 
++namespace {
++
++struct Ssrs2Words {
++  uint32_t s0, s1, s2, s3;
++};
++
++Ssrs2Words Ssrs2Unpack(const MathRandom::State& state) {
++  return {static_cast<uint32_t>(state.s0),
++          static_cast<uint32_t>(state.s0 >> 32),
++          static_cast<uint32_t>(state.s1),
++          static_cast<uint32_t>(state.s1 >> 32)};
++}
++
++MathRandom::State Ssrs2Pack(const Ssrs2Words& w) {
++  return {static_cast<uint64_t>(w.s0) | (static_cast<uint64_t>(w.s1) << 32),
++          static_cast<uint64_t>(w.s2) | (static_cast<uint64_t>(w.s3) << 32)};
++}
++
++uint32_t Ssrs2Next32(Ssrs2Words* w) {
++  uint32_t t = w->s0 ^ (w->s0 << 11);
++  w->s0 = w->s1;
++  w->s1 = w->s2;
++  w->s2 = w->s3;
++  w->s3 = w->s3 ^ (w->s3 >> 19) ^ t ^ (t >> 8);
++  return w->s3;
++}
++
++}  // namespace
++
++MathRandom::State MathRandom::Ssrs2Seeded(uint32_t seed) {
++  Ssrs2Words w;
++  w.s0 = seed != 0 ? seed : 0x9E3779B9u;
++  w.s1 = 0x243F6A88u ^ w.s0;
++  w.s2 = 0xB7E15162u;
++  w.s3 = 0x6A09E667u ^ (seed * 31u);
++  for (int i = 0; i < 16; i++) Ssrs2Next32(&w);
++  return Ssrs2Pack(w);
++}
++
++double MathRandom::Ssrs2Next(State* state) {
++  Ssrs2Words w = Ssrs2Unpack(*state);
++  uint64_t high = Ssrs2Next32(&w);
++  uint64_t low = Ssrs2Next32(&w) >> 11;
++  *state = Ssrs2Pack(w);
++  return static_cast<double>((high << 21) | low) / 9007199254740992.0;
++}
++
++void MathRandom::Ssrs2Seed(Tagged<Context> native_context, uint32_t seed) {
++  DisallowGarbageCollection no_gc;
++  Cast<PodArray<State>>(native_context->math_random_state())
++      ->set(0, Ssrs2Seeded(seed));
++  // (the 32-bit cache drawn again from the new state at the next call)
++  native_context->set_math_random_index(Smi::zero());
++}
++
+ }  // namespace internal
+ }  // namespace v8
+--- a/src/numbers/math-random.h
++++ b/src/numbers/math-random.h
+@@ -29,6 +29,16 @@ class MathRandom : public AllStatic {
+     uint64_t s0;
+     uint64_t s1;
+   };
++
++  // SSRS2: SSRS2's generator in place of V8's xorshift128+ (math.tq's MathRandom draws it too), so that a seed gives
++  // the same sequence on every platform as SSRS2's .NET twin (Bindings/Window/SeededRandom): xorshift128 of four 32-bit
++  // words, s0 holding the first two (low word first) and s1 the others; a double from two draws, the first its high 32
++  // bits, the second's top 21 its low ones. The state of a seed: the words from the seed (0 taken as 0x9E3779B9) and
++  // SSRS2's constants, then sixteen draws thrown away. A context never seeded draws as if seeded with 0.
++  static State Ssrs2Seeded(uint32_t seed);
++  static double Ssrs2Next(State* state);
++  // SSRS2: seeds the context's sequence (v8::ssrs2::SeedRandom).
++  static void Ssrs2Seed(Tagged<Context> native_context, uint32_t seed);
+ };
+ 
+ }  // namespace internal
+--- a/src/objects/intl-objects.cc
++++ b/src/objects/intl-objects.cc
+@@ -1575,7 +1575,10 @@ MaybeDirectHandle<String> Intl::NumberToLocaleString(
+   // side-effects of examining those arguments are unobservable.
+   bool can_cache =
+       (IsString(*locales) || IsUndefined(*locales)) && IsUndefined(*options);
+-  if (can_cache) {
++  // SSRS2: every call's formatter is kept by its locales and options (Ssrs2FormatterKey), one without options too: V8's
++  // own cache formats with a copy of its formatter, which ICU never compiles (10 microseconds a call). The formatter
++  // made of a copy of the options read; the kept one held while it formats (the map may let it go).
++  if (can_cache && !g_local_time_is_utc) {
+     icu::number::LocalizedNumberFormatter* cached_number_format =
+         static_cast<icu::number::LocalizedNumberFormatter*>(
+             isolate->get_cached_icu_object(
+@@ -1588,6 +1591,46 @@ MaybeDirectHandle<String> Intl::NumberToLocaleString(
+       return JSNumberFormat::FormatNumeric(isolate, lfmt.get(), numeric_obj);
+     }
+   }
++  std::string ssrs2_key;
++  DirectHandle<Object> given_options = options;
++  if (g_local_time_is_utc) {
++    static const RootIndex kOptions[] = {
++        RootIndex::klocaleMatcher_string, RootIndex::knumberingSystem_string,
++        RootIndex::kstyle_string, RootIndex::kcurrency_string,
++        RootIndex::kcurrencyDisplay_string, RootIndex::kcurrencySign_string,
++        RootIndex::kunit_string, RootIndex::kunitDisplay_string,
++        RootIndex::knotation_string, RootIndex::kcompactDisplay_string,
++        RootIndex::ksignDisplay_string, RootIndex::kuseGrouping_string,
++        RootIndex::kminimumIntegerDigits_string,
++        RootIndex::kminimumFractionDigits_string,
++        RootIndex::kmaximumFractionDigits_string,
++        RootIndex::kminimumSignificantDigits_string,
++        RootIndex::kmaximumSignificantDigits_string,
++        RootIndex::kroundingPriority_string,
++        RootIndex::kroundingIncrement_string, RootIndex::kroundingMode_string,
++        RootIndex::ktrailingZeroDisplay_string};
++    DirectHandle<Object> values[arraysize(kOptions)];
++    Maybe<bool> keyed =
++        Ssrs2FormatterKey(isolate, "n", locales, options, kOptions,
++                          arraysize(kOptions), &ssrs2_key, values);
++    MAYBE_RETURN(keyed, {});
++    if (keyed.FromJust()) {
++      std::shared_ptr<void> kept =
++          isolate->date_cache()->Ssrs2Formatter(ssrs2_key);
++      if (kept) {
++        return JSNumberFormat::FormatNumeric(
++            isolate,
++            static_cast<icu::number::LocalizedNumberFormatter*>(kept.get()),
++            numeric_obj);
++      }
++      if (!IsUndefined(*options)) {
++        given_options =
++            Ssrs2OptionsCopy(isolate, kOptions, values, arraysize(kOptions));
++      }
++    } else {
++      ssrs2_key.clear();
++    }
++  }
+ 
+   DirectHandle<JSFunction> constructor(
+       Cast<JSFunction>(
+@@ -1604,12 +1647,15 @@ MaybeDirectHandle<String> Intl::NumberToLocaleString(
+   }
+   ASSIGN_RETURN_ON_EXCEPTION(
+       isolate, number_format,
+-      New<JSNumberFormat>(isolate, constructor, locales, options, method_name));
++      New<JSNumberFormat>(isolate, constructor, locales, given_options,
++                          method_name));
+ 
+   Managed<icu::number::LocalizedNumberFormatter>::Ptr lfmt =
+       number_format->icu_number_formatter()->ptr();
+ 
+-  if (can_cache) {
++  if (!ssrs2_key.empty()) {
++    isolate->date_cache()->Ssrs2KeepFormatter(ssrs2_key, lfmt.as_shared_ptr());
++  } else if (can_cache) {
+     isolate->set_icu_object_in_cache(
+         Isolate::ICUObjectCacheType::kDefaultNumberFormat, locales,
+         lfmt.as_shared_ptr());
+@@ -2744,6 +2790,11 @@ MaybeDirectHandle<String> Intl::Normalize(Isolate* isolate,
+ class ICUTimezoneCache : public base::TimezoneCache {
+  public:
+   ICUTimezoneCache() : timezone_(nullptr) { Clear(TimeZoneDetection::kSkip); }
++  // SSRS2: a page's zone (DateCache::Ssrs2SetTimeZone), "" for the process's default.
++  explicit ICUTimezoneCache(const std::string& zone)
++      : timezone_(nullptr), zone_(zone) {
++    Clear(TimeZoneDetection::kSkip);
++  }
+ 
+   ~ICUTimezoneCache() override { Clear(TimeZoneDetection::kSkip); }
+ 
+@@ -2762,6 +2813,7 @@ class ICUTimezoneCache : public base::TimezoneCache {
+                   int32_t* dst_offset);
+ 
+   icu::TimeZone* timezone_;
++  std::string zone_;
+ 
+   std::string timezone_name_;
+   std::string dst_timezone_name_;
+@@ -2772,7 +2824,14 @@ const char* ICUTimezoneCache::LocalTimezone(double time_ms) {
+   std::string* name = is_dst ? &dst_timezone_name_ : &timezone_name_;
+   if (name->empty()) {
+     icu::UnicodeString result;
+-    GetTimeZone()->getDisplayName(is_dst, icu::TimeZone::LONG, result);
++    // SSRS2: the zone's name in American English, whatever the machine's language (a date's toString is the same on
++    // every machine: the engine's pages are rendered as by a browser in English).
++    if (g_local_time_is_utc) {
++      GetTimeZone()->getDisplayName(is_dst, icu::TimeZone::LONG,
++                                    icu::Locale::getUS(), result);
++    } else {
++      GetTimeZone()->getDisplayName(is_dst, icu::TimeZone::LONG, result);
++    }
+     result += '\0';
+ 
+     icu::StringByteSink<std::string> byte_sink(name);
+@@ -2784,7 +2843,9 @@ const char* ICUTimezoneCache::LocalTimezone(double time_ms) {
+ 
+ icu::TimeZone* ICUTimezoneCache::GetTimeZone() {
+   if (timezone_ == nullptr) {
+-    timezone_ = icu::TimeZone::createDefault();
++    timezone_ = zone_.empty() ? icu::TimeZone::createDefault()
++                              : icu::TimeZone::createTimeZone(
++                                    icu::UnicodeString::fromUTF8(zone_));
+   }
+   return timezone_;
+ }
+@@ -2833,6 +2894,162 @@ base::TimezoneCache* Intl::CreateTimeZoneCache() {
+                                     : base::OS::CreateTimezoneCache();
+ }
+ 
++base::TimezoneCache* Intl::CreateTimeZoneCache(const std::string& zone) {
++  return new ICUTimezoneCache(zone);
++}
++
++std::string Intl::Ssrs2CanonicalTimeZone(Isolate* isolate,
++                                         const std::string& name,
++                                         bool* known) {
++  *known = true;
++  std::string lower(name);
++  std::transform(lower.begin(), lower.end(), lower.begin(), ToAsciiLower);
++  if (lower.empty() || lower == "utc" || lower == "etc/utc" ||
++      lower == "etc/gmt" || lower == "gmt" || lower == "z") {
++    return std::string();
++  }
++  DirectHandle<String> given;
++  if (!isolate->factory()
++           ->NewStringFromUtf8(base::CStrVector(name.c_str()))
++           .ToHandle(&given)) {
++    *known = false;
++    return std::string();
++  }
++  std::unique_ptr<icu::TimeZone> tz =
++      JSDateTimeFormat::CreateTimeZone(isolate, given);
++  if (!tz) {
++    *known = false;
++    return std::string();
++  }
++  icu::UnicodeString id;
++  tz->getID(id);
++  std::string canonical;
++  id.toUTF8String(canonical);
++  return canonical == "UTC" || canonical == "Etc/UTC" ? std::string()
++                                                      : canonical;
++}
++
++std::string Intl::Ssrs2ResolveDefaultLocale(Isolate* isolate,
++                                            const std::string& tag) {
++  if (tag.empty()) return "en-US";
++  if (!IsStructurallyValidLanguageTag(tag)) return std::string();
++  std::string canonical;
++  if (!ValidateAndCanonicalizeUnicodeLocaleId(isolate, tag).To(&canonical)) {
++    return std::string();
++  }
++  ParsedLocale parsed = ParseBCP47Locale(canonical);
++  std::string available = BestAvailableLocale(
++      JSNumberFormat::GetAvailableLocales(), parsed.no_extensions_locale);
++  if (available.empty()) return "en-US";
++  return available + parsed.extension;
++}
++
++namespace {
++
++// SSRS2: a value in a formatter's key: its type, its text's length and its text (a small integer, a boolean or a
++// flat string written as it is, without a string made of it).
++void Ssrs2AppendKeyValue(Isolate* isolate, std::string* key, char type,
++                         DirectHandle<Object> value) {
++  key->push_back(type);
++  if (IsSmi(*value)) {
++    std::string text = std::to_string(Smi::ToInt(*value));
++    key->append(std::to_string(text.size()));
++    key->push_back(':');
++    key->append(text);
++    return;
++  }
++  if (IsBoolean(*value)) {
++    key->append(IsTrue(*value) ? "1:t" : "1:f");
++    return;
++  }
++  std::string text =
++      (IsString(*value) ? Cast<String>(value)
++                        : Object::NoSideEffectsToString(isolate, value))
++          ->ToStdString();
++  key->append(std::to_string(text.size()));
++  key->push_back(':');
++  key->append(text);
++}
++
++}  // namespace
++
++Maybe<bool> Intl::Ssrs2FormatterKey(Isolate* isolate, const char* kind,
++                                    DirectHandle<Object> locales,
++                                    DirectHandle<Object> options,
++                                    const RootIndex* names, size_t count,
++                                    std::string* key,
++                                    DirectHandle<Object>* values) {
++  key->assign(kind);
++  key->push_back('|');
++  if (IsUndefined(*locales)) {
++    key->push_back('u');
++  } else if (IsString(*locales)) {
++    Ssrs2AppendKeyValue(isolate, key, 's', locales);
++  } else if (IsJSArray(*locales)) {
++    DirectHandle<JSArray> list = Cast<JSArray>(locales);
++    double length = Object::NumberValue(list->length());
++    if (!(length <= 16)) return Just(false);
++    key->push_back('a');
++    key->append(std::to_string(static_cast<int>(length)));
++    for (uint32_t i = 0; i < static_cast<uint32_t>(length); i++) {
++      DirectHandle<Object> item;
++      ASSIGN_RETURN_ON_EXCEPTION_VALUE(
++          isolate, item, JSReceiver::GetElement(isolate, list, i),
++          Nothing<bool>());
++      if (!IsString(*item)) return Just(false);
++      Ssrs2AppendKeyValue(isolate, key, 's', item);
++    }
++  } else {
++    return Just(false);
++  }
++  if (IsUndefined(*options)) return Just(true);
++  if (!IsJSObject(*options) || IsJSProxy(*options)) return Just(false);
++  DirectHandle<JSReceiver> given = Cast<JSReceiver>(options);
++  for (size_t i = 0; i < count; i++) {
++    DirectHandle<Object> value;
++    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
++        isolate, value,
++        JSReceiver::GetProperty(isolate, given,
++                                Cast<Name>(isolate->root_handle(names[i]))),
++        Nothing<bool>());
++    values[i] = value;
++    char type;
++    if (IsUndefined(*value)) {
++      continue;
++    } else if (IsString(*value)) {
++      type = 's';
++    } else if (IsNumber(*value)) {
++      type = 'n';
++    } else if (IsBoolean(*value)) {
++      type = 'b';
++    } else if (IsNull(*value)) {
++      type = 'z';
++    } else if (IsBigInt(*value)) {
++      type = 'i';
++    } else {
++      return Just(false);
++    }
++    key->push_back('|');
++    key->append(std::to_string(i));
++    Ssrs2AppendKeyValue(isolate, key, type, value);
++  }
++  return Just(true);
++}
++
++DirectHandle<JSObject> Intl::Ssrs2OptionsCopy(
++    Isolate* isolate, const RootIndex* names,
++    const DirectHandle<Object>* values, size_t count) {
++  DirectHandle<JSObject> read =
++      isolate->factory()->NewJSObject(isolate->object_function());
++  for (size_t i = 0; i < count; i++) {
++    if (values[i].is_null() || IsUndefined(*values[i])) continue;
++    JSObject::AddProperty(isolate, read,
++                          Cast<Name>(isolate->root_handle(names[i])),
++                          values[i], NONE);
++  }
++  return read;
++}
++
+ Maybe<Intl::MatcherOption> Intl::GetLocaleMatcher(
+     Isolate* isolate, DirectHandle<JSReceiver> options,
+     const char* method_name) {
+--- a/src/objects/intl-objects.h
++++ b/src/objects/intl-objects.h
+@@ -434,6 +434,39 @@ class Intl {
+       Isolate* isolate, DirectHandle<String> string,
+       DirectHandle<Object> form_input);
+   static base::TimezoneCache* CreateTimeZoneCache();
++  // SSRS2: a zone cache of the zone named (an IANA name; "" for the process's default), whatever
++  // --icu-timezone-data says.
++  static base::TimezoneCache* CreateTimeZoneCache(const std::string& zone);
++
++  // SSRS2: the key DateCache keeps a formatter by (Ssrs2Formatter): the kind, the locales and each option named, in
++  // the order named, with its type. Answers false where the call is not kept: locales other than undefined, a string
++  // or an array of 16 strings at most; options other than undefined or an ordinary object; an option an object, a
++  // function or a symbol. When true and options is an object, *copy holds the options read (the formatter is made of
++  // them, so a getter runs once).
++  // SSRS2 (v8::ssrs2::SetTimeZone): a zone's canonical name as Intl reads it, "" for UTC (and its names: UTC,
++  // Etc/UTC, Etc/GMT, GMT, Z, whatever their case); *known false for a name ICU does not know. May leave an
++  // exception (the caller's TryCatch).
++  static std::string Ssrs2CanonicalTimeZone(Isolate* isolate,
++                                            const std::string& name,
++                                            bool* known);
++  // SSRS2 (v8::ssrs2::SetDefaultLocale): the locale Intl resolves a tag to (its canonical form, the nearest locale ICU
++  // has, its Unicode extensions), en-US where ICU has none; "" for a tag that is not one. May leave an exception.
++  static std::string Ssrs2ResolveDefaultLocale(Isolate* isolate,
++                                               const std::string& tag);
++
++  // SSRS2: the key a formatter of these locales and options is kept by: the kind, the locales, and the options among
++  // names that are given, their values read once into values (count of them). False for what is not kept (a proxy,
++  // locales that are no string or list of strings, an option that is no string, number, boolean or null).
++  static Maybe<bool> Ssrs2FormatterKey(Isolate* isolate, const char* kind,
++                                       DirectHandle<Object> locales,
++                                       DirectHandle<Object> options,
++                                       const RootIndex* names, size_t count,
++                                       std::string* key,
++                                       DirectHandle<Object>* values);
++  // SSRS2: an object of the options Ssrs2FormatterKey read, made only when no formatter is kept for them.
++  static DirectHandle<JSObject> Ssrs2OptionsCopy(
++      Isolate* isolate, const RootIndex* names,
++      const DirectHandle<Object>* values, size_t count);
+ 
+   // Convert a Handle<String> to icu::UnicodeString
+   static icu::UnicodeString ToICUUnicodeString(Isolate* isolate,
+--- a/src/objects/js-date-time-format.cc
++++ b/src/objects/js-date-time-format.cc
+@@ -1910,6 +1910,43 @@ MaybeDirectHandle<String> JSDateTimeFormat::ToLocaleDateTime(
+       return FormatDateTime(isolate, *cached_icu_simple_date_format, x);
+     }
+   }
++  // SSRS2: a call with options kept by its locales and options (Intl::Ssrs2FormatterKey), the formatter made of a
++  // copy of the options read.
++  std::string ssrs2_key;
++  if (!can_cache && g_local_time_is_utc) {
++    static const RootIndex kOptions[] = {
++        RootIndex::klocaleMatcher_string, RootIndex::kcalendar_string,
++        RootIndex::knumberingSystem_string, RootIndex::khour12_string,
++        RootIndex::khourCycle_string, RootIndex::ktimeZone_string,
++        RootIndex::kweekday_string, RootIndex::kera_string,
++        RootIndex::kyear_string, RootIndex::kmonth_string,
++        RootIndex::kday_string, RootIndex::kdayPeriod_string,
++        RootIndex::khour_string, RootIndex::kminute_string,
++        RootIndex::ksecond_string, RootIndex::kfractionalSecondDigits_string,
++        RootIndex::ktimeZoneName_string, RootIndex::kformatMatcher_string,
++        RootIndex::kdateStyle_string, RootIndex::ktimeStyle_string};
++    const char kind[] = {'d', static_cast<char>('0' + static_cast<int>(required)),
++                         static_cast<char>('0' + static_cast<int>(defaults)), 0};
++    DirectHandle<Object> values[arraysize(kOptions)];
++    Maybe<bool> keyed = Intl::Ssrs2FormatterKey(
++        isolate, kind, locales, options, kOptions, arraysize(kOptions),
++        &ssrs2_key, values);
++    MAYBE_RETURN(keyed, {});
++    if (keyed.FromJust()) {
++      std::shared_ptr<void> kept =
++          isolate->date_cache()->Ssrs2Formatter(ssrs2_key);
++      if (kept) {
++        return FormatDateTime(
++            isolate, *static_cast<icu::SimpleDateFormat*>(kept.get()), x);
++      }
++      if (!IsUndefined(*options)) {
++        options = Intl::Ssrs2OptionsCopy(isolate, kOptions, values,
++                                         arraysize(kOptions));
++      }
++    } else {
++      ssrs2_key.clear();
++    }
++  }
+   // 4. Let dateFormat be ? Construct(%DateTimeFormat%, « locales, options »).
+   DirectHandle<JSFunction> constructor(
+       Cast<JSFunction>(isolate->context()
+@@ -1931,6 +1968,9 @@ MaybeDirectHandle<String> JSDateTimeFormat::ToLocaleDateTime(
+   if (can_cache) {
+     isolate->set_icu_object_in_cache(cache_type, locales,
+                                      format.as_shared_ptr());
++  } else if (!ssrs2_key.empty()) {
++    isolate->date_cache()->Ssrs2KeepFormatter(ssrs2_key,
++                                              format.as_shared_ptr());
+   }
+ 
+   // 5. Return FormatDateTime(dateFormat, x).
+@@ -2789,7 +2829,11 @@ MaybeDirectHandle<JSDateTimeFormat> JSDateTimeFormat::CreateDateTimeFormat(
+       // b. Else
+     } else {
+       //    i. Set timeZone to SystemTimeZoneIdentifier().
+-      tz.reset(icu::TimeZone::createDefault());
++      // SSRS2: the page's zone where the embedder set one (DateCache::Ssrs2SetTimeZone).
++      const std::string& page_zone = isolate->date_cache()->ssrs2_time_zone();
++      tz.reset(page_zone.empty() ? icu::TimeZone::createDefault()
++                                 : icu::TimeZone::createTimeZone(
++                                       icu::UnicodeString::fromUTF8(page_zone)));
+     }
+   } else {
+     // a. If toLocaleStringTimeZone is present, throw a TypeError exception.
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -5913,6 +5913,16 @@ int64_t JSDate::CurrentTimeValue(Isolate* isolate) {
+   if (v8_flags.log_timer_events) LOG(isolate, CurrentTimeEvent());
+   if (v8_flags.correctness_fuzzer_suppressions) return 4;
+ 
++  // SSRS2: the page's clock where the embedder set one (v8::ssrs2::SetClock): each read moves it on by its step.
++  DateCache::Ssrs2Clock& page_clock = isolate->date_cache()->ssrs2_clock();
++  if (page_clock.set) {
++    double now = page_clock.origin +
++                 (page_clock.clock != nullptr
++                      ? (*page_clock.clock += page_clock.step)
++                      : 1);
++    return static_cast<int64_t>(std::floor(now));
++  }
++
+   // According to ECMA-262, section 15.9.1, page 117, the precision of
+   // the number in a Date object representing a particular instant in
+   // time is milliseconds. Therefore, we floor the result of getting
+@@ -5976,7 +5986,8 @@ Tagged<Object> JSDate::DoGetField(Isolate* isolate, FieldIndex index) {
+ 
+   // SSRS2: with local time UTC (g_local_time_is_utc), getUTCDate and its kin read the cached local fields: a date's
+   // calendar fields worked out once after it is set, not again for each of them.
+-  if (g_local_time_is_utc && index >= kYearUTC && index <= kSecondUTC) {
++  if (g_local_time_is_utc && date_cache->local_time_is_utc() &&
++      index >= kYearUTC && index <= kSecondUTC) {
+     index = static_cast<FieldIndex>(index - kYearUTC + kYear);
+   }
+ 

@@ -1,0 +1,114 @@
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+index 88da00fd..010cbcf1 100644
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -5042,6 +5042,100 @@ NATIVE_ENTRY_POINT(int32_t) Ssrs2_SetSecurityToken(int32_t context, const uint16
+     return Ssrs2Contexts::NumberOf(isolate, target);
+ }
+ 
++// A page's time, place and chance (0048, with V8's 0008, v8::ssrs2::SetClock, SetTimeZone, SetDefaultLocale and
++// SeedRandom): what Date, Intl and Math.random answer the scripts of the isolate entered on this thread, which run one
++// document at a time.
++//
++//   int32_t Ssrs2_SetClock(double* clock, double origin, double step);
++//   int32_t Ssrs2_SetTimeZone(const uint16_t* name, int32_t length);
++//   int32_t Ssrs2_SetDefaultLocale(const uint16_t* tag, int32_t length);
++//   int32_t Ssrs2_SeedRandom(int32_t context, uint32_t seed);
++//
++// Ssrs2_SetClock: Date.now(), new Date() and Date() read origin + *clock in milliseconds, floored, after moving *clock on
++// by step; *clock is the embedder's (its event loop moves it too) and must stay valid while the isolate's scripts run,
++// or until set again; clock null reads origin + 1. Until it is called the isolate reads the machine's clock. 1 when set.
++// Ssrs2_SetTimeZone: local time, Date's string forms and Intl's default zone in the zone named (an IANA name or an
++// offset, as Intl reads them; length 0: UTC); 1 when set, 0, the zone unchanged, for a name ICU does not know.
++// Changing whether local time is UTC throws away the isolate's optimized code that read dates.
++// Ssrs2_SetDefaultLocale: Intl's and the toLocale methods' default locale, the locale Intl resolves the tag to
++// (length 0: en-US); 1 when set, 0, unchanged, for a tag that is none. A change throws away optimized code.
++// Ssrs2_SeedRandom: Math.random's sequence in the context (its number, 0032, or 0 for the current one), SSRS2's
++// xorshift128 started from seed (a context never seeded draws as if seeded with 0); answers the context's number.
++// All answer 0 with no isolate entered on this thread (and a name or tag of more than 256 characters, or not ASCII).
++// Threading: the isolate's thread, the isolate entered and locked by the caller. No script runs: safe inside any host
++// call or callback.
++namespace Ssrs2PageEnvironment
++{
++    // (an ASCII name of 256 characters at most, as a C string)
++    static bool Ascii(const uint16_t* chars, int32_t length, std::string& text)
++    {
++        if (length < 0 || length > 256 || (length > 0 && chars == nullptr))
++        {
++            return false;
++        }
++        text.clear();
++        for (int32_t i = 0; i < length; i++)
++        {
++            if (chars[i] == 0 || chars[i] > 127)
++            {
++                return false;
++            }
++            text.push_back(static_cast<char>(chars[i]));
++        }
++        return true;
++    }
++}
++
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_SetClock(double* clock, double origin, double step) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr)
++    {
++        return 0;
++    }
++    v8::ssrs2::SetClock(isolate, clock, origin, step);
++    return 1;
++}
++
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_SetTimeZone(const uint16_t* name, int32_t length) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    std::string text;
++    if (isolate == nullptr || !Ssrs2PageEnvironment::Ascii(name, length, text))
++    {
++        return 0;
++    }
++    return v8::ssrs2::SetTimeZone(isolate, text.c_str()) ? 1 : 0;
++}
++
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_SetDefaultLocale(const uint16_t* tag, int32_t length) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    std::string text;
++    if (isolate == nullptr || !Ssrs2PageEnvironment::Ascii(tag, length, text))
++    {
++        return 0;
++    }
++    return v8::ssrs2::SetDefaultLocale(isolate, text.c_str()) ? 1 : 0;
++}
++
++NATIVE_ENTRY_POINT(int32_t) Ssrs2_SeedRandom(int32_t context, uint32_t seed) noexcept
++{
++    auto isolate = v8::Isolate::TryGetCurrent();
++    if (isolate == nullptr)
++    {
++        return 0;
++    }
++    v8::HandleScope scope(isolate);
++    auto target = Ssrs2Contexts::Find(isolate, context);
++    if (target.IsEmpty())
++    {
++        return 0;
++    }
++    v8::ssrs2::SeedRandom(target, seed);
++    return Ssrs2Contexts::NumberOf(isolate, target);
++}
++
+ // String arenas (0029): text an embedder and a context's scripts both read without copying it at each crossing. An
+ // arena is blocks of memory that never move; an entry is a string's characters, one byte each when all are Latin-1,
+ // else two, numbered from 1 in the order added. The embedder adds a string once (Ssrs2_ArenaAdd) and reads an entry
+@@ -7099,4 +7193,8 @@ NATIVE_ENTRY_POINT(int) Ssrs2_CollectOnce(int32_t on) noexcept
+ #pragma comment(linker, "/EXPORT:Ssrs2_WatchObjects=_Ssrs2_WatchObjects@8")
+ #pragma comment(linker, "/EXPORT:Ssrs2_CollectedObjects=_Ssrs2_CollectedObjects@12")
+ #pragma comment(linker, "/EXPORT:Ssrs2_CollectOnce=_Ssrs2_CollectOnce@4")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetClock=_Ssrs2_SetClock@20")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetTimeZone=_Ssrs2_SetTimeZone@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_SetDefaultLocale=_Ssrs2_SetDefaultLocale@8")
++#pragma comment(linker, "/EXPORT:Ssrs2_SeedRandom=_Ssrs2_SeedRandom@8")
+ #endif

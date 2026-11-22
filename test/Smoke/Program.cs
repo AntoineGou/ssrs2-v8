@@ -112,6 +112,8 @@ var arenaLimits = ArenaLimits.Check(Directory.GetFiles(AppContext.BaseDirectory,
 Console.WriteLine($"string arena limits: {arenaLimits}");
 var collectOnce = CollectOnce.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
 Console.WriteLine($"collect once: {collectOnce}");
+var pageEnvironment = PageEnvironment.Check(Directory.GetFiles(AppContext.BaseDirectory, "SSRS2.ClearScriptV8.*").First());
+Console.WriteLine($"page environment: {pageEnvironment}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
     && scheduled == ImportSchedulers.Expected && heap == HeapLimits.Expected && referrer == KeptReferrers.Expected && codeLike == CodeLikes.Expected && undetectable == Undetectables.Expected && noReferrer == NoReferrers.Expected && incumbent == Incumbents.Expected
     && evalCallers == EvalCallers.Expected && links == ContextLinks.Expected && wasmMemory == WasmMemoryLimits.Expected
@@ -124,8 +126,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && hostScheduler == ImportHostSchedulers.Expected && namedHost == NamedHostInterceptors.Expected && tableQueries == TableQueries.Expected
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
     && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected
-    && watched == WatchedObjects.Expected && arenaLimits == ArenaLimits.Expected && collectOnce == CollectOnce.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}\ncollect once: {CollectOnce.Expected}");
+    && watched == WatchedObjects.Expected && arenaLimits == ArenaLimits.Expected && collectOnce == CollectOnce.Expected
+    && pageEnvironment == PageEnvironment.Expected) return 0;
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}\ncollect once: {CollectOnce.Expected}\npage environment: {PageEnvironment.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2837,5 +2840,143 @@ static unsafe class CollectOnce
         engine.Execute("for (let i = 0; i < 48; i++) gc();");
         Console.Error.WriteLine($"answers {before},{after}");
         return 0;
+    }
+}
+
+// patches/clearscript/0048 (with V8's 0008): Ssrs2_SetClock, Ssrs2_SetTimeZone, Ssrs2_SetDefaultLocale and
+// Ssrs2_SeedRandom set what a page's scripts see of time, place and chance. Checked in one isolate: Date.now(), new
+// Date() and Date() at the embedder's clock, which each read moves on by its step, and a null clock; a page zone
+// (New York: local fields, the offset, toString's zone, a local date made, Intl's default zone, getUTCHours read by
+// code the optimizing tiers compiled while local time was UTC), back to UTC, an unknown zone refused; a default
+// locale (Germany's numbers, Intl's resolved locale, a call with options twice, kept), a locale ICU lacks taken as
+// en-US, a tag that is none refused; Math.random seeded as SSRS2's .NET twin draws (Bindings/Window/SeededRandom), an
+// unseeded context as seed 0, and a context seeded by its number from another's host call.
+
+static unsafe class PageEnvironment
+{
+    public const string Expected =
+        "clock 1000000000001 1000000000002 string 2.5 500000000001"
+        + ":zone 1 7 300 7 Mon Jan 15 2024 07:00:00 GMT-0500 (Eastern Standard Time) 1719806400000 America/New_York 12 12"
+        + ":utc 1 12 0 Mon Jan 15 2024 12:00:00 GMT+0000 (Coordinated Universal Time) UTC 0"
+        + ":locale 1 1.234,5 de-DE 1.234,50 1.234,50 Januar 1 en-US 0 1 1,234.5"
+        + ":random same same same same";
+
+    public static string Check(string library)
+    {
+        var handle = NativeLibrary.Load(library);
+        bool Export(string name, int bytes, out nint export) =>
+            NativeLibrary.TryGetExport(handle, name, out export) || NativeLibrary.TryGetExport(handle, "_" + name + "@" + bytes, out export);
+        if (!Export("Ssrs2_SetClock", 20, out var clockExport) || !Export("Ssrs2_SetTimeZone", 8, out var zoneExport)
+            || !Export("Ssrs2_SetDefaultLocale", 8, out var localeExport) || !Export("Ssrs2_SeedRandom", 8, out var seedExport)
+            || !Export("Ssrs2_ContextNumber", 0, out var numberExport)) return "export missing";
+        var setClock = (delegate* unmanaged[Stdcall]<double*, double, double, int>)clockExport;
+        var setZone = (delegate* unmanaged[Stdcall]<char*, int, int>)zoneExport;
+        var setLocale = (delegate* unmanaged[Stdcall]<char*, int, int>)localeExport;
+        var seedRandom = (delegate* unmanaged[Stdcall]<int, uint, int>)seedExport;
+        var number = (delegate* unmanaged[Stdcall]<int>)numberExport;
+        int Text(delegate* unmanaged[Stdcall]<char*, int, int> set, string text)
+        {
+            fixed (char* chars = text) return set(chars, text.Length);
+        }
+
+        var cell = (double*)NativeMemory.Alloc(sizeof(double));
+        try
+        {
+            using var runtime = new V8Runtime();
+            using var first = runtime.CreateScriptEngine();
+            using var second = runtime.CreateScriptEngine();
+            int secondNumber = 0;
+            second.AddHostObject("number", new Action(() => secondNumber = number()));
+            second.Execute("number();");
+            first.AddHostObject("clock", new Func<double, double, double, bool, int>((start, origin, step, none) =>
+            {
+                *cell = start;
+                return setClock(none ? null : cell, origin, step);
+            }));
+            first.AddHostObject("cell", new Func<double>(() => *cell));
+            first.AddHostObject("zone", new Func<string, int>(name => Text(setZone, name)));
+            first.AddHostObject("locale", new Func<string, int>(tag => Text(setLocale, tag)));
+            first.AddHostObject("seed", new Func<int, uint, int>((context, seed) => seedRandom(context == 1 ? secondNumber : 0, seed)));
+            string random = RandomCheck(first, second);
+            return (string)first.Evaluate("""
+                const r = [];
+                // the clock: three reads from 1 by 0.5 (Date.now, new Date, Date), the cell read back, then a null clock
+                clock(1, 1e12, 0.5, false);
+                r.push(['clock', Date.now(), new Date().getTime(), typeof Date(), cell()].join(' '));
+                clock(0, 5e11, 0, true);
+                r[0] += ' ' + Date.now();
+                // a page zone
+                const noon = new Date(Date.UTC(2024, 0, 15, 12));
+                const utcHours = d => d.getUTCHours();
+                for (let i = 0; i < 200000; i++) utcHours(noon);
+                const set = zone('America/New_York');
+                r.push(['zone', set, noon.getHours(), noon.getTimezoneOffset(), new Date(noon.getTime()).getHours(), noon.toString(),
+                    new Date(2024, 6, 1).getTime(), new Intl.DateTimeFormat().resolvedOptions().timeZone, noon.getUTCHours(),
+                    utcHours(noon)].join(' '));
+                // back to UTC, and a zone that is none
+                r.push(['utc', zone(''), noon.getHours(), noon.getTimezoneOffset(), noon.toString(),
+                    new Intl.DateTimeFormat().resolvedOptions().timeZone, zone('Mars/Base')].join(' '));
+                // a default locale, a locale ICU lacks, a tag that is none, en-US again
+                const january = new Date(Date.UTC(2024, 0, 15));
+                r.push(['locale', locale('de-DE'), (1234.5).toLocaleString(), new Intl.NumberFormat().resolvedOptions().locale,
+                    (1234.5).toLocaleString(undefined, { minimumFractionDigits: 2 }), (1234.5).toLocaleString(undefined, { minimumFractionDigits: 2 }),
+                    january.toLocaleDateString(undefined, { month: 'long' }), locale('xx'), new Intl.NumberFormat().resolvedOptions().locale,
+                    locale('not a tag!'), locale(''), (1234.5).toLocaleString()].join(' '));
+                r.join(':')
+                """) + ":" + random;
+        }
+        finally
+        {
+            NativeMemory.Free(cell);
+        }
+    }
+
+    // Math.random against the .NET twin: the first context seeded 42 by its own call, then 7; the second context
+    // unseeded (seed 0), then seeded 99 from the first's host call by its number.
+    static string RandomCheck(V8ScriptEngine first, V8ScriptEngine second)
+    {
+        string Draws(V8ScriptEngine engine) => (string)engine.Evaluate("[Math.random(), Math.random(), Math.random()].join(',')");
+        string Twin(uint seed)
+        {
+            var twin = new Twin(seed);
+            return string.Join(",", Enumerable.Range(0, 3).Select(_ => twin.NextDouble().ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
+        }
+        // (JavaScript's and .NET's shortest round-trip forms of a double agree)
+        string Same(string a, string b) => a == b ? "same" : a + " vs " + b;
+        var unseeded = Same(Draws(second), Twin(0));
+        first.Execute("seed(0, 42)");
+        var forty = Same(Draws(first), Twin(42));
+        first.Execute("seed(0, 7)");
+        var seven = Same(Draws(first), Twin(7));
+        first.Execute("seed(1, 99)");
+        var other = Same(Draws(second), Twin(99));
+        return "random " + unseeded + " " + forty + " " + seven + " " + other;
+    }
+
+    // SSRS2's generator (Bindings/Window/SeededRandom in the engine's repository)
+    sealed class Twin
+    {
+        uint _s0, _s1, _s2, _s3;
+        public Twin(uint seed)
+        {
+            _s0 = seed != 0 ? seed : 0x9E3779B9;
+            _s1 = 0x243F6A88 ^ _s0;
+            _s2 = 0xB7E15162;
+            _s3 = 0x6A09E667 ^ unchecked(seed * 31u);
+            for (int i = 0; i < 16; i++) Next32();
+        }
+        uint Next32()
+        {
+            uint t = _s0 ^ (_s0 << 11);
+            _s0 = _s1; _s1 = _s2; _s2 = _s3;
+            _s3 = _s3 ^ (_s3 >> 19) ^ t ^ (t >> 8);
+            return _s3;
+        }
+        public double NextDouble()
+        {
+            double high = Next32();
+            double low = Next32() >> 11;
+            return (high * 2097152.0 + low) / 9007199254740992.0;
+        }
     }
 }
