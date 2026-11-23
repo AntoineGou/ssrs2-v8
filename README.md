@@ -59,7 +59,10 @@ set by the embedder for each document (`include/v8-ssrs2.h`). `v8::ssrs2::SetClo
 (what a read takes; the embedder's event loop moves it too, and a null clock reads origin + 1). `SetTimeZone(isolate,
 name)`: local time, Date's string forms and Intl's default zone in an IANA zone (UTC when empty, as before; a name ICU
 does not know is refused and the zone left as it was); while local time is UTC the optimizing compilers still fold a
-date's fields, and code they compiled then reads the right fields once the zone changes. `SetDefaultLocale(isolate,
+date's fields, and code they compiled then reads the right fields once the zone changes. The date getters' builtin
+compares the isolate's cache stamp, a 32-bit integer, with the date's as a small integer: compared as loaded, a 32-bit
+library read a date's fields of the zone before once the stamp was twice the date's, and a 64-bit one never read them
+cached. `SetDefaultLocale(isolate,
 tag)`: Intl's and the toLocale methods' default locale (en-US when empty; a tag ICU cannot read is refused, a locale it
 lacks taken as en-US). The toLocaleString methods of numbers and dates keep their formatters by locales and options
 (256 at most, let go when the zone or the locale changes, each option read once and copied only for a formatter made):

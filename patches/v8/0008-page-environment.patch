@@ -143,6 +143,22 @@
  bool ssrs2::SetImmutableProto(Local<Object> object) {
    auto obj = Utils::OpenDirectHandle(*object);
    if (!i::IsJSObject(*obj)) return false;
+--- a/src/builtins/builtins-date-gen.cc
++++ b/src/builtins/builtins-date-gen.cc
+@@ -147,8 +147,11 @@ void DateBuiltinsAssembler::Generate_DatePrototype_GetField(
+   // Load the specified date field, falling back to the runtime as necessary.
+   if (field_index < JSDate::kFirstUncachedField) {
+     Label stamp_mismatch(this, Label::kDeferred);
+-    TNode<Object> date_cache_stamp =
+-        Load<Object>(IsolateField(IsolateFieldId::kDateCacheStamp));
++    // SSRS2: the isolate's stamp is a raw int32 (IsolateData::date_cache_stamp_), the date's a Smi: compared as
++    // loaded, a 32-bit build read a stale field once the stamp was twice the date's (after v8::ssrs2::SetTimeZone),
++    // and a 64-bit build without pointer compression never took this path.
++    TNode<Smi> date_cache_stamp = SmiFromInt32(
++        Load<Int32T>(IsolateField(IsolateFieldId::kDateCacheStamp)));
+ 
+     TNode<Object> cache_stamp =
+         LoadObjectField(date_receiver, offsetof(JSDate, cache_stamp_));
 --- a/src/builtins/math.tq
 +++ b/src/builtins/math.tq
 @@ -518,37 +518,46 @@ extern macro LoadMathRandomState(ByteArray): XorShift128State;
