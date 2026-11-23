@@ -311,7 +311,9 @@ ported. `build.sh` and
 osx-arm64, osx-x64, linux-x64, linux-arm64, linux-arm, win-x64, win-x86, win-arm64. The Linux libraries are built
 against V8's Debian 11 sysroots, for older glibc versions than the build machine's (the build says which). GitHub
 Actions builds each one (`.github/workflows/build.yml`) and loads it through ClearScript on a machine of its kind
-(linux-arm under QEMU, osx-x64 under Rosetta).
+(linux-arm under QEMU, osx-x64 under Rosetta). Under QEMU, .NET runs with W^X off (`DOTNET_EnableWriteXorExecute=0`):
+QEMU's user mode does not see the code .NET patches through its second mapping of the pages, and a host call's second
+run crashed once the test had run enough (the released ssrs2.27 library too, 2026-11-23; with W^X off, every run passes).
 
 ## Releases
 

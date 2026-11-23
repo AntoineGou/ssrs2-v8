@@ -161,11 +161,16 @@ jobs:
       - name: Set up QEMU
         if: env.SELECTED == 'true' && matrix.docker != ''
         uses: docker/setup-qemu-action@v3
+      # (.NET's W^X off under QEMU: .NET writes the code it patches through a second mapping of its pages, which QEMU's
+      # user mode does not see, so the code it translated runs on unpatched. A host call's second run crashed so, with
+      # every release of the library, once the test had run enough: QEMU's, not the library's. A crash hangs the
+      # container: the step ends after 15 minutes.)
       - name: Test (emulated)
         if: env.SELECTED == 'true' && matrix.docker != ''
+        timeout-minutes: 15
         run: >
-          docker run --rm --platform ${{ matrix.docker }} -e TZ=America/New_York -v "$PWD:/w" -w /w
-          mcr.microsoft.com/dotnet/runtime:8.0 dotnet app/Smoke.dll lib
+          docker run --rm --platform ${{ matrix.docker }} -e TZ=America/New_York -e DOTNET_EnableWriteXorExecute=0
+          -v "$PWD:/w" -w /w mcr.microsoft.com/dotnet/runtime:8.0 dotnet app/Smoke.dll lib
 
   release:
     name: Release
