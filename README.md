@@ -248,7 +248,11 @@ UTC and en-US), each answering 1, or 0 for a name refused or no isolate entered,
 compiled while the zone was UTC), UTC again, and is refused an unknown zone; sets Germany's locale (numbers, Intl's
 resolved locale, a format with options twice), takes a locale ICU lacks as en-US and is refused a tag that is none; and
 draws `Math.random` alike to the .NET twin: an unseeded context as seed 0, a context seeded twice, and another context
-seeded by its number. For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+seeded by its number. Then `0049-platform-kept-at-exit.patch`: ClearScript's platform (V8's, with its page allocator) is made
+once and never destroyed, where it was a static object: a runtime disposed just before the process ends may have its
+isolate torn down on a thread-pool thread while `exit()` runs the library's static destructors, which freed the page
+allocator that teardown then gave pages back through (a crash at exit in 4 to 8 runs of the smoke test in 100 on
+linux-arm64, ssrs2.27's library too; none in 120 with the platform kept). For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
 `entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
 non-configurable value and an undetectable one and a non-masking one asked for the missing names alone, a used
 prototype's accessors redefined in setup mode and found again, and two functions' script ids.
