@@ -252,7 +252,27 @@ seeded by its number. Then `0049-platform-kept-at-exit.patch`: ClearScript's pla
 once and never destroyed, where it was a static object: a runtime disposed just before the process ends may have its
 isolate torn down on a thread-pool thread while `exit()` runs the library's static destructors, which freed the page
 allocator that teardown then gave pages back through (a crash at exit in 4 to 8 runs of the smoke test in 100 on
-linux-arm64, ssrs2.27's library too; none in 120 with the platform kept). For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+linux-arm64, ssrs2.27's library too; none in 120 with the platform kept). Then four patches about the tasks V8 posts to an
+isolate while it is being made or torn down, all in ClearScript's platform code as its authors publish it (7.5.1.1). V8
+posts from wherever it is, under its own locks: its WebAssembly code collection (`WasmEngine::TriggerGC`) posts a task to
+every isolate it knows, from inside an isolate's initialization until its disposal, while it holds the process's
+WasmEngine mutex, and that task takes the mutex again. `0050-no-inline-task-for-released-isolate.patch`: a foreground task
+posted to an isolate that is gone or being torn down is dropped, as V8's own platform drops it; it was run at once on the
+posting thread, which then waited for the mutex it held, and every isolate after it waited for that thread (a process
+rendering on eight threads deadlocked when a runtime was disposed while wasm code died on another thread).
+`0052-isolate-locked-while-initialized.patch`: the isolate's lock is held from before `v8::Isolate::Initialize` to the end
+of its constructor; a thread-pool thread ran a posted task inside an isolate whose heap V8 was still deserializing
+(crashes in the deserializer and in lazy compilation, a bad free in a locker's destructor, with several threads only).
+`0053-isolate-released-off-the-poster.patch`: the reference a poster takes from the runner's weak one is let go on the
+thread pool when it is the last (`RefCount::DecrementUnlessLast`); the isolate was otherwise torn down on the posting
+thread, under the same mutex, where the teardown ran the task just queued (the same deadlock another way).
+`0054-isolate-owned-until-its-creator.patch`: an isolate's constructor keeps one count until its creator's handle holds
+its own; in between, the last temporary reference let go destroyed the new isolate under its creator. `test/Smoke` runs,
+in three child processes under `--stress-wasm-code-gc`, eight threads that each make a runtime, compile and run a small
+module in it and dispose it, for 20 s: ssrs2.31's library deadlocked in each of the three within seconds (macOS arm64,
+2026-11-26), and without the flag the same loop through SSRS2's engine crashed it after 1.5 minutes; with the four
+patches that loop ran ten minutes under the flag (61,592 documents) and thirty without it (288,460), no crash and no
+hang. The check is not run under emulation (`SSRS2_SMOKE_EMULATED=1`, set by the workflow's linux-arm job). For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
 `entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
 non-configurable value and an undetectable one and a non-masking one asked for the missing names alone, a used
 prototype's accessors redefined in setup mode and found again, and two functions' script ids.

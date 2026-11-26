@@ -1,0 +1,140 @@
+diff --git a/ClearScriptV8/RefCount.cpp b/ClearScriptV8/RefCount.cpp
+--- a/ClearScriptV8/RefCount.cpp
++++ b/ClearScriptV8/RefCount.cpp
+@@ -28,6 +28,20 @@
+         return --m_Count;
+     }
+ 
++    bool DecrementUnlessLast()
++    {
++        auto count = m_Count.load();
++        while (count > 1)
++        {
++            if (m_Count.compare_exchange_weak(count, count - 1))
++            {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
+ private:
+ 
+     std::atomic<size_t> m_Count;
+@@ -44,6 +58,13 @@
+ 
+ //-----------------------------------------------------------------------------
+ 
++bool RefCount::DecrementUnlessLast()
++{
++    return m_pImpl->DecrementUnlessLast();
++}
++
++//-----------------------------------------------------------------------------
++
+ size_t RefCount::Increment()
+ {
+     return m_pImpl->Increment();
+diff --git a/ClearScriptV8/RefCount.h b/ClearScriptV8/RefCount.h
+--- a/ClearScriptV8/RefCount.h
++++ b/ClearScriptV8/RefCount.h
+@@ -18,6 +18,9 @@
+     size_t Increment();
+     size_t Decrement();
+ 
++    // SSRS2 (0053): one less, unless it is the last one; true when it was taken.
++    bool DecrementUnlessLast();
++
+     ~RefCount();
+ 
+ private:
+diff --git a/ClearScriptV8/SharedPtr.h b/ClearScriptV8/SharedPtr.h
+--- a/ClearScriptV8/SharedPtr.h
++++ b/ClearScriptV8/SharedPtr.h
+@@ -240,6 +240,25 @@
+         SharedPtr<T> spHolder(std::move(*this));
+     }
+ 
++    // SSRS2 (0053): lets this reference go unless it is the target's last one, which it then keeps (no teardown here):
++    // true when let go.
++    bool ReleaseUnlessLast()
++    {
++        if (m_pTarget == nullptr)
++        {
++            return true;
++        }
++
++        if (!m_pRefCount->DecrementUnlessLast())
++        {
++            return false;
++        }
++
++        m_pTarget = nullptr;
++        m_pRefCount = nullptr;
++        return true;
++    }
++
+     ~SharedPtr()
+     {
+         Release();
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -338,6 +338,24 @@
+ bool V8ForegroundTaskRunner::NonNestableDelayedTasksEnabled() const
+ {
+     return true;
++}
++
++//-----------------------------------------------------------------------------
++
++// SSRS2 (0053): a reference to an isolate taken on a thread that posts it a task is let go on the thread pool, not on
++// the posting thread. Taken from the runner's weak reference while the isolate's owner lets it go, it can be the last
++// one: the isolate was then torn down on the posting thread, under whatever lock V8 held there. WasmEngine::TriggerGC
++// posts under the process's WasmEngine mutex, and a teardown there ran the isolate's queued wasm code GC task, which
++// takes that mutex: the thread waited for itself (seen 2026-11-26 in a reproduction with 0050 and 0052).
++// Only the last reference goes to the thread pool: an earlier one is let go here at once (an isolate's own posts while
++// it is made, under its constructor's reference, among them: sent to the pool, such a reference could have been the
++// last one before the isolate's creator took its own, and the half-made isolate was destroyed).
++static void Ssrs2ReleaseOffThread(SharedPtr<V8Isolate>&& spIsolate)
++{
++    if (!spIsolate.ReleaseUnlessLast())
++    {
++        HostObjectUtil::QueueNativeCallback([spLast = std::move(spIsolate)] () mutable { spLast.Empty(); });
++    }
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -358,6 +376,7 @@
+     {
+         m_IsolateImpl.RunTaskWithLockAsync(true, std::move(upTask));
+     }
++    Ssrs2ReleaseOffThread(std::move(spIsolate));
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -369,6 +388,7 @@
+     {
+         m_IsolateImpl.RunTaskWithLockAsync(false, std::move(upTask));
+     }
++    Ssrs2ReleaseOffThread(std::move(spIsolate));
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -380,6 +400,7 @@
+     {
+         m_IsolateImpl.RunTaskWithLockDelayed(true, std::move(upTask), delayInSeconds);
+     }
++    Ssrs2ReleaseOffThread(std::move(spIsolate));
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -391,6 +412,7 @@
+     {
+         m_IsolateImpl.RunTaskWithLockDelayed(false, std::move(upTask), delayInSeconds);
+     }
++    Ssrs2ReleaseOffThread(std::move(spIsolate));
+ }
+ 
+ //-----------------------------------------------------------------------------

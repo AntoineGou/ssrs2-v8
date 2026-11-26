@@ -1,0 +1,34 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -833,6 +833,13 @@
+ 
+         END_ISOLATE_SCOPE
+ 
++        // SSRS2 (0054): the constructor keeps a count past its end, let go by the isolate's creator once its handle holds
++        // its own (V8Isolate_Create). Between the add-ref block's end and that handle, the count was only the temporary
++        // references other threads held (a task's poster, the call-with-lock queue's thread): the last of them let go
++        // there destroyed the new isolate on that thread, and its creator wrapped a dead object; a task posted with the
++        // count at 0 was dropped although the isolate was about to be used.
++        GetRefCount()->Increment();
++
+     END_ADDREF_SCOPE
+ 
+     ++s_InstanceCount;
+diff --git a/ClearScriptV8/V8SplitProxyNative.cpp b/ClearScriptV8/V8SplitProxyNative.cpp
+--- a/ClearScriptV8/V8SplitProxyNative.cpp
++++ b/ClearScriptV8/V8SplitProxyNative.cpp
+@@ -785,7 +785,12 @@
+ 
+     try
+     {
+-        return new V8IsolateHandle(V8Isolate::Create(name, pConstraints, options));
++        // SSRS2 (0054): the constructor's own count let go once the handle holds one (see V8IsolateImpl's constructor):
++        // never the last one here.
++        auto pIsolate = V8Isolate::Create(name, pConstraints, options);
++        auto pHandle = new V8IsolateHandle(pIsolate);
++        pIsolate->GetRefCount()->Decrement();
++        return pHandle;
+     }
+     catch (const V8Exception& exception)
+     {

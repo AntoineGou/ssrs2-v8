@@ -1,0 +1,20 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -774,6 +774,16 @@
+             m_Ssrs2StartedFromSnapshot = true;
+         }
+ 
++        // SSRS2 (0052): the isolate's lock is held from before V8 initializes it to the end of this constructor (to the
++        // end of the add-ref block: the lock goes first, then the count). V8 registers a new isolate where other threads
++        // post it tasks long before it is ready (Isolate::Init calls WasmEngine::AddIsolate before it deserializes its
++        // heap: a wasm code GC then posts it a WasmGCForegroundTask and sets its interrupt), and the task runner exists
++        // as soon as SetData is done; a thread-pool thread taking the lock to run such a task entered an isolate whose
++        // heap another thread was still deserializing (crashes in V8's Deserializer, in CompileLazy, a bad free in
++        // ~Locker, with several threads only; seen 2026-11-26). Held, the queue's thread finds the lock taken, asks an
++        // interrupt and leaves the task queued; the isolate scope below processes it once the isolate is whole, and
++        // nobody enters the isolate before the constructor is done (the mutex is recursive: that scope nests).
++        MutexLock<RecursiveMutex> t_Ssrs2InitializationLock(m_Mutex);
+         v8::Isolate::Initialize(m_upIsolate.get(), params);
+ 
+         m_upIsolate->AddNearHeapLimitCallback(HeapExpansionCallback, this);

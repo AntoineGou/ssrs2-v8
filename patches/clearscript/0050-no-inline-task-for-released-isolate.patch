@@ -1,0 +1,44 @@
+diff --git a/ClearScriptV8/V8IsolateImpl.cpp b/ClearScriptV8/V8IsolateImpl.cpp
+--- a/ClearScriptV8/V8IsolateImpl.cpp
++++ b/ClearScriptV8/V8IsolateImpl.cpp
+@@ -344,12 +344,17 @@
+ 
+ void V8ForegroundTaskRunner::PostTaskImpl(std::unique_ptr<v8::Task> upTask, const v8::SourceLocation& /*location*/)
+ {
++    // SSRS2 (0050): a task posted to an isolate that is gone is dropped, as V8's own platform drops a task posted to the
++    // runner of an isolate shut down, and as the non-nestable and delayed variants here already did; it was run at once
++    // on the posting thread. V8 posts from wherever it is, under its own locks: WasmEngine::TriggerGC posts a
++    // WasmGCForegroundTask to every isolate it knows while it holds the process's WasmEngine mutex, and the task takes
++    // that mutex again, so run inline on that thread it waited for itself, and every isolate after it (a disposal, a
++    // creation, any script reaching the wasm code GC interrupt) waited for that thread: a process deadlocked whenever a
++    // runtime was disposed while another thread triggered a wasm code GC (seen 2026-11-26 in three captures of an
++    // 8-thread stream). The task is destroyed here; its isolate's teardown accounts for it (a CancelableTask leaves its
++    // manager, a wasm code GC drops the isolate from its outstanding ones).
+     auto spIsolate = m_wrIsolate.GetTarget();
+-    if (spIsolate.IsEmpty())
+-    {
+-        upTask->Run();
+-    }
+-    else
++    if (!spIsolate.IsEmpty())
+     {
+         m_IsolateImpl.RunTaskWithLockAsync(true, std::move(upTask));
+     }
+@@ -1480,14 +1485,9 @@
+ {
+     if (upTask)
+     {
+-        if (m_Released)
+-        {
+-            if (allowNesting)
+-            {
+-                upTask->Run();
+-            }
+-        }
+-        else
++        // SSRS2 (0050): a foreground task posted to an isolate being torn down is dropped, whatever its nesting (it was
++        // run at once on the posting thread when nestable: see V8ForegroundTaskRunner::PostTaskImpl).
++        if (!m_Released)
+         {
+             std::shared_ptr<v8::Task> spTask(std::move(upTask));
+             CallWithLockAsync(allowNesting, [allowNesting, spTask] (V8IsolateImpl* pIsolateImpl)
