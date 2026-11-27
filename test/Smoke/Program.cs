@@ -120,6 +120,8 @@ var pageEnvironment = PageEnvironment.Check(Directory.GetFiles(AppContext.BaseDi
 Console.WriteLine($"page environment: {pageEnvironment}");
 var isolateLifetimes = IsolateLifetimes.Check();
 Console.WriteLine($"isolate lifetimes: {isolateLifetimes}");
+var sideBySide = RuntimesSideBySide.Check();
+Console.WriteLine($"runtimes side by side: {sideBySide}");
 var creatorWorkers = CreatorWorkers.Check();
 Console.WriteLine($"creator workers: {creatorWorkers}");
 if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules == Modules.Expected && microtasks == Microtasks.Expected && realms == CreationContexts.Expected
@@ -135,9 +137,9 @@ if (answer == expected && offset == 0 && calls == HostCalls.Expected && modules 
     && tokens == SecurityTokens.Expected && codeLikeObjects == CodeLikeObjects.Expected && sealedReadOnly == SealedReadOnlySpace.Expected
     && recording == RecordingFunctions.Expected && directInPlace == DirectCallsInPlace.Expected && typedCalls == TypedCalls.Expected
     && watched == WatchedObjects.Expected && arenaLimits == ArenaLimits.Expected && collectOnce == CollectOnce.Expected
-    && pageEnvironment == PageEnvironment.Expected && isolateLifetimes == IsolateLifetimes.Expected
+    && pageEnvironment == PageEnvironment.Expected && isolateLifetimes == IsolateLifetimes.Expected && sideBySide == RuntimesSideBySide.Expected
     && creatorWorkers == CreatorWorkers.Expected) return 0;
-Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}\ncollect once: {CollectOnce.Expected}\npage environment: {PageEnvironment.Expected}\nisolate lifetimes: {IsolateLifetimes.Expected}\ncreator workers: {CreatorWorkers.Expected}");
+Console.Error.WriteLine($"expected:\n{expected}\ntime zone offset 0\nhost calls: {HostCalls.Expected}\nmodules: {Modules.Expected}\nmicrotasks: {Microtasks.Expected}\ncreation contexts: {CreationContexts.Expected}\nimport scheduler: {ImportSchedulers.Expected}\nheap limit: {HeapLimits.Expected}\nkept referrer: {KeptReferrers.Expected}\ncode-like: {CodeLikes.Expected}\nundetectable: {Undetectables.Expected}\nno referrer: {NoReferrers.Expected}\nincumbent: {Incumbents.Expected}\neval callers: {EvalCallers.Expected}\ncontext links: {ContextLinks.Expected}\nwasm memory limit: {WasmMemoryLimits.Expected}\ncode generation check: {CodeGenChecks.Expected}\nentry context: {EntryContexts.Expected}\nimmutable global prototype: {ImmutableGlobals.Expected}\nimmutable prototype: {ImmutablePrototypes.Expected}\ninterceptors: {InterceptorObjects.Expected}\nprototype setup: {PrototypeSetups.Expected}\nfunction script id: {FunctionScriptIds.Expected}\nstring arena: {StringArenas.Expected}\nhandles and calls: {HandlesAndCalls.Expected}\ninterceptor tables: {InterceptorTables.Expected}\ninterceptor table guards: {InterceptorTableGuards.Expected}\ncode generation host check: {CodeGenHostChecks.Expected}\ncode-like sources: {CodeLikeSources.Expected}\ncalls in a context: {CallsInContext.Expected}\nimmutable prototype by handle: {ImmutablePrototypesByHandle.Expected}\nproxy kind and target: {ProxyKinds.Expected}\nimport host scheduler: {ImportHostSchedulers.Expected}\nnamed host interceptors: {NamedHostInterceptors.Expected}\ntable queries: {TableQueries.Expected}\nsecurity tokens: {SecurityTokens.Expected}\ncode-like objects: {CodeLikeObjects.Expected}\nsealed read-only space: {SealedReadOnlySpace.Expected}\nrecording functions: {RecordingFunctions.Expected}\ndirect calls in place: {DirectCallsInPlace.Expected}\ntyped calls: {TypedCalls.Expected}\nwatched objects: {WatchedObjects.Expected}\nstring arena limits: {ArenaLimits.Expected}\ncollect once: {CollectOnce.Expected}\npage environment: {PageEnvironment.Expected}\nisolate lifetimes: {IsolateLifetimes.Expected}\nruntimes side by side: {RuntimesSideBySide.Expected}\ncreator workers: {CreatorWorkers.Expected}");
 return 1;
 
 // patches/clearscript/0012: an import() in code a kept script made (a Function's, here called from the host, outside any
@@ -2990,6 +2992,33 @@ static unsafe class PageEnvironment
     }
 }
 
+// A check's child process that does not end clean: its exit code and the last lines of its error stream (V8's last
+// words, and the progress lines of the isolate lifetimes child) on this process's error stream. The children's streams
+// are read whole and were dropped: ssrs2.33's build lost its three win-x86 children with nothing but 0x4000001F.
+static class Children
+{
+    public static void Report(string check, int index, int code, Task<string> errors)
+    {
+        if (code == 0) return;
+        string text;
+        try { text = errors.Wait(10_000) ? errors.Result : "(its error stream did not end)"; }
+        catch (Exception e) { text = $"(its error stream: {e.GetType().Name})"; }
+        var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Console.Error.WriteLine($"{check}: child {index + 1} ended with {code} (0x{code:X8}); the last lines of its error stream:\n{(lines.Length == 0 ? "(it wrote nothing)" : string.Join("\n", lines.Skip(Math.Max(0, lines.Length - 40))))}");
+    }
+
+    /// <summary>This process's memory, threads and handles, for a progress line (never a reason to fail).</summary>
+    public static string Memory()
+    {
+        try
+        {
+            using var self = Process.GetCurrentProcess();
+            return $"private {self.PrivateMemorySize64 >> 20} MB, virtual {self.VirtualMemorySize64 >> 20} MB, working set {self.WorkingSet64 >> 20} MB, {self.Threads.Count} threads, {self.HandleCount} handles";
+        }
+        catch (Exception e) { return e.GetType().Name; }
+    }
+}
+
 // patches/clearscript/0050, 0052, 0053 and 0054: the tasks V8 posts to an isolate while it is made or torn down. V8 posts
 // from wherever it is, under its own locks: its WebAssembly code collection (WasmEngine::TriggerGC) posts a task to
 // every isolate it knows, from inside an isolate's initialization until its disposal, while it holds the process's
@@ -3009,8 +3038,12 @@ static class IsolateLifetimes
 {
     public const string Expected = "children 0,0,0";
     const string ChildVariable = "SSRS2_SMOKE_ISOLATE_LIFETIMES_CHILD";
-    // (SSRS2_SMOKE_ISOLATE_SECONDS: how long each of the three children runs, 20 s by default; the release's test jobs
-    // ask for 100 on the platforms that are not emulated: five minutes of it on each)
+    // (what each of the child's runtimes runs: the wasm module below when unset, "js" a loop of plain JavaScript,
+    // "none" nothing; and SSRS2_SMOKE_ISOLATE_THREADS, the child's threads, 8 when unset: for a try's variants)
+    const string ScriptVariable = "SSRS2_SMOKE_ISOLATE_SCRIPT";
+    // (SSRS2_SMOKE_ISOLATE_SECONDS: how long each child runs, this check's three and the two of "runtimes side by
+    // side", 20 s by default; the release's test jobs ask for 100 on the platforms that are not emulated: eight
+    // minutes of it on each)
     static readonly int Seconds = int.TryParse(Environment.GetEnvironmentVariable("SSRS2_SMOKE_ISOLATE_SECONDS"), out var s) && s > 0 ? s : 20;
     // (export add(i32, i32) -> i32; instantiated twelve times and called until it is optimized, so that code dies)
     const string Script = "const b = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);"
@@ -3019,27 +3052,34 @@ static class IsolateLifetimes
     /// <summary>Whether this process is one trial's child: the program then runs this check alone.</summary>
     public static bool IsChild => Environment.GetEnvironmentVariable(ChildVariable) == "1";
 
-    public static string Check()
+    public static string Check() => Run("isolate lifetimes", 3, "--stress-wasm-code-gc", null) ?? Expected;
+
+    /// <summary>The children's exit codes: so many children one after the other, each this check's child under the
+    /// given V8 flags and running the given script (null: the wasm module), null when the check is not run (under
+    /// emulation).</summary>
+    public static string? Run(string check, int children, string? flags, string? script)
     {
-        if (Environment.GetEnvironmentVariable("SSRS2_SMOKE_EMULATED") == "1") return Expected;
+        if (Environment.GetEnvironmentVariable("SSRS2_SMOKE_EMULATED") == "1") return null;
         var empty = Directory.CreateTempSubdirectory("isolate-lifetimes-");
         try
         {
             var codes = new List<int>();
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < children; i++)
             {
                 var start = new ProcessStartInfo(Environment.ProcessPath!) { RedirectStandardOutput = true, RedirectStandardError = true };
                 start.ArgumentList.Add(typeof(IsolateLifetimes).Assembly.Location);
                 start.ArgumentList.Add(empty.FullName);
                 start.ArgumentList.Add(nameof(IsolateLifetimes));
                 start.Environment[ChildVariable] = "1";
-                start.Environment["SSRS2_V8_FLAGS"] = "--stress-wasm-code-gc";
+                if (flags != null) start.Environment["SSRS2_V8_FLAGS"] = flags;
+                if (script != null) start.Environment[ScriptVariable] = script;
                 using var child = Process.Start(start)!;
                 var output = child.StandardOutput.ReadToEndAsync();
                 var errors = child.StandardError.ReadToEndAsync();
-                if (!child.WaitForExit((Seconds + 100) * 1000)) { child.Kill(true); codes.Add(-1); continue; }
+                if (!child.WaitForExit((Seconds + 100) * 1000)) { child.Kill(true); codes.Add(-1); Children.Report(check, i, -1, errors); continue; }
                 output.Wait(); errors.Wait();
                 codes.Add(child.ExitCode);
+                Children.Report(check, i, child.ExitCode, errors);
             }
             return "children " + string.Join(",", codes);
         }
@@ -3051,26 +3091,54 @@ static class IsolateLifetimes
     {
         long done = 0;
         var until = DateTime.UtcNow.AddSeconds(Seconds);
-        var threads = Enumerable.Range(0, 8).Select(_ => new Thread(() =>
+        int count = int.TryParse(Environment.GetEnvironmentVariable("SSRS2_SMOKE_ISOLATE_THREADS"), out var n) && n > 0 ? n : 8;
+        string script = Environment.GetEnvironmentVariable(ScriptVariable) switch
+        {
+            "js" => "let t = 0; for (let k = 0; k < 12; k++) { const f = new Function('a', 'b', 'return a + b'); for (let j = 0; j < 4000; j++) t = f(t, 1); } t",
+            "none" => "",
+            _ => Script,
+        };
+        Console.Error.WriteLine($"{count} threads, script: {(script.Length == 0 ? "none" : script == Script ? "wasm" : "js")}");
+        var threads = Enumerable.Range(0, count).Select(_ => new Thread(() =>
         {
             while (DateTime.UtcNow < until)
             {
-                using (var engine = new V8ScriptEngine()) engine.Evaluate(Script);
+                using (var engine = new V8ScriptEngine()) { if (script.Length != 0) engine.Evaluate(script); }
                 Interlocked.Increment(ref done);
             }
         }) { IsBackground = true }).ToList();
         threads.ForEach(t => t.Start());
-        long seen = -1; var still = DateTime.UtcNow;
+        long seen = -1; var still = DateTime.UtcNow; var started = DateTime.UtcNow; int ticks = 0;
         while (threads.Any(t => t.IsAlive))
         {
             Thread.Sleep(500);
             long now = Interlocked.Read(ref done);
+            // (every 5 s on the error stream, where V8 writes its last words too: the parent shows a child's last
+            // lines when it does not end clean)
+            if (++ticks % 10 == 0) Console.Error.WriteLine($"{(DateTime.UtcNow - started).TotalSeconds:F0} s: {now} runtimes, {Children.Memory()}");
             if (now != seen) { seen = now; still = DateTime.UtcNow; }
             // (its threads cannot be freed: the process ends here)
             else if (DateTime.UtcNow - still > TimeSpan.FromSeconds(30)) Environment.Exit(3);
         }
         return Interlocked.Read(ref done) > 0 ? 0 : 2;
     }
+}
+
+// patches/v8/0009: a 32-bit Windows process whose threads made runtimes side by side died at a runtime's start ("Fatal
+// JavaScript out of memory: GC during deserialization", exit code 0x4000001F) with its address space nearly empty,
+// every release's win-x86 library up to ssrs2.32. An isolate allocates the first page of its C++ heap while it is
+// initialized (its default microtask queue), with no address hint; V8's aligned allocation on Windows frees a padded
+// region and allocates again inside it; two isolates starting together ask for the same lowest free region, and after
+// three lost races that heap asks for a garbage collection, fatal then. No script is needed and none is run here,
+// which brings the runtimes' starts several times closer together than the isolate lifetimes check's: eight threads
+// each making a runtime and disposing it, in two child processes one after the other (that check's child, told to run
+// no script, for as long: 20 s, 100 in the release's test jobs). Two children's exit codes; 0: it ran clean. Not run
+// under emulation, as that check is not.
+static class RuntimesSideBySide
+{
+    public const string Expected = "children 0,0";
+
+    public static string Check() => IsolateLifetimes.Run("runtimes side by side", 2, null, "none") ?? Expected;
 }
 
 // patches/clearscript/0055: a worker task goes to the host's thread pool whoever posts it, except from a thread the
@@ -3112,9 +3180,10 @@ static unsafe class CreatorWorkers
                 using var child = Process.Start(start)!;
                 var output = child.StandardOutput.ReadToEndAsync();
                 var errors = child.StandardError.ReadToEndAsync();
-                if (!child.WaitForExit(300_000)) { child.Kill(true); codes.Add(-1); continue; }
+                if (!child.WaitForExit(300_000)) { child.Kill(true); codes.Add(-1); Children.Report("creator workers", i, -1, errors); continue; }
                 output.Wait(); errors.Wait();
                 codes.Add(child.ExitCode);
+                Children.Report("creator workers", i, child.ExitCode, errors);
             }
             return "children " + string.Join(",", codes);
         }

@@ -1,0 +1,54 @@
+diff --git a/src/base/platform/platform-win32.cc b/src/base/platform/platform-win32.cc
+index ca1990b019b..3b64552397a 100644
+--- a/src/base/platform/platform-win32.cc
++++ b/src/base/platform/platform-win32.cc
+@@ -960,10 +960,48 @@ void* AllocateInternal(void* hint, size_t size, size_t alignment,
+   // Clear the hint. It's unlikely we can allocate at this address.
+   hint = nullptr;
+ 
++  // SSRS2: where Windows aligns an allocation itself (VirtualAlloc2's address
++  // requirements, Windows 10 1803), ask it to: one call, no window. The
++  // trimming below frees its padded region and allocates again inside it, and
++  // another thread's allocation may take that region in between (the second
++  // allocation then fails with ERROR_INVALID_ADDRESS); after three lost races
++  // it gave up, in an address space that was nearly empty. V8's heap pages
++  // come with a random hint and a second try (AllocatePages); a page of the
++  // C++ heap (cppgc: 128 KB aligned to 128 KB) is asked with no hint and
++  // once, and in a 32-bit process each is an allocation of its own (64-bit
++  // builds carve them from a cage). An isolate allocates its first one while
++  // it is initialized (its default microtask queue, before its spaces exist),
++  // and cppgc answers a page it cannot have by asking for a garbage
++  // collection, fatal then: "Fatal JavaScript out of memory: GC during
++  // deserialization". A 32-bit process whose threads made isolates side by
++  // side died of it, about once in twenty thousand isolates, with 334 MB of
++  // its 2 GB in use.
++  // (VirtualAlloc2 is looked up here: otherwise only a VirtualAddressSpace's
++  // constructor does, which an isolate reaches later than its first page)
++  OS::EnsureWin32MemoryAPILoaded();
++  if (VirtualAlloc2) {
++    MEM_ADDRESS_REQUIREMENTS requirements = {};
++    requirements.Alignment = alignment;
++    MEM_EXTENDED_PARAMETER parameter = {};
++    parameter.Type = MemExtendedParameterAddressRequirements;
++    parameter.Pointer = &requirements;
++    base = reinterpret_cast<uint8_t*>(VirtualAlloc2(
++        GetCurrentProcess(), nullptr, size, flags, protect, &parameter, 1));
++    if (base != nullptr) {
++      if (IsAligned(reinterpret_cast<uintptr_t>(base), alignment)) {
++        return reinterpret_cast<void*>(base);
++      }
++      CHECK(VirtualFree(base, 0, MEM_RELEASE));
++    }
++    // (refused, an alignment it does not take for instance: the trimming)
++  }
++
+   // Add the maximum misalignment so we are guaranteed an aligned base address
+   // in the allocated region.
+   size_t padded_size = size + (alignment - page_size);
+-  const int kMaxAttempts = 3;
++  // SSRS2: 3 attempts upstream. A lost race is no sign of a lack of memory
++  // (the padded allocation has just succeeded): try on.
++  const int kMaxAttempts = 64;
+   aligned_base = nullptr;
+   for (int i = 0; i < kMaxAttempts; ++i) {
+     base = VirtualAllocWithHint(padded_size, flags, protect, hint);

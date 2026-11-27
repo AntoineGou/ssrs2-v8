@@ -70,7 +70,21 @@ V8 keeps one only for a call without options and formats numbers with a copy of 
 microseconds a call). `SeedRandom(context, seed)`: `Math.random` a context's own xorshift128 (four 32-bit words, each
 double made of two draws: the generator SSRS2's .NET side draws alike), a context never seeded drawing as from seed 0.
 The clock, the zone and the locale are the isolate's (one document runs in an isolate at a time, its frames with it);
-the seed is a context's. SSRS2's own changes (`0002`):
+the seed is a context's. Then `0009-windows-aligned-allocation.patch`: on Windows an aligned allocation whose first
+attempt comes back misaligned is asked of the system in one call (`VirtualAlloc2` with an address requirement, Windows
+10 1803); where that function is missing the old way is tried 64 times, not 3. V8 allocated a padded region, freed it
+and allocated again at the aligned address inside it ("We might not get the reduced allocation due to a race"): another
+thread's allocation takes the freed region, and after three lost races the allocation failed in an address space that
+was nearly empty. V8's heap pages come with a random hint and a second try; a page of the C++ heap (cppgc: 128 KB
+aligned to 128 KB) is asked with no hint and once, and a 32-bit process takes each from the system (64-bit builds carve
+them from a cage reserved once, and POSIX trims a padded mapping in place). An isolate allocates its first such page
+while it is initialized (`MicrotaskQueue::SetUpDefaultMicrotaskQueue`, before its heap's spaces exist), cppgc answers a
+page it cannot have by asking the heap for a garbage collection, and a collection before the snapshot is deserialized
+is fatal: `Fatal JavaScript out of memory: GC during deserialization`, the process gone with 0x4000001F. Every
+release's win-x86 library up to ssrs2.32 died so when two threads made runtimes at the same time, with a sixth of its
+2 GB in use and 16 GB of commit to take (the free address space read every 5 ms: 1.6 GB before each death): no script
+is needed, a lock around the runtimes' creation is enough to stop it (none dead in 521,000 runtimes), and no V8 flag
+is (`--no-memory-pool`, `--single-threaded`, `--no-large-page-pool`). SSRS2's own changes (`0002`):
 
 - Local time is UTC once the embedder gives V8 its ICU data (a server prints in UTC), and a date's fields are worked out
   without a time zone.
@@ -290,7 +304,17 @@ through SSRS2's engine crashed it after 1.5 minutes; with the four patches that 
 flag (368,547 documents: the count follows what else the machine runs, and ssrs2.32's library made 370,727 the same
 afternoon) and thirty without it (1,101,097), and SSRS2's engine is as fast with it as with ssrs2.32's library in the
 same minutes: 12.21 documents a second against 12.13 on a stream of 55 real pages on eight threads, 123.9 ms against
-123.9 for 17 documents one at a time (two runs each). The check is not run under emulation (`SSRS2_SMOKE_EMULATED=1`, set by the workflow's linux-arm job). For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+123.9 for 17 documents one at a time (two runs each). The check is not run under emulation (`SSRS2_SMOKE_EMULATED=1`, set by the workflow's linux-arm job).
+A child of these checks that does not end clean now says what it wrote: its exit code and the last lines of its error
+stream, V8's last words among them, and the isolate lifetimes child writes a line every 5 s (its runtimes, memory,
+threads and handles). For `patches/v8/0009`, `test/Smoke` runs that child with no script, "runtimes side by side":
+eight threads each making a runtime and disposing it, in two child processes, for as long (20 s, 100 in the test
+jobs), which starts runtimes several times closer together. ssrs2.32's win-x86 library lost 28 of 32 such children on
+two to sixteen threads, most within ten seconds, and 10 of 15 children of the isolate lifetimes loop (its own build
+ran them 20 s and passed); with the patch 42 children of 100 s lived, 24 with no script on 2, 4, 8 and 16 threads, 12
+of the isolate lifetimes loop under the flag and 6 running plain JavaScript: 6.8 million runtimes (windows-2022, x86
+.NET 8, 2026-11-27). `SSRS2_SMOKE_ISOLATE_THREADS` and `SSRS2_SMOKE_ISOLATE_SCRIPT` (`js`, `none`) vary that child for a
+try. For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
 `entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
 non-configurable value and an undetectable one and a non-masking one asked for the missing names alone, a used
 prototype's accessors redefined in setup mode and found again, and two functions' script ids.

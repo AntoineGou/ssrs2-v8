@@ -108,8 +108,8 @@ jobs:
           - { rid: win-arm64, runner: windows-11-arm }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
-    # (the isolate lifetimes check's three children run 100 s each here, five minutes on each platform that is not
-    # emulated, where a developer's run takes a minute)
+    # (the isolate lifetimes check's three children and "runtimes side by side"'s two run 100 s each here, eight
+    # minutes on each platform that is not emulated, where a developer's run takes under two)
     env:
       SSRS2_SMOKE_ISOLATE_SECONDS: 100
     steps:
