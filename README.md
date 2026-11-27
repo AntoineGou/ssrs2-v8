@@ -267,12 +267,30 @@ of its constructor; a thread-pool thread ran a posted task inside an isolate who
 thread pool when it is the last (`RefCount::DecrementUnlessLast`); the isolate was otherwise torn down on the posting
 thread, under the same mutex, where the teardown ran the task just queued (the same deadlock another way).
 `0054-isolate-owned-until-its-creator.patch`: an isolate's constructor keeps one count until its creator's handle holds
-its own; in between, the last temporary reference let go destroyed the new isolate under its creator. `test/Smoke` runs,
+its own; in between, the last temporary reference let go destroyed the new isolate under its creator.
+`0055-worker-task-never-run-by-its-poster.patch`, a fifth in the same code: a worker task posted from a thread the host
+knows goes to the host's thread pool, as V8's own platform hands every worker task to another thread. ClearScript ran it
+at once inside the post in two cases: when no isolate is current on the posting thread (a thread running one of V8's
+background tasks or jobs, which posts the next: once or twice a document through SSRS2's engine, 512 to 1,023 times in
+495 documents on eight threads), and when the isolate it is posted through is being torn down (never seen taken). Run
+there, the task ran under whatever its poster held, as 0050's did, and a job's second worker ran inside its first
+instead of beside it; no deadlock or crash was traced to either case. One kind of thread keeps the old way: the host is
+called through a method table it gives a thread for the length of each call it makes into the library, a thread the
+library starts itself has none, and the snapshot creator's worker tasks (0027) run on such threads and post their job's
+next workers from them; there the task is run in place. A first form of the patch asked the host from those threads too
+and read a null table: a process dead while it made its snapshot. `test/Smoke` makes a snapshot, in three child
+processes, from a heap of 16,000 chains of nine WeakMap entries, each entry's value the next one's key, whose marking
+before the blob is written starts workers again at every level: that first form died in 27 of 40 such children (macOS
+arm64, 2026-11-27), ssrs2.32's library and the patch as it stands in none of 40. `test/Smoke` also runs,
 in three child processes under `--stress-wasm-code-gc`, eight threads that each make a runtime, compile and run a small
-module in it and dispose it, for 20 s: ssrs2.31's library deadlocked in each of the three within seconds (macOS arm64,
-2026-11-26), and without the flag the same loop through SSRS2's engine crashed it after 1.5 minutes; with the four
-patches that loop ran ten minutes under the flag (61,592 documents) and thirty without it (288,460), no crash and no
-hang. The check is not run under emulation (`SSRS2_SMOKE_EMULATED=1`, set by the workflow's linux-arm job). For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
+module in it and dispose it, for 20 s (`SSRS2_SMOKE_ISOLATE_SECONDS`; 100 s in this repository's test jobs): ssrs2.31's
+library deadlocked in each of the three within seconds (macOS arm64, 2026-11-26), and without the flag the same loop
+through SSRS2's engine crashed it after 1.5 minutes; with the four patches that loop ran ten minutes under the flag
+(61,592 documents) and thirty without it (288,460), no crash and no hang; with the fifth as well, ten minutes under the
+flag (368,547 documents: the count follows what else the machine runs, and ssrs2.32's library made 370,727 the same
+afternoon) and thirty without it (1,101,097), and SSRS2's engine is as fast with it as with ssrs2.32's library in the
+same minutes: 12.21 documents a second against 12.13 on a stream of 55 real pages on eight threads, 123.9 ms against
+123.9 for 17 documents one at a time (two runs each). The check is not run under emulation (`SSRS2_SMOKE_EMULATED=1`, set by the workflow's linux-arm job). For 0019 to 0025 `test/Smoke` checks each: a direct eval keeping its scope and refused strings under a check,
 `entryGlobal()` in a job calling another context's function, a global made immutable beside an ordinary one, an existing prototype locked, and an interceptor object defining a
 non-configurable value and an undetectable one and a non-masking one asked for the missing names alone, a used
 prototype's accessors redefined in setup mode and found again, and two functions' script ids.
